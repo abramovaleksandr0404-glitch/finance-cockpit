@@ -1,7 +1,8 @@
 {
-  "buildCommand": "npm run build",
-  "outputDirectory": ".next",
-  "installCommand": "npm install",
-  "framework": "nextjs",
-  "regions": ["fra1"]
+  "crons": [
+    {
+      "path": "/api/cron/morning",
+      "schedule": "0 5 * * *"
+    }
+  ]
 }
