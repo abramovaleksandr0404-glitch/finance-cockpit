@@ -54,7 +54,7 @@ export async function getContext(): Promise<string> {
   const qStartKey = `${now.getFullYear()}-${String(qStartMonth).padStart(2,'0')}`
   const qEndKey = `${now.getFullYear()}-${String(qStartMonth + 2).padStart(2,'0')}`
 
-  const [{data:user},{data:loans},{data:expenses},{data:month},{data:goals},{data:recentExp},{data:quarterMonths}] = await Promise.all([
+  const [{data:user},{data:loans},{data:expenses},{data:month},{data:goals},{data:recentExp},{data:quarterMonths},{data:cards},{data:incomeEvents}] = await Promise.all([
     supabase.from('users').select('*').eq('id',USER_ID).single(),
     supabase.from('loans').select('id,name,principal,accrued_int,min_payment,end_date,rate,paid_month,due_day').eq('user_id',USER_ID).order('sort_order'),
     supabase.from('expenses').select('id,amount,category,description,expense_date').eq('user_id',USER_ID).eq('month_key',monthKey),
@@ -62,6 +62,8 @@ export async function getContext(): Promise<string> {
     supabase.from('goals').select('id,name,amount,month_key,purchased').eq('user_id',USER_ID).eq('purchased',false).limit(6),
     supabase.from('expenses').select('id,category,amount,description,expense_date').eq('user_id',USER_ID).eq('month_key',monthKey).order('created_at',{ascending:false}).limit(5),
     supabase.from('months').select('month_key,clients,revenue').eq('user_id',USER_ID).gte('month_key',qStartKey).lte('month_key',qEndKey),
+    supabase.from('cards').select('name,card_limit,current_debt').eq('user_id',USER_ID).order('sort_order'),
+    supabase.from('income_events').select('event_date,description,amount').eq('user_id',USER_ID).eq('month_key',monthKey),
   ])
   if (!user) return 'Данные не загружены'
 
@@ -75,9 +77,16 @@ export async function getContext(): Promise<string> {
   const bonusAmount = Number(month?.bonus_amount ?? 25010)
   const advReceived = !!month?.salary_adv_received
   const eomReceived = !!month?.salary_eom_received
-  const incomingTotal = (advReceived ? 0 : advAmount) + (eomReceived ? 0 : eomAmount + bonusAmount)
 
-  const fixedCosts = (user.fixed_costs as {name:string;amount:number}[]) ?? []
+  // ── Recurring incomes (стипендия и т.п.) ─────────────────────
+  const recurringIncomes = (user.recurring_incomes as {name:string;amount:number;day:number}[]) ?? []
+  const today = now.getDate()
+  const pendingRecurring = recurringIncomes.filter(r => r.day >= today)
+  const pendingRecurringTotal = pendingRecurring.reduce((s,r)=>s+r.amount, 0)
+  
+  const incomingTotal = (advReceived ? 0 : advAmount) + (eomReceived ? 0 : eomAmount + bonusAmount) + pendingRecurringTotal
+
+  const fixedCosts = (user.fixed_costs as {name:string;amount:number;day?:number}[]) ?? []
   const fixedPaid = (month?.fixed_paid as Record<string,number|boolean>) ?? {}
   const fixedTotal = fixedCosts.reduce((s,f)=>s+f.amount,0)
   let fixedPaidSum = 0
@@ -88,7 +97,6 @@ export async function getContext(): Promise<string> {
   const varSpent = (expenses ?? []).reduce((s,e) => s+Number(e.amount), 0)
   const varLeft = Math.max(0, varBudget - varSpent)
 
-  const today = now.getDate()
   const daysInMonth = new Date(now.getFullYear(), now.getMonth()+1, 0).getDate()
   const daysLeft = daysInMonth - today + 1
   const dailyBudget = Math.round(varLeft / Math.max(1, daysLeft))
@@ -96,9 +104,10 @@ export async function getContext(): Promise<string> {
   const pendingLoanPayments = (loans ?? []).filter(l => l.paid_month !== monthKey).reduce((s,l) => s+Number(l.min_payment), 0)
   const totalDebt = (loans ?? []).reduce((s,l) => s+Number(l.principal)+Number(l.accrued_int), 0)
   const totalMonthlyPayment = (loans ?? []).reduce((s,l) => s+Number(l.min_payment), 0)
+  // Прогноз остатка = текущий баланс + все будущие поступления − все обязательные расходы − переменные до лимита
   const projEnd = liquid + incomingTotal - pendingLoanPayments - fixedUnpaid - varLeft
 
-  // ── Бонус — детальный расчёт ─────────────────────────────────
+  // Бонус
   const nominals = (user.nominals as Record<string,number>) ?? {}
   const clients = (month?.clients as Record<string,number>) ?? {}
   const revenue = Number(month?.revenue ?? 41666)
@@ -113,15 +122,13 @@ export async function getContext(): Promise<string> {
   const excess = Math.max(0, pot - threshold)
   const moment = excess * momentShare
   const annual = excess * (1 - momentShare)
-  const bonusNet = Math.round(moment * (1 - r1))
+  const bonusJulNet = Math.round(moment * (1 - r1))
 
-  // Квартальная агрегация
+  // Квартал
   const quarterClients: Record<string,number> = {}
-  let quarterRevenue = 0
   for (const m of quarterMonths ?? []) {
     const c = m.clients as Record<string,number> ?? {}
     for (const [g,n] of Object.entries(c)) quarterClients[g] = (quarterClients[g]??0) + Number(n)
-    quarterRevenue += Number(m.revenue ?? 0)
   }
   const qClientCount = Object.values(quarterClients).reduce((s,n)=>s+n, 0)
   const qMult = qClientCount >= 3 ? qm3 : qClientCount === 2 ? qm2 : 0
@@ -130,13 +137,16 @@ export async function getContext(): Promise<string> {
   const qBonusNet = Math.round(qBonusGross * (1 - r1))
 
   const recentLines = (recentExp ?? []).map(e => `  • ${e.expense_date} ${e.category}: ${rub(Number(e.amount))}${e.description?' — '+e.description:''}`).join('\n') || '  (нет)'
-  const fixedLines = fixedCosts.map((f,i) => `  • ${f.name}: ${rub(f.amount)} ${fixedPaid[String(i)] ? '✅' : '⏳'}`).join('\n')
+  const fixedLines = fixedCosts.map((f,i) => `  • ${f.name}${f.day?` (${f.day} числа)`:''}: ${rub(f.amount)} ${fixedPaid[String(i)] ? '✅ оплачено' : '⏳'}`).join('\n')
   const goalLines = (goals ?? []).map(g => `  • ${g.name}: ${rub(Number(g.amount))} ${g.month_key ? '('+g.month_key+')' : '(накопление)'}`).join('\n') || '  (нет)'
   const loanLines = (loans ?? []).map(l => {
     const total = Number(l.principal) + Number(l.accrued_int)
     const paid = l.paid_month === monthKey ? '✅' : '⏳'
     return `  • ${l.name}: ${rub(total)} @ ${(Number(l.rate)*100).toFixed(2)}% — ${rub(Number(l.min_payment))}/мес ${paid}`
   }).join('\n')
+  const cardLines = (cards ?? []).map(c => `  • ${c.name}: лимит ${rub(Number(c.card_limit))}, долг ${rub(Number(c.current_debt))}, доступно ${rub(Number(c.card_limit) - Number(c.current_debt))}`).join('\n') || '  (нет)'
+  const recurringLines = recurringIncomes.map(r => `  • ${r.name}: ${rub(r.amount)} (${r.day} числа каждого месяца)`).join('\n') || '  (нет)'
+  const incomeEventLines = (incomeEvents ?? []).map(e => `  • ${e.event_date}: ${e.description}: ${rub(Number(e.amount))}`).join('\n') || '  (нет в этом месяце)'
 
   return `=== ФИНАНСОВЫЙ КОНТЕКСТ ===
 ДАТА: ${now.toLocaleDateString('ru-RU',{weekday:'long',day:'numeric',month:'long',year:'numeric'})}
@@ -147,45 +157,59 @@ export async function getContext(): Promise<string> {
 
 БАЛАНС:
   Дебет Сбер: ${rub(debitSber)}
-  Т-Банк: ${rub(debitTbank)}
-  ЛИКВИДНОСТЬ: ${rub(liquid)}
+  Т-Банк дебет: ${rub(debitTbank)}
+  ЛИКВИДНОСТЬ ИТОГО: ${rub(liquid)}
 
-ПЕРЕМЕННЫЕ:
-  Лимит: ${rub(varBudget)} (выставлен вручную)
+КРЕДИТНЫЕ КАРТЫ:
+${cardLines}
+
+ПЕРЕМЕННЫЕ ТРАТЫ:
+  Лимит: ${rub(varBudget)} (выставлен пользователем вручную)
   Потрачено: ${rub(varSpent)} (${pct(varSpent,varBudget)}%)
   Осталось: ${rub(varLeft)}
-  Дневной бюджет: ${rub(dailyBudget)}/день
+  Дневной бюджет: ${rub(dailyBudget)}/день  [формула: осталось ÷ дней до конца месяца]
 
-КЕШФЛОУ МЕСЯЦА:
-  ВХОДЫ (ожидается ${rub(incomingTotal)}):
-    Аванс ${advReceived?'✅ получен':`⏳ ${rub(advAmount)} (15-го)`}
-    ЗП ${eomReceived?'✅':`⏳ ${rub(eomAmount)}`} + Бонус ${eomReceived?'✅':`⏳ ${rub(bonusAmount)}`} (30-го)
-  ВЫХОДЫ:
-    Кредиты неоплаченные: ${rub(pendingLoanPayments)}
-    Постоянные неоплаченные: ${rub(fixedUnpaid)} из ${rub(fixedTotal)}
-    Переменные до лимита: ${rub(varLeft)}
-  ПРОГНОЗ ОСТАТКА К КОНЦУ МЕСЯЦА: ${rub(projEnd)}
+=== КЕШФЛОУ ИЮНЯ ===
+ВХОДЫ (всего ожидается ${rub(incomingTotal)}):
+  Аванс ${advReceived?'✅ получен':`⏳ ${rub(advAmount)} (15-го)`}
+  ЗП ${eomReceived?'✅':`⏳ ${rub(eomAmount)}`} + Бонус ${eomReceived?'✅':`⏳ ${rub(bonusAmount)}`} (30-го)
+${pendingRecurring.map(r => `  ${r.name} ⏳ ${rub(r.amount)} (${r.day}-го)`).join('\n') || '  (нет ещё не полученных регулярных)'}
 
-КРЕДИТЫ (всего ${rub(totalDebt)}, платёж ${rub(totalMonthlyPayment)}/мес):
+ВЫХОДЫ:
+  Кредиты неоплаченные: ${rub(pendingLoanPayments)} [платёж 4 кредитов]
+  Постоянные неоплаченные: ${rub(fixedUnpaid)} из ${rub(fixedTotal)}
+  Переменные ещё доступно до лимита: ${rub(varLeft)}
+  ИТОГО к списанию: ${rub(pendingLoanPayments + fixedUnpaid + varLeft)}
+
+ПРОГНОЗ ОСТАТКА К 30-го ИЮНЯ: ${rub(projEnd)}
+  [формула: ликвидность ${rub(liquid)} + входы ${rub(incomingTotal)} − кредиты ${rub(pendingLoanPayments)} − постоянные ${rub(fixedUnpaid)} − переменные до лимита ${rub(varLeft)} = ${rub(projEnd)}]
+
+=== КРЕДИТЫ (всего ${rub(totalDebt)}, платёж ${rub(totalMonthlyPayment)}/мес) ===
 ${loanLines}
 
-ПОСТОЯННЫЕ (всего ${rub(fixedTotal)}, оплачено ${rub(fixedPaidSum)}):
+=== ПОСТОЯННЫЕ (всего ${rub(fixedTotal)}, оплачено ${rub(fixedPaidSum)}) ===
 ${fixedLines}
 
-ПОСЛЕДНИЕ ПЕРЕМЕННЫЕ:
+=== РЕГУЛЯРНЫЕ ДОХОДЫ ===
+${recurringLines}
+
+=== ПОСЛЕДНИЕ ПЕРЕМЕННЫЕ ТРАТЫ ===
 ${recentLines}
 
-ЦЕЛИ:
+=== ДОХОДНЫЕ СОБЫТИЯ ИЮНЯ (отпускные, премии и т.п.) ===
+${incomeEventLines}
+
+=== ЦЕЛИ ===
 ${goalLines}
 
-=== БОНУС ИЮНЯ (моментальный) ===
+=== БОНУС ИЮНЯ (выплачивается в июле) ===
   Клиенты месяца: ${JSON.stringify(clients)}
   Выручка: ${rub(revenue)}
   Котёл = клиенты×номинал + ${(marginShare*100).toFixed(0)}%×выручка = ${rub(clientPot)} + ${rub(revenue*marginShare)} = ${rub(pot)}
   Порог: ${rub(threshold)} → сверхпорог: ${rub(excess)}
-  Момент (выплата след. месяц): ${rub(moment)} = ${(momentShare*100).toFixed(0)}% от сверхпорога
-  Годовой накопит. (остаток 20%): ${rub(annual)} (для годовой выплаты)
-  Бонус НА РУКИ (НДФЛ 13%): ${rub(bonusNet)}
+  Момент (выплата в июле): ${rub(moment)} = ${(momentShare*100).toFixed(0)}% от сверхпорога
+  Годовой накопит. (20%): ${rub(annual)} → копится на годовую выплату
+  Бонус НА РУКИ (НДФЛ 13%): ${rub(bonusJulNet)}
 
 === КВАРТАЛЬНЫЙ БОНУС (Q${curQuarter} ${qStartKey}…${qEndKey}) ===
   Клиенты квартала: ${JSON.stringify(quarterClients)} (всего ${qClientCount})
@@ -195,10 +219,10 @@ ${goalLines}
   Выплачивается в конце первого месяца следующего квартала
 
 === НАСТРОЙКИ ===
-  Оклад net: ${rub(salaryNet)} | gross: ${rub(Number(user.salary_gross))} | YTD: ${rub(Number(user.ytd_gross))}
-  Порог: ${rub(threshold)} (= ${rub(threshold/marginShare)} выручки или эквивалент в клиентах)
+  Оклад net: ${rub(salaryNet)} | gross: ${rub(Number(user.salary_gross))} | YTD gross: ${rub(Number(user.ytd_gross))}
+  Порог: ${rub(threshold)} (эквивалент ~${rub(threshold/marginShare)} выручки или клиентов на эту сумму номиналов)
   Момент: ${(momentShare*100).toFixed(0)}% → ежемесячный | Годовой остаток: ${((1-momentShare)*100).toFixed(0)}%
-  Марджин: ${(marginShare*100).toFixed(0)}% | НДФЛ: ${(r1*100).toFixed(0)}%
+  Марджин выручки: ${(marginShare*100).toFixed(0)}% | НДФЛ: ${(r1*100).toFixed(0)}%
   Квартальные множители: qm2=${qm2} (при 2 кл), qm3=${qm3} (при ≥3 кл)
   Номиналы: г3=${nominals.g3}, г4=${nominals.g4}, г5-6=${nominals.g56}, г7-8=${nominals.g78}, г9=${nominals.g9}, г10=${nominals.g10}
   Лимит переменных: ${rub(varBudget)}`
@@ -287,6 +311,23 @@ ACTION:{"type":"add_expense","amount":800,"category":"Транспорт","descr
 - undo
 
 Категории: Еда и кафе, Транспорт, Здоровье, Развлечения, Одежда, Инвестиции, Обучение и ИИ, Прочее
+
+ВАЖНО ПРО ПОСТОЯННЫЕ ТРАТЫ:
+Постоянные траты — это просто список с именем и суммой. У них НЕТ "категории".
+Когда добавляешь постоянную трату — пиши только название и сумму. НЕ пиши "Категория: X" — этого поля не существует.
+Пример: "✅ Стрижка добавлена: 2500 ₽/мес. Всего постоянных: 25 498 ₽"
+
+ОБЪЯСНЕНИЕ ФОРМУЛ — обязательно:
+Когда показываешь любой прогноз/расчёт — кратко объясни формулу одной строкой.
+Пример:
+  "Прогноз остатка: 54 171 ₽
+  [формула: ликвидность 8 667 + входы 152 510 − кредиты 44 144 − постоянные 27 062 − переменные до лимита 39 770]"
+
+Если пользователь спросит "как считается X", "почему X", "что это значит" — дай развёрнутое объяснение со ссылкой на исходные цифры из контекста.
+
+РЕГУЛЯРНЫЕ ДОХОДЫ:
+Стипендия 5900₽ приходит 11 числа каждого месяца. Учитывай в прогнозе если сегодня <= 11.
+Если пользователь говорит "получил стипендию" → ACTION add_income_event с amount=5900
 
 ВАЖНО: если задача требует уточнения — НЕ выполняй ACTION, только задай вопрос.`
 
