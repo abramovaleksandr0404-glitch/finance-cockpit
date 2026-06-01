@@ -133,10 +133,12 @@ button, [role="button"] { touch-action: manipulation; -webkit-tap-highlight-colo
 .bottom-nav-item.active span { color: var(--accent-cyan); }
 
 .app-header {
-  position: fixed; top: 0; left: 0; right: 0; height: var(--header-h);
+  position: fixed; top: 0; left: 0; right: 0;
+  height: calc(var(--header-h) + var(--safe-top));
+  padding-top: var(--safe-top);
   background: rgba(8,12,20,0.96); backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px); border-bottom: 1px solid var(--border);
-  z-index: 50; display: flex; align-items: center; padding: 0 16px; gap: 0;
+  z-index: 50; display: flex; align-items: center; padding-left: 16px; padding-right: 16px; gap: 0;
 }
 
 .toast {
@@ -159,7 +161,7 @@ button, [role="button"] { touch-action: manipulation; -webkit-tap-highlight-colo
 
   /* Tab content: correct padding so content is never under header or nav */
   .tab-content {
-    padding-top: calc(var(--header-h) + 16px); /* below fixed header */
+    padding-top: calc(var(--header-h) + var(--safe-top) + 16px); /* below fixed header + iOS notch */
     padding-bottom: calc(var(--nav-h) + var(--safe-bottom) + 24px); /* above fixed nav */
     padding-left: 16px;
     padding-right: 16px;
