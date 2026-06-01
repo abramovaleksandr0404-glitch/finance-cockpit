@@ -163,6 +163,9 @@ const SYSTEM = `Ты — умный персональный финансовы�
 4. "Отмени"/"отменить"/"undo" → откатить последнее действие
 5. Изменения оклада, порогов, формулы → выполни через update_settings
 6. При чтении ИЗОБРАЖЕНИЯ: если чек/квитанция/расход → предложи записать
+7. «получил аванс», «аванс пришёл» → ACTION mark_salary advance (зачислит на дебет)
+8. «получил зарплату», «зп пришла», «получил всё» → ACTION mark_salary eom
+9. «оплатил постоянные», «заплатил коммуналку» → ACTION mark_fixed_paid
 
 ДЕЙСТВИЯ (добавляй в конец ответа одной строкой, пользователю не видно):
 ACTION:{"type":"add_expense","amount":800,"category":"Транспорт","description":"такси"}
@@ -176,18 +179,39 @@ ACTION:{"type":"update_settings","field":"moment_share","value":0.75}
 ACTION:{"type":"update_settings","field":"margin_share","value":0.25}
 ACTION:{"type":"update_settings","field":"var_budget","value":50000}
 ACTION:{"type":"update_settings","field":"nominal","key":"g10","value":90000}
-ACTION:{"type":"update_settings","field":"ytd_gross","value":950000}
+ACTION:{"type":"mark_salary","part":"advance"}
+ACTION:{"type":"mark_salary","part":"eom"}
+ACTION:{"type":"mark_fixed_paid"}
 
 Категории трат: Еда и кафе, Транспорт, Здоровье, Развлечения, Одежда, Инвестиции, Прочее
 Грейды: g3=7200₽, g4=14400₽, g56=21600₽, g78=43200₽, g9=64000₽, g10=80000₽`
 
 // ── Тип действия ─────────────────────────────────────────────────────────
 interface BotAction {
-  type: 'add_expense'|'add_client'|'add_goal'|'undo'|'update_settings'
+  type: 'add_expense'|'add_client'|'add_goal'|'undo'|'update_settings'|'mark_salary'|'mark_fixed_paid'
   amount?: number; category?: string; description?: string
   grade?: string; revenue?: number
   name?: string; month_key?: string|null
   field?: string; key?: string; value?: number | string
+  part?: 'advance'|'eom'
+}
+
+// ── Снапшот перед действием бота (для undo с сайта) ──────────────────────
+async function createSnapshot(label: string): Promise<void> {
+  const supabase = db()
+  const [us, mo, lo, ca, go, ex, ie] = await Promise.all([
+    supabase.from('users').select('*').eq('id', USER_ID).single(),
+    supabase.from('months').select('*').eq('user_id', USER_ID),
+    supabase.from('loans').select('*').eq('user_id', USER_ID),
+    supabase.from('cards').select('*').eq('user_id', USER_ID),
+    supabase.from('goals').select('*').eq('user_id', USER_ID),
+    supabase.from('expenses').select('*').eq('user_id', USER_ID),
+    supabase.from('income_events').select('*').eq('user_id', USER_ID),
+  ])
+  const state = { users: us.data, months: mo.data??[], loans: lo.data??[], cards: ca.data??[], goals: go.data??[], expenses: ex.data??[], income_events: ie.data??[] }
+  await supabase.from('undo_snapshots').insert({ user_id: USER_ID, description: `[бот] ${label}`, snapshot: state })
+  const { data: all } = await supabase.from('undo_snapshots').select('id').eq('user_id', USER_ID).order('created_at', { ascending: false })
+  if (all && all.length > 15) await supabase.from('undo_snapshots').delete().in('id', all.slice(15).map((r: {id:string}) => r.id))
 }
 
 // ── Выполнить действие ────────────────────────────────────────────────────
@@ -195,6 +219,13 @@ export async function executeAction(action: BotAction): Promise<void> {
   const supabase = db()
   const monthKey = mk()
   const today = new Date().toISOString().split('T')[0]
+
+  // Снапшот перед каждым изменяющим действием
+  const snapLabels: Record<string, string> = {
+    add_expense: 'трата', add_client: 'клиент', add_goal: 'цель',
+    update_settings: 'настройки', mark_salary: 'получение зарплаты', undo: 'отмена'
+  }
+  if (snapLabels[action.type]) await createSnapshot(snapLabels[action.type])
 
   if (action.type === 'add_expense' && action.amount) {
     await supabase.from('expenses').insert({
@@ -218,6 +249,48 @@ export async function executeAction(action: BotAction): Promise<void> {
 
   if (action.type === 'add_goal' && action.name && action.amount) {
     await supabase.from('goals').insert({ user_id: USER_ID, name: action.name, amount: Math.round(action.amount), month_key: action.month_key ?? null, sort_order: 99 })
+  }
+
+  if (action.type === 'mark_salary') {
+    const { data: u } = await supabase.from('users').select('debit_balance,salary_net').eq('id', USER_ID).single()
+    const { data: month } = await supabase.from('months').select('*').eq('user_id', USER_ID).eq('month_key', monthKey).maybeSingle()
+    const salaryNet = Number(u?.salary_net ?? 121600)
+
+    if (action.part === 'advance') {
+      // Аванс = 50% от net (или сохранённое значение)
+      const advAmt = Number(month?.salary_adv_amount ?? Math.round(salaryNet / 2))
+      await supabase.from('months').update({ salary_adv_received: true, salary_adv_amount: advAmt }).eq('user_id', USER_ID).eq('month_key', monthKey)
+      const newDebit = Math.round((Number(u?.debit_balance ?? 0) + advAmt) * 100) / 100
+      await supabase.from('users').update({ debit_balance: newDebit, debit_updated_at: new Date().toISOString() }).eq('id', USER_ID)
+    }
+    if (action.part === 'eom') {
+      // Остаток зарплаты + бонус
+      const advAmt = Number(month?.salary_adv_amount ?? Math.round(salaryNet / 2))
+      const eomSalary = Number(month?.salary_eom_amount ?? salaryNet - advAmt)
+      const bonusAmt = Number(month?.bonus_amount ?? 0)
+      const total = eomSalary + bonusAmt
+      await supabase.from('months').update({ salary_eom_received: true, salary_eom_amount: eomSalary }).eq('user_id', USER_ID).eq('month_key', monthKey)
+      const newDebit = Math.round((Number(u?.debit_balance ?? 0) + total) * 100) / 100
+      await supabase.from('users').update({ debit_balance: newDebit, debit_updated_at: new Date().toISOString() }).eq('id', USER_ID)
+    }
+  }
+
+  if (action.type === 'mark_fixed_paid') {
+    // Отметить все постоянные как оплаченные + вычесть из дебета
+    const { data: u } = await supabase.from('users').select('debit_balance,fixed_costs').eq('id', USER_ID).single()
+    const { data: month } = await supabase.from('months').select('fixed_paid').eq('user_id', USER_ID).eq('month_key', monthKey).maybeSingle()
+    const fixedCosts = u?.fixed_costs as {amount:number}[] ?? []
+    const alreadyPaid = month?.fixed_paid as Record<string,boolean|number> ?? {}
+    const fixed_paid: Record<string,number> = {}
+    let totalToPay = 0
+    fixedCosts.forEach((f, i) => {
+      if (!alreadyPaid[String(i)]) { fixed_paid[String(i)] = f.amount; totalToPay += f.amount }
+    })
+    if (totalToPay > 0) {
+      await supabase.from('months').update({ fixed_paid: { ...alreadyPaid, ...fixed_paid } }).eq('user_id', USER_ID).eq('month_key', monthKey)
+      const newDebit = Math.round((Number(u?.debit_balance ?? 0) - totalToPay) * 100) / 100
+      await supabase.from('users').update({ debit_balance: newDebit, debit_updated_at: new Date().toISOString() }).eq('id', USER_ID)
+    }
   }
 
   if (action.type === 'update_settings' && action.field) {
