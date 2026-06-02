@@ -15,6 +15,19 @@ function rub(n: number): string { return Math.round(n).toLocaleString('ru-RU')+'
 function pct(a: number, b: number): number { return b>0 ? Math.round(a/b*100) : 0 }
 function quarterOf(m: number): number { return Math.ceil(m/3) }
 
+// День аванса: 15-е если рабочий, иначе последний рабочий день перед 15-м
+function advanceDay(y: number, m: number): number {
+  const d = new Date(y, m-1, 15)
+  while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate()-1)
+  return d.getDate()
+}
+// Последний рабочий день месяца (для зп+бонуса)
+function lastWorkingDayOfMonth(y: number, m: number): number {
+  const d = new Date(y, m, 0)
+  while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate()-1)
+  return d.getDate()
+}
+
 export async function getHistory(chatId: number) {
   const { data } = await db().from('bot_messages').select('role,content').eq('chat_id', chatId).order('created_at', { ascending: false }).limit(8)
   return (data ?? []).reverse()
@@ -101,11 +114,21 @@ export async function getContext(): Promise<string> {
   const daysLeft = daysInMonth - today + 1
   const dailyBudget = Math.round(varLeft / Math.max(1, daysLeft))
 
+  // Точные даты выплат
+  const advDay = advanceDay(now.getFullYear(), curMonth)
+  const eomDay = lastWorkingDayOfMonth(now.getFullYear(), curMonth)
+
+  // Плановые покупки этого месяца (goals с month_key = текущий, не куплено)
+  const plannedPurchases = (goals ?? []).filter(g => g.month_key === monthKey && !g.purchased)
+  const plannedTotal = plannedPurchases.reduce((s,g) => s+Number(g.amount), 0)
+
   const pendingLoanPayments = (loans ?? []).filter(l => l.paid_month !== monthKey).reduce((s,l) => s+Number(l.min_payment), 0)
   const totalDebt = (loans ?? []).reduce((s,l) => s+Number(l.principal)+Number(l.accrued_int), 0)
   const totalMonthlyPayment = (loans ?? []).reduce((s,l) => s+Number(l.min_payment), 0)
-  // Прогноз остатка = текущий баланс + все будущие поступления − все обязательные расходы − переменные до лимита
+  // Прогноз остатка = баланс + входы − кредиты − постоянные − переменные до лимита
   const projEnd = liquid + incomingTotal - pendingLoanPayments - fixedUnpaid - varLeft
+  // После плановых покупок
+  const projEndAfterPlanned = projEnd - plannedTotal
 
   // Бонус
   const nominals = (user.nominals as Record<string,number>) ?? {}
@@ -171,9 +194,9 @@ ${cardLines}
 
 === КЕШФЛОУ ИЮНЯ ===
 ВХОДЫ (всего ожидается ${rub(incomingTotal)}):
-  Аванс ${advReceived?'✅ получен':`⏳ ${rub(advAmount)} (15-го)`}
-  ЗП ${eomReceived?'✅':`⏳ ${rub(eomAmount)}`} + Бонус ${eomReceived?'✅':`⏳ ${rub(bonusAmount)}`} (30-го)
-${pendingRecurring.map(r => `  ${r.name} ⏳ ${rub(r.amount)} (${r.day}-го)`).join('\n') || '  (нет ещё не полученных регулярных)'}
+  Стипендия ${recurringIncomes.find(r=>r.name==='Стипендия') && today<=11 ? `⏳ ${rub(5900)} (11-го)` : '✅/нет'}
+  Аванс ${advReceived?'✅ получен':`⏳ ${rub(advAmount)} (${advDay}-го)`}
+  ЗП ${eomReceived?'✅':`⏳ ${rub(eomAmount)}`} + Бонус ${eomReceived?'✅':`⏳ ${rub(bonusAmount)}`} (${eomDay}-го, посл. раб. день месяца)
 
 ВЫХОДЫ:
   Кредиты неоплаченные: ${rub(pendingLoanPayments)} [платёж 4 кредитов]
@@ -181,8 +204,12 @@ ${pendingRecurring.map(r => `  ${r.name} ⏳ ${rub(r.amount)} (${r.day}-го)`).
   Переменные ещё доступно до лимита: ${rub(varLeft)}
   ИТОГО к списанию: ${rub(pendingLoanPayments + fixedUnpaid + varLeft)}
 
+ПЛАНОВЫЕ ПОКУПКИ ИЮНЯ (цели на месяц, ещё не куплены):
+${plannedPurchases.length ? plannedPurchases.map(g=>`  • ${g.name}: ${rub(Number(g.amount))}`).join('\n')+`\n  ИТОГО плановых: ${rub(plannedTotal)}` : '  (нет запланированных покупок)'}
+
 ПРОГНОЗ ОСТАТКА К 30-го ИЮНЯ: ${rub(projEnd)}
-  [формула: ликвидность ${rub(liquid)} + входы ${rub(incomingTotal)} − кредиты ${rub(pendingLoanPayments)} − постоянные ${rub(fixedUnpaid)} − переменные до лимита ${rub(varLeft)} = ${rub(projEnd)}]
+  [формула: ликвидность ${rub(liquid)} + входы ${rub(incomingTotal)} − кредиты ${rub(pendingLoanPayments)} − постоянные ${rub(fixedUnpaid)} − переменные до лимита ${rub(varLeft)}]
+ПОСЛЕ ПЛАНОВЫХ ПОКУПОК (−${rub(plannedTotal)}): ${rub(projEndAfterPlanned)}
 
 === КРЕДИТЫ (всего ${rub(totalDebt)}, платёж ${rub(totalMonthlyPayment)}/мес) ===
 ${loanLines}
@@ -228,7 +255,69 @@ ${goalLines}
   Лимит переменных: ${rub(varBudget)}`
 }
 
-// ── СИСТЕМНЫЙ ПРОМПТ — Mobile-first + правила формата ─────────────────────
+// ── Анализ паттернов трат ─────────────────────────────────────────────────
+export async function getSpendingAnalysis(): Promise<string> {
+  const supabase = db()
+  const now = new Date()
+  // Последние 3 месяца
+  const months: string[] = []
+  for (let i = 0; i < 3; i++) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1)
+    months.push(`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`)
+  }
+  const { data: expenses } = await supabase.from('expenses')
+    .select('month_key,category,amount,description,expense_date')
+    .eq('user_id', USER_ID).in('month_key', months)
+
+  if (!expenses?.length) return 'Пока недостаточно данных о тратах для анализа.'
+
+  // Группировка по категориям
+  const byCategory: Record<string, number> = {}
+  const byMonth: Record<string, number> = {}
+  const byCategoryMonth: Record<string, Record<string, number>> = {}
+  for (const e of expenses) {
+    const amt = Number(e.amount)
+    byCategory[e.category] = (byCategory[e.category] ?? 0) + amt
+    byMonth[e.month_key] = (byMonth[e.month_key] ?? 0) + amt
+    if (!byCategoryMonth[e.category]) byCategoryMonth[e.category] = {}
+    byCategoryMonth[e.category][e.month_key] = (byCategoryMonth[e.category][e.month_key] ?? 0) + amt
+  }
+
+  const total = Object.values(byCategory).reduce((s,v)=>s+v, 0)
+  const sortedCats = Object.entries(byCategory).sort((a,b)=>b[1]-a[1])
+
+  const catLines = sortedCats.map(([cat, sum]) => {
+    const share = Math.round(sum/total*100)
+    return `  • ${cat}: ${rub(sum)} (${share}%)`
+  }).join('\n')
+
+  // Топ описаний (повторяющиеся траты)
+  const byDesc: Record<string, {count:number; sum:number}> = {}
+  for (const e of expenses) {
+    if (!e.description) continue
+    const key = e.description.toLowerCase().trim()
+    if (!byDesc[key]) byDesc[key] = {count:0, sum:0}
+    byDesc[key].count++
+    byDesc[key].sum += Number(e.amount)
+  }
+  const repeating = Object.entries(byDesc).filter(([,v])=>v.count>=2).sort((a,b)=>b[1].sum-a[1].sum).slice(0,5)
+  const repeatLines = repeating.length
+    ? repeating.map(([desc,v])=>`  • "${desc}": ${v.count}× = ${rub(v.sum)}`).join('\n')
+    : '  (нет повторяющихся)'
+
+  const monthLines = months.filter(m=>byMonth[m]).map(m => `  • ${m}: ${rub(byMonth[m])}`).join('\n')
+
+  return `=== АНАЛИЗ ТРАТ (последние 3 месяца) ===
+
+ПО МЕСЯЦАМ:
+${monthLines}
+
+ПО КАТЕГОРИЯМ (всего ${rub(total)}):
+${catLines}
+
+ПОВТОРЯЮЩИЕСЯ ТРАТЫ:
+${repeatLines}`
+}
 const SYSTEM_PROMPT = `Ты — финансовый ассистент Александра в Telegram. Александр работает в АТОН (продажи инвестиционных продуктов).
 
 ФОРМАТ ОТВЕТА — КРИТИЧНО:
@@ -311,6 +400,20 @@ ACTION:{"type":"add_expense","amount":800,"category":"Транспорт","descr
 - undo
 
 Категории: Еда и кафе, Транспорт, Здоровье, Развлечения, Одежда, Инвестиции, Обучение и ИИ, Прочее
+
+ОТВЕТ НА "ПОЛНЫЙ БЮДЖЕТ" — ОБЯЗАТЕЛЬНАЯ СТРУКТУРА:
+Когда спрашивают полный бюджет/все цифры — ВСЕГДА включай ВСЕ разделы:
+1. 💰 Ликвидность (дебет Сбер + Т-Банк)
+2. 💳 Кредитные карты (лимиты и долги) — НЕ ЗАБЫВАЙ
+3. 📥 Входы с точными датами (стипендия 11-го, аванс, зп+бонус)
+4. 📤 Выходы (кредиты, постоянные, переменные)
+5. 🎯 Плановые покупки месяца — НЕ ЗАБЫВАЙ (из раздела ПЛАНОВЫЕ ПОКУПКИ)
+6. 🏁 Прогноз остатка + остаток ПОСЛЕ плановых покупок
+7. Формула расчёта одной строкой
+Если раздел пустой — скажи это, но не пропускай.
+
+ПРО ПЕРЕМЕННЫЕ В ПРОГНОЗЕ:
+Прогноз остатка считает что переменные потратятся ДО ЛИМИТА (консервативно — худший случай 40 000₽). Реально потрачено меньше, поэтому фактический остаток будет ВЫШЕ. Если спросят — объясни и покажи оптимистичный сценарий.
 
 ВАЖНО ПРО ПОСТОЯННЫЕ ТРАТЫ:
 Постоянные траты — это просто список с именем и суммой. У них НЕТ "категории".
@@ -572,7 +675,13 @@ export async function executeAction(action: BotAction): Promise<void> {
 }
 
 async function processWithModel(text: string, chatId: number, model: 'haiku'|'sonnet'): Promise<string> {
-  const [context, history] = await Promise.all([getContext(), getHistory(chatId)])
+  const needAnalysis = /проанализир|анализ трат|паттерн|на что трачу|куда уход|структур.*трат/i.test(text)
+  const [context, history, analysis] = await Promise.all([
+    getContext(),
+    getHistory(chatId),
+    needAnalysis ? getSpendingAnalysis() : Promise.resolve(''),
+  ])
+  const fullContext = context + (analysis ? '\n\n' + analysis : '')
   const modelId = model === 'sonnet' ? 'claude-sonnet-4-6' : 'claude-haiku-4-5-20251001'
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method:'POST',
@@ -582,7 +691,7 @@ async function processWithModel(text: string, chatId: number, model: 'haiku'|'so
       max_tokens: 1500,
       system: [
         { type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } },
-        { type: 'text', text: '\n\nКОНТЕКСТ:\n' + context },
+        { type: 'text', text: '\n\nКОНТЕКСТ:\n' + fullContext },
       ],
       messages: [
         ...history.map(h => ({ role: h.role as 'user'|'assistant', content: h.content })),
@@ -592,19 +701,14 @@ async function processWithModel(text: string, chatId: number, model: 'haiku'|'so
   })
   const data = await res.json()
   const raw: string = data.content?.[0]?.text ?? '❌ Ошибка API'
-  
-  // Парсим ACTION, выполняем, удаляем из текста
   const { actions, cleanText } = extractActions(raw)
   for (const action of actions) {
     try { await executeAction(action) } catch(e) { console.error('[action exec]',e) }
   }
-  
-  // Сохраняем ЧИСТЫЙ текст в историю (без ACTION) — иначе следующий раз бот их повторит
   Promise.all([
     saveHistory(chatId,'user',text),
     saveHistory(chatId,'assistant',cleanText)
   ]).catch(()=>{})
-  
   return cleanText
 }
 
