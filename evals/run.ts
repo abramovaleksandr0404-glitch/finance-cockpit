@@ -1,12 +1,12 @@
 /**
- * evals/run.ts — Тесты чистых функций.
- * Запуск: npx tsx evals/run.ts
- * Должны пройти все перед каждым коммитом.
+ * evals/run.ts — 51+ тестов чистых функций.
+ * Запуск: npm run eval
+ * Все тесты проходят перед каждым коммитом.
  */
 import {
   computeMonthlyBonus, computeQuarterlyBonus, computeProjectedEnd,
   computeDailyBudget, advanceDay, lastWorkingDayOfMonth, analyzeDecision,
-  type BonusConfig,
+  suggestEarlyRepayment, type BonusConfig,
 } from '../lib/calc'
 
 let passed = 0, failed = 0
@@ -28,31 +28,34 @@ const cfg: BonusConfig = {
 
 console.log('\n=== БОНУС: ежемесячный ===')
 {
-  // 3 клиента g10, выручка 41666
   const b = computeMonthlyBonus({ g10: 3 }, 41666, cfg)
   approx('котёл (3×г10 + 20%×41666)', b.pot, 240000 + 8333.2, 1)
   approx('сверхпорог', b.excess, 248333.2 - 56000, 1)
   approx('момент (80%)', b.moment, (248333.2 - 56000) * 0.8, 1)
   approx('на руки (НДФЛ 13%)', b.net, Math.round((248333.2 - 56000) * 0.8 * 0.87), 1)
+  // 0 клиентов, нет сверхпорога
+  const b0 = computeMonthlyBonus({ g3: 1 }, 0, cfg)
+  check('г3 без выручки: котёл < порога → 0', b0.net, 0)
 }
 
 console.log('\n=== БОНУС: квартальный ===')
 {
-  // Q2: 3 г3 + 5 г10 = 8 клиентов, множитель 3
   const q = computeQuarterlyBonus({ g3: 3, g10: 5 }, cfg)
   check('кол-во клиентов', q.clientCount, 8)
   check('множитель (≥3 → qm3)', q.mult, 3)
   approx('gross = (3×7200 + 5×80000)×3', q.gross, (21600 + 400000) * 3, 1)
   approx('net', q.net, Math.round((21600 + 400000) * 3 * 0.87), 1)
-
-  // 2 клиента → множитель 2
   const q2 = computeQuarterlyBonus({ g10: 2 }, cfg)
   check('2 клиента → множитель qm2', q2.mult, 2)
-
-  // 1 клиент → множитель 0
   const q1 = computeQuarterlyBonus({ g10: 1 }, cfg)
   check('1 клиент → множитель 0', q1.mult, 0)
   check('1 клиент → gross 0', q1.gross, 0)
+  const q0 = computeQuarterlyBonus({}, cfg)
+  check('0 клиентов → gross 0', q0.gross, 0)
+  const q3exact = computeQuarterlyBonus({ g3: 1, g4: 1, g56: 1 }, cfg)
+  check('ровно 3 клиента → mult qm3=3', q3exact.mult, 3)
+  const q10 = computeQuarterlyBonus({ g10: 10 }, cfg)
+  check('10 клиентов → mult qm3=3', q10.mult, 3)
 }
 
 console.log('\n=== ПРОГНОЗ ОСТАТКА ===')
@@ -62,33 +65,75 @@ console.log('\n=== ПРОГНОЗ ОСТАТКА ===')
   })
   approx('прогноз остатка', p.projEnd, 8667 + 152510 - 44144 - 18872 - 39770, 1)
   approx('после плановых', p.projEndAfterPlanned, 8667 + 152510 - 44144 - 18872 - 39770 - 30000, 1)
+  // Нулевой входящий
+  const p0 = computeProjectedEnd({ liquid: 5000, incoming: 0, pendingLoans: 0, fixedUnpaid: 0, varLeft: 0 })
+  check('нет входящих: остаток = liquid', p0.projEnd, 5000)
 }
 
 console.log('\n=== ДНЕВНОЙ БЮДЖЕТ ===')
 {
   check('40000 лимит, 230 потрачено, 30 дней', computeDailyBudget(40000, 230, 30), Math.round(39770 / 30))
   check('лимит исчерпан', computeDailyBudget(40000, 40000, 10), 0)
+  check('1 день остался', computeDailyBudget(40000, 0, 1), 40000)
+  check('переполнен лимит → 0', computeDailyBudget(40000, 50000, 10), 0)
 }
 
 console.log('\n=== ДАТЫ ВЫПЛАТ ===')
 {
-  // Июнь 2026: 15-е понедельник → аванс 15
   check('аванс июнь 2026 (15 пн)', advanceDay(2026, 6), 15)
-  // Последний рабочий день июня 2026 — 30-е (вторник)
   check('посл. раб. день июня 2026', lastWorkingDayOfMonth(2026, 6), 30)
+  // Декабрь 2024: 31-е вторник
+  check('посл. раб. день декабрь 2024', lastWorkingDayOfMonth(2024, 12), 31)
+  // Июль 2026: 15-е среда
+  check('аванс июль 2026 (15 ср)', advanceDay(2026, 7), 15)
 }
 
-console.log('\n=== СЦЕНАРНЫЙ АНАЛИЗ (макбук-кейс) ===')
+console.log('\n=== СЦЕНАРНЫЙ АНАЛИЗ ===')
 {
-  const d = analyzeDecision({
-    itemCost: 200000, loanRate: 0.33, loanMonths: 12,
-    currentLiquid: 50000, expectedBonus: 470000, weeksUntilBonus: 6, minSafeLiquid: 10000,
-  })
-  console.log(`     платёж/мес: ${d.creditScenario.monthlyPayment}, переплата: ${d.creditScenario.overpayment}`)
-  console.log(`     рекомендация: ${d.recommendation}`)
-  check('переплата положительна', d.creditScenario.overpayment > 0, true)
-  check('наличные просадят ликвидность (50к-200к<10к)', d.cashScenario.safe, false)
-  check('бонус покроет покупку', d.waitScenario?.canCoverWithBonus, true)
+  // Ждать бонуса 6 недель выгоднее
+  const d1 = analyzeDecision({ itemCost:200000,loanRate:0.33,loanMonths:12,currentLiquid:50000,expectedBonus:470000,weeksUntilBonus:6,minSafeLiquid:10000 })
+  check('переплата положительна', d1.creditScenario.overpayment > 0, true)
+  check('наличные unsafe (50к-200к<10к)', d1.cashScenario.safe, false)
+  check('бонус покроет покупку', d1.waitScenario?.canCoverWithBonus, true)
+  check('рекомендация содержит "нед"', d1.recommendation.includes('нед'), true)
+  // За наличные безопасно
+  const d2 = analyzeDecision({ itemCost:50000,loanRate:0.33,loanMonths:12,currentLiquid:200000,minSafeLiquid:10000 })
+  check('наличные safe', d2.cashScenario.safe, true)
+  check('нет wait-сценария без бонуса', d2.waitScenario, null)
+  // Небезопасно и дорогой кредит
+  const d3 = analyzeDecision({ itemCost:150000,loanRate:0.33,loanMonths:12,currentLiquid:14000,minSafeLiquid:10000 })
+  check('unsafe при малой ликвидности', d3.cashScenario.safe, false)
+  check('переплата > 15% суммы', d3.creditScenario.overpayment > d3.creditScenario.totalPaid * 0.15, true)
+  // Нулевая ставка
+  const d4 = analyzeDecision({ itemCost:10000,loanRate:0,loanMonths:12,currentLiquid:5000,minSafeLiquid:1000 })
+  check('нулевая ставка → нет переплаты', d4.creditScenario.overpayment, 0)
+}
+
+console.log('\n=== ДОСРОЧНОЕ ПОГАШЕНИЕ ===')
+{
+  const loans = [
+    { name:'Рефинанс', principal:358101, accrued_int:0, rate:0.3398, min_payment:12642 },
+    { name:'Кредит В',  principal:119154, accrued_int:0, rate:0.329,  min_payment:4494  },
+    { name:'Кредит А',  principal:351481, accrued_int:0, rate:0.329,  min_payment:12092 },
+    { name:'Кредит Б',  principal:436714, accrued_int:0, rate:0.329,  min_payment:14917 },
+  ]
+  const s = suggestEarlyRepayment(loans, 70000, 10000)
+  check('есть рекомендация при 70к liquid', s !== null, true)
+  check('самый дорогой кредит (Рефинанс)', s?.loanName, 'Рефинанс')
+  check('сумма = 60к (70к − 10к подушка)', s?.suggestedAmount, 60000)
+  check('экономия > 0', (s?.monthlySaving ?? 0) > 0, true)
+  check('окупаемость < 48 мес', (s?.breakEvenMonths ?? 99) < 48, true)
+  check('roiDescription содержит %', s?.roiDescription?.includes('%'), true)
+  // Мало денег
+  const none = suggestEarlyRepayment(loans, 12000, 10000)
+  check('нет рекомендации при доступном < 5к', none, null)
+  // Нет кредитов
+  const empty = suggestEarlyRepayment([], 100000, 10000)
+  check('нет рекомендации без кредитов', empty, null)
+  // Один кредит с нулевым телом
+  const paid = [{ name:'Погашен', principal:0, accrued_int:0, rate:0.33, min_payment:5000 }]
+  const noPrincipal = suggestEarlyRepayment(paid, 50000, 10000)
+  check('кредит с principal=0 пропускается', noPrincipal, null)
 }
 
 console.log(`\n${'='.repeat(40)}`)

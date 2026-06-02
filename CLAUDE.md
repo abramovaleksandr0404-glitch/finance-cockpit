@@ -68,3 +68,5 @@ ANTHROPIC_API_KEY, GROQ_API_KEY, CRON_SECRET, NEXT_PUBLIC_SUPABASE_URL, NEXT_PUB
 ## Лог изменений
 (добавляй сюда краткую запись после каждой выполненной задачи)
 - 2026-06-01: Создан фундамент автономной работы (CLAUDE.md, BACKLOG.md, SPRINTS.md, evals)
+- 2026-06-02: Бот переведён на tool calling (надёжное исполнение действий вместо парсинга ACTID). Добавлен mark_recurring_received для стипендии (без двойного учёта).
+- 2026-06-02: Интеграция Sprint 1 + tool calling. 44 теста. suggestEarlyRepayment, scenario_analysis tool, авто-income cron, расширенные эвалы.

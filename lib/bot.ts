@@ -3,6 +3,7 @@
  * Жёсткий мобильный формат + надёжный парсер ACTION + квартальный бонус
  */
 import { createClient, SupabaseClient } from '@supabase/supabase-js'
+import { analyzeDecision, suggestEarlyRepayment } from './calc'
 
 const USER_ID = '5ebdb411-6021-4dfc-9d0d-caa8e0107502'
 const TG = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}`
@@ -93,8 +94,10 @@ export async function getContext(): Promise<string> {
 
   // ── Recurring incomes (стипендия и т.п.) ─────────────────────
   const recurringIncomes = (user.recurring_incomes as {name:string;amount:number;day:number}[]) ?? []
+  const recurringReceived = (month?.recurring_received as string[]) ?? []
   const today = now.getDate()
-  const pendingRecurring = recurringIncomes.filter(r => r.day >= today)
+  // Ожидается = день ещё не прошёл (или прошёл, но не отмечено received) И не получено в этом месяце
+  const pendingRecurring = recurringIncomes.filter(r => !recurringReceived.includes(r.name) && r.day >= today)
   const pendingRecurringTotal = pendingRecurring.reduce((s,r)=>s+r.amount, 0)
   
   const incomingTotal = (advReceived ? 0 : advAmount) + (eomReceived ? 0 : eomAmount + bonusAmount) + pendingRecurringTotal
@@ -385,21 +388,12 @@ Netflix, Spotify, Apple Music → постоянная "Подписки"
   Net = Gross × 87% (НДФЛ 13%)
   Выплачивается в конце первого месяца следующего квартала
 
-ДЕЙСТВИЯ — ВАЖНО:
-Если нужно выполнить действие, добавь в конец ответа отдельной строкой ровно один формат:
-ACTION:{"type":"add_expense","amount":800,"category":"Транспорт","description":"такси"}
+ДЕЙСТВИЯ — ИСПОЛЬЗУЙ ИНСТРУМЕНТЫ (TOOLS):
+У тебя есть инструменты для изменения данных. Когда пользователь сообщает о реальном событии (потратил, получил, оплатил, закрыл клиента) — ОБЯЗАТЕЛЬНО вызови соответствующий инструмент. Не описывай действие словами «сделано» без вызова инструмента — иначе данные не изменятся.
 
-Поддерживаемые типы (ВСЕГДА с подчёркиваниями):
-- add_expense, delete_expense
-- add_client, add_goal, mark_goal_bought
-- mark_salary (part: "advance" или "eom")
-- mark_single_fixed, mark_fixed_paid, mark_loan_paid, early_repay
-- add_income_event, set_balance, close_month
-- add_fixed_cost, remove_fixed_cost, edit_fixed_cost
-- update_settings (поля: salary_net, salary_gross, ytd_gross, threshold, moment_share, margin_share, var_budget, или nominal с key=g3..g10)
-- undo
+ГЛАВНОЕ ПРАВИЛО: если событие произошло в реальности — вызови инструмент. Даже если думаешь что «уже учтено в прогнозе» — прогноз это план, а инструмент фиксирует факт. Например «получил стипендию» = деньги пришли СЕЙЧАС → вызови mark_recurring_received, даже если стипендия была в плане.
 
-Категории: Еда и кафе, Транспорт, Здоровье, Развлечения, Одежда, Инвестиции, Обучение и ИИ, Прочее
+Категории трат: Еда и кафе, Транспорт, Здоровье, Развлечения, Одежда, Инвестиции, Обучение и ИИ, Прочее
 
 ОТВЕТ НА "ПОЛНЫЙ БЮДЖЕТ" — ОБЯЗАТЕЛЬНАЯ СТРУКТУРА:
 Когда спрашивают полный бюджет/все цифры — ВСЕГДА включай ВСЕ разделы:
@@ -430,9 +424,9 @@ ACTION:{"type":"add_expense","amount":800,"category":"Транспорт","descr
 
 РЕГУЛЯРНЫЕ ДОХОДЫ:
 Стипендия 5900₽ приходит 11 числа каждого месяца. Учитывай в прогнозе если сегодня <= 11.
-Если пользователь говорит "получил стипендию" → ACTION add_income_event с amount=5900
+Если пользователь говорит "получил стипендию" → вызови инструмент mark_recurring_received с name="Стипендия".
 
-ВАЖНО: если задача требует уточнения — НЕ выполняй ACTION, только задай вопрос.`
+ВАЖНО: если задача требует уточнения — НЕ вызывай инструменты, только задай вопрос. Вызывай инструмент лишь когда уверен.`
 
 interface BotAction {
   type: string
@@ -482,6 +476,7 @@ export async function executeAction(action: BotAction): Promise<void> {
     mark_goal_bought:'покупка',mark_salary:'зарплата',mark_single_fixed:'постоянная',
     mark_fixed_paid:'все постоянные',mark_loan_paid:'кредит',early_repay:'досрочное',
     add_income_event:'доход',set_balance:'баланс',close_month:'закрытие',
+    mark_recurring_received:'регулярный доход',
     update_settings:'настройки',add_fixed_cost:'+постоянная',
     remove_fixed_cost:'-постоянная',edit_fixed_cost:'правка',undo:'отмена',
   }
@@ -609,6 +604,29 @@ export async function executeAction(action: BotAction): Promise<void> {
     await s.from('users').update({debit_balance:Math.round((Number(u?.debit_balance??0)+action.amount)*100)/100,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
   }
 
+  // Получена регулярная выплата (стипендия и т.п.): зачислить + пометить чтобы не дублировать в прогнозе
+  if (action.type === 'mark_recurring_received' && action.name) {
+    const { data:u } = await s.from('users').select('debit_balance,recurring_incomes').eq('id',USER_ID).single()
+    const recurring = (u?.recurring_incomes as {name:string;amount:number;day:number}[]) ?? []
+    const item = recurring.find(r => r.name.toLowerCase().includes((action.name??'').toLowerCase()))
+    const amount = action.amount ?? item?.amount ?? 0
+    if (amount > 0) {
+      // income_event для истории
+      await s.from('income_events').insert({user_id:USER_ID,month_key:monthKey,event_date:new Date().toISOString().split('T')[0],event_type:'recurring',description:item?.name??action.name,amount:Math.round(amount),to_debit:true})
+      // зачисление на дебет
+      await s.from('users').update({debit_balance:Math.round((Number(u?.debit_balance??0)+amount)*100)/100,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
+      // пометка received (чтобы forecast не считал ещё раз)
+      const { data:month } = await s.from('months').select('recurring_received').eq('user_id',USER_ID).eq('month_key',monthKey).maybeSingle()
+      const received = (month?.recurring_received as string[]) ?? []
+      if (!received.includes(item?.name??action.name)) {
+        received.push(item?.name??action.name)
+        const { data:exists } = await s.from('months').select('month_key').eq('user_id',USER_ID).eq('month_key',monthKey).maybeSingle()
+        exists ? await s.from('months').update({recurring_received:received}).eq('user_id',USER_ID).eq('month_key',monthKey)
+               : await s.from('months').insert({user_id:USER_ID,month_key:monthKey,recurring_received:received})
+      }
+    }
+  }
+
   if (action.type === 'set_balance' && action.account && action.amount != null) {
     const field = action.account === 'sber' ? 'debit_balance' : 'tbank_debit'
     await s.from('users').update({[field]:action.amount,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
@@ -674,6 +692,134 @@ export async function executeAction(action: BotAction): Promise<void> {
   }
 }
 
+// ── ИНСТРУМЕНТЫ (tool calling) — надёжная замена парсингу ACTION ──────────
+const TOOLS = [
+  { name:'add_expense', description:'Записать переменную трату. Используй когда пользователь сообщает что потратил/купил/заплатил за разовое.',
+    input_schema:{type:'object',properties:{amount:{type:'number'},category:{type:'string',enum:['Еда и кафе','Транспорт','Здоровье','Развлечения','Одежда','Инвестиции','Прочее']},description:{type:'string'}},required:['amount']} },
+  { name:'delete_expense', description:'Удалить трату. По умолчанию последнюю (id="last") или по фрагменту id.',
+    input_schema:{type:'object',properties:{id:{type:'string'}}} },
+  { name:'add_client', description:'Записать закрытого клиента/сделку. Грейд g3/g4/g56/g78/g9/g10.',
+    input_schema:{type:'object',properties:{grade:{type:'string'},revenue:{type:'number'}},required:['grade']} },
+  { name:'add_goal', description:'Добавить цель/плановую покупку. month_key="2026-06" для конкретного месяца или null для накопления.',
+    input_schema:{type:'object',properties:{name:{type:'string'},amount:{type:'number'},month_key:{type:['string','null']}},required:['name','amount']} },
+  { name:'mark_goal_bought', description:'Отметить цель купленной (спишет с дебета).',
+    input_schema:{type:'object',properties:{name:{type:'string'}},required:['name']} },
+  { name:'mark_salary', description:'Отметить получение зарплаты. part="advance" (аванс) или "eom" (зп+бонус в конце месяца).',
+    input_schema:{type:'object',properties:{part:{type:'string',enum:['advance','eom']}},required:['part']} },
+  { name:'mark_single_fixed', description:'Отметить оплату одной постоянной траты по названию (спишет с дебета).',
+    input_schema:{type:'object',properties:{name:{type:'string'},amount:{type:'number'}},required:['name']} },
+  { name:'mark_fixed_paid', description:'Отметить оплату ВСЕХ неоплаченных постоянных трат разом.',
+    input_schema:{type:'object',properties:{}} },
+  { name:'mark_loan_paid', description:'Отметить оплату ежемесячного платежа по кредиту (по названию).',
+    input_schema:{type:'object',properties:{name:{type:'string'}},required:['name']} },
+  { name:'early_repay', description:'Досрочное погашение кредита: уменьшить тело на сумму, пересчитать платёж.',
+    input_schema:{type:'object',properties:{name:{type:'string'},amount:{type:'number'}},required:['name','amount']} },
+  { name:'add_income_event', description:'Разовый доход (отпускные, премия, возврат). Зачислит на дебет.',
+    input_schema:{type:'object',properties:{amount:{type:'number'},description:{type:'string'}},required:['amount']} },
+  { name:'mark_recurring_received', description:'Регулярная выплата получена (стипендия и т.п.). Зачислит на дебет и пометит чтобы не дублировать в прогнозе. Используй для "получил стипендию".',
+    input_schema:{type:'object',properties:{name:{type:'string'},amount:{type:'number'}},required:['name']} },
+  { name:'set_balance', description:'Установить баланс счёта вручную. account="sber" или "tbank".',
+    input_schema:{type:'object',properties:{account:{type:'string',enum:['sber','tbank']},amount:{type:'number'}},required:['account','amount']} },
+  { name:'close_month', description:'Закрыть текущий месяц.',
+    input_schema:{type:'object',properties:{}} },
+  { name:'add_fixed_cost', description:'Добавить новую постоянную трату (только имя и сумма, без категории).',
+    input_schema:{type:'object',properties:{name:{type:'string'},amount:{type:'number'}},required:['name','amount']} },
+  { name:'remove_fixed_cost', description:'Удалить постоянную трату по названию.',
+    input_schema:{type:'object',properties:{name:{type:'string'}},required:['name']} },
+  { name:'edit_fixed_cost', description:'Изменить постоянную трату: новое имя и/или сумму.',
+    input_schema:{type:'object',properties:{name:{type:'string'},new_name:{type:'string'},amount:{type:'number'}},required:['name']} },
+  { name:'update_settings', description:'Изменить настройку. field: salary_net/salary_gross/ytd_gross/threshold/moment_share/margin_share/var_budget, или nominal с key=g3..g10.',
+    input_schema:{type:'object',properties:{field:{type:'string'},value:{type:'number'},key:{type:'string'}},required:['field','value']} },
+  { name:'scenario_analysis', description:'Рассчитать экономику решения о покупке. Используй когда спрашивают "стоит ли купить X в кредит/рассрочку", "выгодно ли брать кредит", "лучше ли подождать бонуса". Возвращает сравнение: кредит vs наличные vs ожидание, с переплатой и рекомендацией.',
+    input_schema:{type:'object',properties:{itemCost:{type:'number',description:'Стоимость покупки в рублях'},loanRate:{type:'number',description:'Годовая ставка кредита (например 0.33 для 33%)'},loanMonths:{type:'number',description:'Срок в месяцах'},expectedBonus:{type:'number',description:'Ожидаемый бонус (если есть)'},weeksUntilBonus:{type:'number',description:'Через сколько недель бонус'}},required:['itemCost','loanRate','loanMonths']} },
+  { name:'suggest_early_repayment', description:'Рассчитать выгоду от досрочного погашения кредита при текущей ликвидности. Используй когда спрашивают "куда вложить свободные деньги" или проактивно.',
+    input_schema:{type:'object',properties:{}} },
+  { name:'undo', description:'Отменить последнее изменение (откат к снапшоту).',
+    input_schema:{type:'object',properties:{}} },
+]
+
+interface ContentBlock { type:string; text?:string; id?:string; name?:string; input?:Record<string,unknown> }
+
+// Один раунд вызова Claude с инструментами
+async function callClaude(modelId: string, systemBlocks: unknown[], messages: unknown[]) {
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method:'POST',
+    headers:{'Content-Type':'application/json','x-api-key':process.env.ANTHROPIC_API_KEY!,'anthropic-version':'2023-06-01'},
+    body: JSON.stringify({ model:modelId, max_tokens:1500, system:systemBlocks, tools:TOOLS, messages })
+  })
+  return res.json()
+}
+
+// Обработка одного инструмента — возвращает строку-результат для tool_result
+async function handleTool(name: string, input: Record<string,unknown>): Promise<string> {
+  // Computation tools (read-only, не пишут в БД)
+  if (name === 'scenario_analysis') {
+    const result = analyzeDecision({
+      itemCost: Number(input.itemCost ?? 0),
+      loanRate: Number(input.loanRate ?? 0.33),
+      loanMonths: Number(input.loanMonths ?? 12),
+      currentLiquid: Number(input.currentLiquid ?? 0),
+      expectedBonus: input.expectedBonus != null ? Number(input.expectedBonus) : undefined,
+      weeksUntilBonus: input.weeksUntilBonus != null ? Number(input.weeksUntilBonus) : undefined,
+      minSafeLiquid: 10000,
+    })
+    return JSON.stringify({
+      credit: result.creditScenario,
+      cash: result.cashScenario,
+      wait: result.waitScenario,
+      recommendation: result.recommendation,
+    })
+  }
+  if (name === 'suggest_early_repayment') {
+    const s = db()
+    const [{ data:u },{ data:loans }] = await Promise.all([
+      s.from('users').select('debit_balance,tbank_debit').eq('id',USER_ID).single(),
+      s.from('loans').select('name,principal,accrued_int,rate,min_payment').eq('user_id',USER_ID),
+    ])
+    const liquid = Number(u?.debit_balance??0) + Number(u?.tbank_debit??0)
+    const suggestion = suggestEarlyRepayment(loans??[], liquid, 10000)
+    if (!suggestion) return JSON.stringify({suggestion:null,reason:'Недостаточно свободных средств (< 5000₽ после подушки в 10000₽)'})
+    return JSON.stringify(suggestion)
+  }
+  // DB-writing tools
+  await executeAction({ type: name, ...input } as BotAction)
+  return 'Выполнено успешно.'
+}
+
+// Цикл tool calling: модель вызывает инструменты → выполняем → возвращаем результат → финальный текст
+async function runToolLoop(modelId: string, systemBlocks: unknown[], initialMessages: unknown[]): Promise<{ text:string; actionsRun:string[] }> {
+  const messages = [...initialMessages]
+  const actionsRun: string[] = []
+  for (let round = 0; round < 5; round++) {
+    const data = await callClaude(modelId, systemBlocks, messages)
+    const content: ContentBlock[] = data.content ?? []
+    if (data.stop_reason === 'tool_use') {
+      const toolResults: unknown[] = []
+      for (const block of content) {
+        if (block.type === 'tool_use' && block.name) {
+          try {
+            const result = await handleTool(block.name, (block.input ?? {}) as Record<string,unknown>)
+            if (block.name !== 'scenario_analysis' && block.name !== 'suggest_early_repayment') {
+              actionsRun.push(block.name)
+            }
+            toolResults.push({ type:'tool_result', tool_use_id:block.id, content: result })
+          } catch (e) {
+            console.error('[tool exec]', block.name, e)
+            toolResults.push({ type:'tool_result', tool_use_id:block.id, content:'Ошибка: '+String(e), is_error:true })
+          }
+        }
+      }
+      messages.push({ role:'assistant', content })
+      messages.push({ role:'user', content: toolResults })
+      // следующий раунд — модель даст финальный текст или вызовет ещё инструменты
+    } else {
+      const text = content.filter(b => b.type === 'text').map(b => b.text).join('\n').trim()
+      return { text: text || '✅ Готово', actionsRun }
+    }
+  }
+  return { text: '⚠️ Слишком много шагов, останавливаюсь. Проверь результат на сайте.', actionsRun }
+}
+
 async function processWithModel(text: string, chatId: number, model: 'haiku'|'sonnet'): Promise<string> {
   const needAnalysis = /проанализир|анализ трат|паттерн|на что трачу|куда уход|структур.*трат/i.test(text)
   const [context, history, analysis] = await Promise.all([
@@ -683,33 +829,20 @@ async function processWithModel(text: string, chatId: number, model: 'haiku'|'so
   ])
   const fullContext = context + (analysis ? '\n\n' + analysis : '')
   const modelId = model === 'sonnet' ? 'claude-sonnet-4-6' : 'claude-haiku-4-5-20251001'
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
-    method:'POST',
-    headers:{'Content-Type':'application/json','x-api-key':process.env.ANTHROPIC_API_KEY!,'anthropic-version':'2023-06-01'},
-    body: JSON.stringify({
-      model: modelId,
-      max_tokens: 1500,
-      system: [
-        { type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } },
-        { type: 'text', text: '\n\nКОНТЕКСТ:\n' + fullContext },
-      ],
-      messages: [
-        ...history.map(h => ({ role: h.role as 'user'|'assistant', content: h.content })),
-        { role: 'user', content: text }
-      ]
-    })
-  })
-  const data = await res.json()
-  const raw: string = data.content?.[0]?.text ?? '❌ Ошибка API'
-  const { actions, cleanText } = extractActions(raw)
-  for (const action of actions) {
-    try { await executeAction(action) } catch(e) { console.error('[action exec]',e) }
-  }
+  const systemBlocks = [
+    { type:'text', text:SYSTEM_PROMPT, cache_control:{type:'ephemeral'} },
+    { type:'text', text:'\n\nКОНТЕКСТ:\n'+fullContext },
+  ]
+  const messages = [
+    ...history.map(h => ({ role:h.role as 'user'|'assistant', content:h.content })),
+    { role:'user', content:text }
+  ]
+  const { text: reply } = await runToolLoop(modelId, systemBlocks, messages)
   Promise.all([
     saveHistory(chatId,'user',text),
-    saveHistory(chatId,'assistant',cleanText)
+    saveHistory(chatId,'assistant',reply)
   ]).catch(()=>{})
-  return cleanText
+  return reply
 }
 
 function routeModel(text: string): 'haiku' | 'sonnet' {
@@ -742,27 +875,17 @@ export async function processImage(fileId: string, chatId: number, caption?: str
     const mime = result.file_path.endsWith('.png') ? 'image/png' : 'image/jpeg'
     const [context, history] = await Promise.all([getContext(), getHistory(chatId)])
     const userText = caption ?? 'Что на этом скрине? Если чек/трата — помоги записать (помни: подписки на сервисы = постоянные, не переменные!).'
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method:'POST',
-      headers:{'Content-Type':'application/json','x-api-key':process.env.ANTHROPIC_API_KEY!,'anthropic-version':'2023-06-01'},
-      body: JSON.stringify({
-        model:'claude-sonnet-4-6', max_tokens:1500,
-        system:[
-          { type:'text', text:SYSTEM_PROMPT, cache_control:{type:'ephemeral'} },
-          { type:'text', text:'\n\nКОНТЕКСТ:\n'+context }
-        ],
-        messages:[
-          ...history.map(h=>({role:h.role as 'user'|'assistant',content:h.content})),
-          {role:'user',content:[{type:'image',source:{type:'base64',media_type:mime,data:base64}},{type:'text',text:userText}]}
-        ]
-      })
-    })
-    const data = await res.json()
-    const raw: string = data.content?.[0]?.text ?? '❌ Не смог прочитать'
-    const { actions, cleanText } = extractActions(raw)
-    for (const action of actions) { try { await executeAction(action) } catch(e) { console.error('[action]',e) } }
-    Promise.all([saveHistory(chatId,'user',`[фото: ${userText}]`), saveHistory(chatId,'assistant',cleanText)]).catch(()=>{})
-    return cleanText
+    const systemBlocks = [
+      { type:'text', text:SYSTEM_PROMPT, cache_control:{type:'ephemeral'} },
+      { type:'text', text:'\n\nКОНТЕКСТ:\n'+context }
+    ]
+    const messages = [
+      ...history.map(h=>({role:h.role as 'user'|'assistant',content:h.content})),
+      {role:'user',content:[{type:'image',source:{type:'base64',media_type:mime,data:base64}},{type:'text',text:userText}]}
+    ]
+    const { text: reply } = await runToolLoop('claude-sonnet-4-6', systemBlocks, messages)
+    Promise.all([saveHistory(chatId,'user',`[фото: ${userText}]`), saveHistory(chatId,'assistant',reply)]).catch(()=>{})
+    return reply
   } catch(err) { console.error('[vision]',err); return '❌ Ошибка чтения.' }
 }
 

@@ -96,7 +96,48 @@ export interface DecisionResult {
   recommendation: string
 }
 
-/** Аннуитетный платёж */
+/** Поиск оптимального досрочного погашения: самый дорогой кредит, который осилим */
+export interface RepaymentSuggestion {
+  loanName: string
+  rate: number
+  principal: number
+  suggestedAmount: number
+  monthlySaving: number
+  breakEvenMonths: number
+  roiDescription: string
+}
+
+export function suggestEarlyRepayment(
+  loans: Array<{name:string; principal:number; accrued_int:number; rate:number; min_payment:number}>,
+  liquidCash: number,
+  minSafeLiquid = 10000
+): RepaymentSuggestion | null {
+  const usable = liquidCash - minSafeLiquid
+  if (usable < 5000) return null
+  // Берём самый дорогой кредит с остатком
+  const sorted = loans.filter(l => l.principal > 0).sort((a,b) => b.rate - a.rate)
+  const best = sorted[0]
+  if (!best) return null
+  const amount = Math.min(usable, best.principal)
+  const monthlyRate = best.rate / 12
+  const newPrincipal = Math.max(0, best.principal - amount)
+  const ratio = best.principal > 0 ? newPrincipal / best.principal : 0
+  const newPayment = Math.round(best.min_payment * ratio)
+  const saving = best.min_payment - newPayment
+  const breakEven = saving > 0 ? Math.ceil(amount / saving) : 0
+  const annualGain = saving * 12
+  const roi = amount > 0 ? Math.round(annualGain / amount * 100) : 0
+  return {
+    loanName: best.name,
+    rate: best.rate,
+    principal: best.principal,
+    suggestedAmount: Math.round(amount),
+    monthlySaving: saving,
+    breakEvenMonths: breakEven,
+    roiDescription: `ROI ${roi}%/год (как вклад под ${roi}% без риска)`,
+  }
+}
+
 function annuityPayment(principal: number, monthlyRate: number, months: number): number {
   if (monthlyRate === 0) return principal / months
   const k = Math.pow(1 + monthlyRate, months)
