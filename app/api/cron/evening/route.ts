@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { sendTelegram } from '@/lib/bot'
+import { suggestEarlyRepayment } from '@/lib/calc'
 
 export const dynamic = 'force-dynamic'
 const USER_ID = '5ebdb411-6021-4dfc-9d0d-caa8e0107502'
@@ -23,13 +24,14 @@ export async function GET(req: Request) {
     const supabase = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!)
     const mk = `${new Date().getFullYear()}-${String(new Date().getMonth()+1).padStart(2,'0')}`
     const [{ data: user }, { data: loans }, { data: expenses }] = await Promise.all([
-      supabase.from('users').select('telegram_chat_id,debit_balance,var_budget').eq('id',USER_ID).single(),
-      supabase.from('loans').select('name,min_payment,due_day,paid_month').eq('user_id',USER_ID),
+      supabase.from('users').select('telegram_chat_id,debit_balance,tbank_debit,var_budget').eq('id',USER_ID).single(),
+      supabase.from('loans').select('name,min_payment,due_day,paid_month,principal,rate').eq('user_id',USER_ID),
       supabase.from('expenses').select('amount').eq('user_id',USER_ID).eq('month_key',mk),
     ])
     if (!user?.telegram_chat_id) return NextResponse.json({ ok: false, reason: 'no chat_id' })
 
     const alerts: string[] = []
+    const proactive: string[] = []
 
     // Платежи по кредитам
     for (const loan of loans ?? []) {
@@ -50,11 +52,34 @@ export async function GET(req: Request) {
       alerts.push(`🟡 Переменные: *${pctUsed}%* лимита (${rub(varSpent)} из ${rub(varBudget)}) — осталось ${rub(varBudget - varSpent)}`)
     }
 
-    if (alerts.length === 0) return NextResponse.json({ ok: true, reason: 'no alerts' })
+    // Проактивная рекомендация: досрочное погашение
+    const liquid = Number(user.debit_balance ?? 0) + Number(user.tbank_debit ?? 0)
+    const loanList = (loans ?? []).map(l => ({
+      name: String(l.name),
+      principal: Number(l.principal),
+      rate: Number(l.rate),
+      minPayment: Number(l.min_payment),
+    }))
+    const suggestion = suggestEarlyRepayment(liquid, loanList, 30000)
+    if (suggestion && liquid > 50000) {
+      proactive.push(
+        `💡 *Оптимизация*: у тебя ${rub(liquid)} ликвидности.\n` +
+        `Переведи *${rub(suggestion.repayAmount)}* на досрочное погашение ${suggestion.loanName}:\n` +
+        `• Платёж снизится: ${rub(suggestion.newPayment)}/мес (−${rub(suggestion.paymentReduction)})\n` +
+        `• Экономия за год: ~${rub(suggestion.annualSavings)} на процентах`
+      )
+    }
 
-    const msg = `🔔 *Вечерний алерт*\n\n${alerts.join('\n\n')}\n\n_Дебет сейчас: ${rub(user.debit_balance)}_`
+    if (alerts.length === 0 && proactive.length === 0) {
+      return NextResponse.json({ ok: true, reason: 'no alerts' })
+    }
+
+    const sections: string[] = []
+    if (alerts.length > 0) sections.push(`🔔 *Вечерний алерт*\n\n${alerts.join('\n\n')}`)
+    if (proactive.length > 0) sections.push(proactive.join('\n\n'))
+    const msg = sections.join('\n\n') + `\n\n_Дебет сейчас: ${rub(liquid)}_`
     await sendTelegram(user.telegram_chat_id, msg)
-    return NextResponse.json({ ok: true, alerts: alerts.length })
+    return NextResponse.json({ ok: true, alerts: alerts.length, proactive: proactive.length })
   } catch (err) {
     console.error('[Cron evening]', err)
     return NextResponse.json({ ok: false }, { status: 500 })

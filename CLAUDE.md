@@ -68,3 +68,4 @@ ANTHROPIC_API_KEY, GROQ_API_KEY, CRON_SECRET, NEXT_PUBLIC_SUPABASE_URL, NEXT_PUB
 ## Лог изменений
 (добавляй сюда краткую запись после каждой выполненной задачи)
 - 2026-06-01: Создан фундамент автономной работы (CLAUDE.md, BACKLOG.md, SPRINTS.md, evals)
+- 2026-06-02: Sprint 1 выполнен — analyzeDecision подключён к боту; suggestEarlyRepayment в вечернем cron; авто income_events в утреннем cron; eval-харнесс расширен до 51 теста

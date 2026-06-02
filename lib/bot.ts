@@ -1,8 +1,9 @@
 /**
- * Finance Cockpit Bot — v7
- * Жёсткий мобильный формат + надёжный парсер ACTION + квартальный бонус
+ * Finance Cockpit Bot — v8
+ * Сценарный анализ покупок + проактивный советник
  */
 import { createClient, SupabaseClient } from '@supabase/supabase-js'
+import { analyzeDecision } from './calc'
 
 const USER_ID = '5ebdb411-6021-4dfc-9d0d-caa8e0107502'
 const TG = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}`
@@ -26,6 +27,89 @@ function lastWorkingDayOfMonth(y: number, m: number): number {
   const d = new Date(y, m, 0)
   while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate()-1)
   return d.getDate()
+}
+
+// ── Сценарный анализ покупки ──────────────────────────────────────────────────
+
+function detectDecisionQuery(text: string): boolean {
+  return /стоит ли\b|стоит брать|купить\s.{0,30}в кредит|брать.{0,20}кредит|рассрочк[ае]|переплат|выгодно ли купить|имеет смысл купить|лучше.{0,20}кредит|лучше.{0,20}наличн/i.test(text)
+}
+
+function extractCostFromText(text: string): number | null {
+  const m1 = text.match(/(\d[\d\s]*)\s*₽/)
+  if (m1) { const n = parseInt(m1[1].replace(/\s/g, '')); if (n >= 1000) return n }
+
+  const m2 = text.match(/(\d+(?:[,.]?\d+)?)\s*(тыс(?:яч)?|к)\b/i)
+  if (m2) {
+    const n = parseFloat(m2[1].replace(',', '.'))
+    return Math.round(n * 1000)
+  }
+
+  const m3 = text.match(/(\d+(?:[,.]?\d+)?)\s*млн\b/i)
+  if (m3) return Math.round(parseFloat(m3[1].replace(',', '.')) * 1000000)
+
+  const m4 = text.match(/\bза\s+(\d{4,7})\b/)
+  if (m4) return parseInt(m4[1])
+
+  const m5 = text.match(/\b(\d{5,7})\b/)
+  if (m5) return parseInt(m5[1])
+
+  return null
+}
+
+async function getDecisionContext(itemCost: number): Promise<string> {
+  const { data: u } = await db().from('users').select('debit_balance,tbank_debit').eq('id', USER_ID).single()
+  const liquid = Number(u?.debit_balance ?? 0) + Number(u?.tbank_debit ?? 0)
+
+  const { data: monthRow } = await db().from('months').select('clients,revenue').eq('user_id', USER_ID).eq('month_key', mk()).maybeSingle()
+  const { data: userRow } = await db().from('users').select('nominals,threshold,margin_share,moment_share,r1').eq('id', USER_ID).single()
+  const clients = (monthRow?.clients as Record<string,number>) ?? {}
+  const nominals = (userRow?.nominals as Record<string,number>) ?? {}
+  const revenue = Number(monthRow?.revenue ?? 41666)
+  const marginShare = Number(userRow?.margin_share ?? 0.20)
+  const momentShare = Number(userRow?.moment_share ?? 0.80)
+  const threshold = Number(userRow?.threshold ?? 56000)
+  const r1 = Number(userRow?.r1 ?? 0.13)
+  const clientPot = Object.entries(clients).reduce((s,[g,n])=>s+(nominals[g]??0)*Number(n),0)
+  const pot = clientPot + revenue * marginShare
+  const excess = Math.max(0, pot - threshold)
+  const bonusNet = Math.round(excess * momentShare * (1 - r1))
+
+  const now = new Date()
+  const daysInMonth = new Date(now.getFullYear(), now.getMonth()+1, 0).getDate()
+  const daysLeft = daysInMonth - now.getDate()
+  const weeksUntilBonus = Math.round(daysLeft / 7)
+
+  const dec = analyzeDecision({
+    itemCost,
+    loanRate: 0.33,
+    loanMonths: 12,
+    currentLiquid: liquid,
+    expectedBonus: bonusNet > 0 ? bonusNet : undefined,
+    weeksUntilBonus: bonusNet > 0 ? Math.max(1, weeksUntilBonus) : undefined,
+    minSafeLiquid: 30000,
+  })
+
+  return `
+=== СЦЕНАРНЫЙ АНАЛИЗ ПОКУПКИ (${rub(itemCost)}) — ИСПОЛЬЗУЙ ЭТИ ЦИФРЫ ===
+ТЕКУЩАЯ ЛИКВИДНОСТЬ: ${rub(liquid)}
+БЕЗОПАСНАЯ ПОДУШКА: 30 000 ₽
+
+ВАРИАНТ 1 — КРЕДИТ (33% годовых, 12 мес.):
+  Ежемесячный платёж: ${rub(dec.creditScenario.monthlyPayment)}
+  Всего выплат: ${rub(dec.creditScenario.totalPaid)}
+  ПЕРЕПЛАТА: ${rub(dec.creditScenario.overpayment)}
+
+ВАРИАНТ 2 — НАЛИЧНЫЕ:
+  Ликвидность после покупки: ${rub(dec.cashScenario.liquidAfter)}
+  Безопасно: ${dec.cashScenario.safe ? 'ДА (≥ 30 000 ₽)' : 'НЕТ (ниже порога безопасности)'}
+
+${dec.waitScenario ? `ВАРИАНТ 3 — ПОДОЖДАТЬ БОНУСА (~${dec.waitScenario.weeks} нед.):
+  Ожидаемый бонус на руки: ${rub(bonusNet)}
+  Бонус покроет покупку: ${dec.waitScenario.canCoverWithBonus ? 'ДА' : 'НЕТ'}` : ''}
+
+✅ РЕКОМЕНДАЦИЯ: ${dec.recommendation}
+=== КОНЕЦ АНАЛИЗА ===`
 }
 
 export async function getHistory(chatId: number) {
@@ -432,6 +516,15 @@ ACTION:{"type":"add_expense","amount":800,"category":"Транспорт","descr
 Стипендия 5900₽ приходит 11 числа каждого месяца. Учитывай в прогнозе если сегодня <= 11.
 Если пользователь говорит "получил стипендию" → ACTION add_income_event с amount=5900
 
+РЕШЕНИЕ О ПОКУПКЕ (стоит ли купить X в кредит / за наличные):
+Когда в контексте есть раздел "СЦЕНАРНЫЙ АНАЛИЗ ПОКУПКИ" — используй ТОЛЬКО эти цифры.
+Не придумывай свои расчёты. Структура ответа:
+1. 💳 *Кредит (33%, 12 мес.)*: платёж/мес + переплата
+2. 💵 *Наличные*: остаток ликвидности, безопасно/нет
+3. ⏳ *Ожидание бонуса* (если есть): срок + покрытие
+4. ✅ *Рекомендация* (одна строка — из контекста)
+Никакого пересчёта! Берёшь готовые цифры из раздела анализа.
+
 ВАЖНО: если задача требует уточнения — НЕ выполняй ACTION, только задай вопрос.`
 
 interface BotAction {
@@ -676,12 +769,16 @@ export async function executeAction(action: BotAction): Promise<void> {
 
 async function processWithModel(text: string, chatId: number, model: 'haiku'|'sonnet'): Promise<string> {
   const needAnalysis = /проанализир|анализ трат|паттерн|на что трачу|куда уход|структур.*трат/i.test(text)
-  const [context, history, analysis] = await Promise.all([
+  const isDecision = detectDecisionQuery(text)
+  const itemCost = isDecision ? extractCostFromText(text) : null
+
+  const [context, history, analysis, decisionCtx] = await Promise.all([
     getContext(),
     getHistory(chatId),
     needAnalysis ? getSpendingAnalysis() : Promise.resolve(''),
+    itemCost ? getDecisionContext(itemCost) : Promise.resolve(''),
   ])
-  const fullContext = context + (analysis ? '\n\n' + analysis : '')
+  const fullContext = context + (analysis ? '\n\n' + analysis : '') + (decisionCtx ? '\n\n' + decisionCtx : '')
   const modelId = model === 'sonnet' ? 'claude-sonnet-4-6' : 'claude-haiku-4-5-20251001'
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method:'POST',
@@ -718,6 +815,7 @@ function routeModel(text: string): 'haiku' | 'sonnet' {
     /повышен|изменил|поменял|пересмотр|формул|порог|номинал/i,
     /полный|весь бюджет|все цифры|подробно|анализ|почему|объясни/i,
     /кварталь|квартал/i,
+    /стоит ли|в кредит|рассрочк|переплат|выгодно ли купить/i,
     /\?.*\?.*\?/,
   ]
   if (text.length > 250) return 'sonnet'

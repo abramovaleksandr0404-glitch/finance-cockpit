@@ -103,6 +103,50 @@ function annuityPayment(principal: number, monthlyRate: number, months: number):
   return (principal * monthlyRate * k) / (k - 1)
 }
 
+// ── Досрочное погашение ──────────────────────────────────────────────────────
+
+export interface RepaymentSuggestion {
+  loanName: string
+  repayAmount: number
+  annualSavings: number
+  newPayment: number
+  paymentReduction: number
+}
+
+/**
+ * Находит оптимальное досрочное погашение.
+ * Возвращает null если свободных средств недостаточно.
+ */
+export function suggestEarlyRepayment(
+  liquidBalance: number,
+  loans: Array<{ name: string; principal: number; rate: number; minPayment: number }>,
+  safeBuffer = 30000,
+): RepaymentSuggestion | null {
+  const freeCash = liquidBalance - safeBuffer
+  if (freeCash < 10000) return null
+
+  const activeLoan = [...loans]
+    .filter(l => l.principal > 0)
+    .sort((a, b) => b.rate - a.rate)[0]
+
+  if (!activeLoan) return null
+
+  const repayAmount = Math.min(freeCash, activeLoan.principal)
+  if (repayAmount < 5000) return null
+
+  const annualSavings = Math.round(repayAmount * activeLoan.rate)
+  const ratio = Math.max(0, (activeLoan.principal - repayAmount) / activeLoan.principal)
+  const newPayment = Math.round(activeLoan.minPayment * ratio)
+
+  return {
+    loanName: activeLoan.name,
+    repayAmount: Math.round(repayAmount),
+    annualSavings,
+    newPayment,
+    paymentReduction: Math.round(activeLoan.minPayment * (1 - ratio)),
+  }
+}
+
 export function analyzeDecision(input: DecisionInput): DecisionResult {
   const monthlyRate = input.loanRate / 12
   const monthlyPayment = annuityPayment(input.itemCost, monthlyRate, input.loanMonths)
