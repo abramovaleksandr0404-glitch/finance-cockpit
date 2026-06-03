@@ -11,12 +11,20 @@ export async function POST(req: Request) {
   try { update = await req.json() } catch { return NextResponse.json({ ok: true }) }
 
   const message = update?.message as Record<string, unknown> | undefined
-  if (!message) return NextResponse.json({ ok: true })
-  const chatId = (message.chat as Record<string, number>)?.id
+  const callbackQuery = update?.callback_query as Record<string, unknown> | undefined
+  if (!message && !callbackQuery) return NextResponse.json({ ok: true })
+
+  const chatId = (message?.chat as Record<string, number>)?.id
+    ?? ((callbackQuery?.message as Record<string, unknown>)?.chat as Record<string, number>)?.id
   if (!chatId) return NextResponse.json({ ok: true })
+
+  const ALLOWED_CHAT_ID = Number(process.env.ALLOWED_TELEGRAM_CHAT_ID)
+  if (ALLOWED_CHAT_ID && chatId !== ALLOWED_CHAT_ID) return NextResponse.json({ ok: true })
 
   // Сохранить chat_id для утреннего дежурства
   storeChatId(chatId).catch(() => {})
+
+  if (!message) return NextResponse.json({ ok: true })
 
   try {
     // ── Голосовое сообщение ──────────────────────────────────
