@@ -138,15 +138,134 @@ export function suggestEarlyRepayment(
   }
 }
 
-/** Кол-во рабочих дней (пн-пт) в месяце */
-export function computeWorkingDays(year: number, month: number): number {
+/** Кол-во рабочих дней (пн-пт) в месяце с учётом праздников */
+export function computeWorkingDays(year: number, month: number, holidays?: string[]): number {
+  const holidaySet = new Set(holidays ?? [])
   const daysInMonth = new Date(year, month, 0).getDate()
   let count = 0
   for (let d = 1; d <= daysInMonth; d++) {
+    const dateStr = `${year}-${String(month).padStart(2,'0')}-${String(d).padStart(2,'0')}`
     const day = new Date(year, month - 1, d).getDay()
-    if (day !== 0 && day !== 6) count++
+    if (day !== 0 && day !== 6 && !holidaySet.has(dateStr)) count++
   }
   return count
+}
+
+export interface CreditBurdenResult {
+  dailyRate: number
+  totalMonthlyPayment: number
+  workingDaysForLoans: number
+  percentOfIncome: number
+  freedomWorkingDay: number
+  totalRemainingInterest: number
+  loanDetails: Array<{ name: string; payment: number; daysEquivalent: number }>
+}
+
+export function computeCreditBurden(
+  loans: Array<{ name: string; min_payment: number; principal: number; rate: number }>,
+  salaryNet: number,
+  workingDays: number
+): CreditBurdenResult {
+  const dailyRate = workingDays > 0 ? Math.round(salaryNet / workingDays) : 0
+  const totalMonthlyPayment = Math.round(loans.reduce((s, l) => s + l.min_payment, 0))
+  const workingDaysForLoans = dailyRate > 0 ? Math.ceil(totalMonthlyPayment / dailyRate) : 0
+  const percentOfIncome = salaryNet > 0 ? Math.round(totalMonthlyPayment / salaryNet * 100) : 0
+  const freedomWorkingDay = workingDaysForLoans + 1
+  const totalRemainingInterest = Math.round(
+    loans.reduce((s, l) => {
+      const monthlyRate = l.rate / 12
+      const months = l.principal > 0 && l.min_payment > 0
+        ? Math.ceil(l.principal / Math.max(1, l.min_payment - l.principal * monthlyRate))
+        : 0
+      return s + Math.max(0, l.min_payment * months - l.principal)
+    }, 0)
+  )
+  const loanDetails = loans.map(l => ({
+    name: l.name,
+    payment: Math.round(l.min_payment),
+    daysEquivalent: dailyRate > 0 ? Math.round(l.min_payment / dailyRate * 10) / 10 : 0,
+  }))
+  return { dailyRate, totalMonthlyPayment, workingDaysForLoans, percentOfIncome, freedomWorkingDay, totalRemainingInterest, loanDetails }
+}
+
+export interface RepaymentStrategy {
+  type: 'close_fully' | 'partial_highest_rate' | 'partial_smallest'
+  loanName: string
+  amount: number
+  monthlySaving: number
+  annualROI: number
+  paybackMonths: number
+  explanation: string
+}
+
+export interface OptimalRepaymentResult {
+  availableForRepayment: number
+  strategies: RepaymentStrategy[]
+  topRecommendation: string
+}
+
+export function computeOptimalRepayment(
+  loans: Array<{ name: string; principal: number; rate: number; min_payment: number }>,
+  availableBonus: number,
+  mandatoryExpenses: number,
+  safeLiquid: number
+): OptimalRepaymentResult {
+  const available = Math.max(0, availableBonus - mandatoryExpenses - safeLiquid)
+  const activeLoan = loans.filter(l => l.principal > 0)
+  const strategies: RepaymentStrategy[] = []
+
+  // Strategy A: close smallest loan fully (psychological effect)
+  const bySmallest = [...activeLoan].sort((a, b) => a.principal - b.principal)
+  const smallest = bySmallest[0]
+  if (smallest && Math.round(smallest.principal) <= available) {
+    const saving = Math.round(smallest.min_payment)
+    const roi = smallest.principal > 0 ? Math.round(saving * 12 / smallest.principal * 100) : 0
+    const payback = saving > 0 ? Math.ceil(smallest.principal / saving) : 0
+    strategies.push({
+      type: 'close_fully',
+      loanName: smallest.name,
+      amount: Math.round(smallest.principal),
+      monthlySaving: saving,
+      annualROI: roi,
+      paybackMonths: payback,
+      explanation: `Закрыть ${smallest.name} полностью — психологический эффект + свободные ${saving.toLocaleString('ru-RU')}₽/мес навсегда`,
+    })
+  }
+
+  // Strategy B: partial highest rate (most financially optimal)
+  const byRate = [...activeLoan].sort((a, b) => b.rate - a.rate)
+  const expensive = byRate[0]
+  if (expensive && available >= 5000) {
+    const amount = Math.min(available, expensive.principal)
+    const newPrincipal = Math.max(0, expensive.principal - amount)
+    const ratio = expensive.principal > 0 ? newPrincipal / expensive.principal : 0
+    const newPayment = Math.round(expensive.min_payment * ratio)
+    const saving = expensive.min_payment - newPayment
+    const roi = amount > 0 ? Math.round(saving * 12 / amount * 100) : 0
+    const payback = saving > 0 ? Math.ceil(amount / saving) : 0
+    // Only add if it's different from strategy A
+    if (!strategies.length || expensive.name !== smallest?.name || amount < Math.round(expensive.principal)) {
+      strategies.push({
+        type: 'partial_highest_rate',
+        loanName: expensive.name,
+        amount: Math.round(amount),
+        monthlySaving: saving,
+        annualROI: roi,
+        paybackMonths: payback,
+        explanation: `Частично погасить ${expensive.name} (${(expensive.rate * 100).toFixed(1)}%): платёж ${expensive.min_payment.toLocaleString('ru-RU')} → ${newPayment.toLocaleString('ru-RU')}₽/мес`,
+      })
+    }
+  }
+
+  // Sort by annualROI desc
+  strategies.sort((a, b) => b.annualROI - a.annualROI)
+
+  const top = strategies[0]
+  const topRecommendation = top
+    ? `Направь ${top.amount.toLocaleString('ru-RU')}₽ на ${top.loanName}: сэкономишь ${top.monthlySaving.toLocaleString('ru-RU')}₽/мес, ROI ${top.annualROI}%/год, окупаемость ${top.paybackMonths} мес`
+    : `Доступно для погашения: ${available.toLocaleString('ru-RU')}₽ — недостаточно для значимого эффекта`
+
+  return { availableForRepayment: Math.round(available), strategies, topRecommendation }
 }
 
 /** Расчёт корректировки за отпуск/больничный */

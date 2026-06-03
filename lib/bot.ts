@@ -3,7 +3,7 @@
  * Жёсткий мобильный формат + надёжный парсер ACTION + квартальный бонус
  */
 import { createClient, SupabaseClient } from '@supabase/supabase-js'
-import { analyzeDecision, suggestEarlyRepayment, computeWorkingDays, computeVacationAdjustment } from './calc'
+import { analyzeDecision, suggestEarlyRepayment, computeWorkingDays, computeVacationAdjustment, computeCreditBurden, computeOptimalRepayment } from './calc'
 
 const USER_ID = '5ebdb411-6021-4dfc-9d0d-caa8e0107502'
 const TG = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}`
@@ -68,7 +68,7 @@ export async function getContext(): Promise<string> {
   const qStartKey = `${now.getFullYear()}-${String(qStartMonth).padStart(2,'0')}`
   const qEndKey = `${now.getFullYear()}-${String(qStartMonth + 2).padStart(2,'0')}`
 
-  const [{data:user},{data:loans},{data:expenses},{data:month},{data:goals},{data:recentExp},{data:quarterMonths},{data:cards},{data:incomeEvents},{data:customCats},{data:corrections}] = await Promise.all([
+  const [{data:user},{data:loans},{data:expenses},{data:month},{data:goals},{data:recentExp},{data:quarterMonths},{data:cards},{data:incomeEvents},{data:customCats},{data:corrections},{data:holidays}] = await Promise.all([
     supabase.from('users').select('*').eq('id',USER_ID).single(),
     supabase.from('loans').select('id,name,principal,accrued_int,min_payment,end_date,rate,paid_month,due_day').eq('user_id',USER_ID).order('sort_order'),
     supabase.from('expenses').select('id,amount,category,description,expense_date,custom_category_id').eq('user_id',USER_ID).eq('month_key',monthKey),
@@ -80,8 +80,12 @@ export async function getContext(): Promise<string> {
     supabase.from('income_events').select('event_date,description,amount').eq('user_id',USER_ID).eq('month_key',monthKey),
     supabase.from('custom_categories').select('id,name,monthly_limit,alert_at_percent').eq('user_id',USER_ID),
     supabase.from('bot_corrections').select('correction,category,created_at').eq('user_id',USER_ID).order('created_at',{ascending:false}).limit(10),
+    supabase.from('ru_holidays').select('holiday_date').gte('holiday_date',`${now.getFullYear()}-${String(curMonth).padStart(2,'0')}-01`).lte('holiday_date',`${now.getFullYear()}-${String(curMonth).padStart(2,'0')}-31`),
   ])
   if (!user) return 'Данные не загружены'
+
+  const holidayDates = (holidays ?? []).map((h: {holiday_date: string}) => h.holiday_date)
+  const workingDaysInMonth = computeWorkingDays(now.getFullYear(), curMonth, holidayDates)
 
   const debitSber = Number(user.debit_balance ?? 0)
   const debitTbank = Number(user.tbank_debit ?? 0)
@@ -239,8 +243,7 @@ ${cardLines}
   ЗП ${eomReceived?'✅':`⏳ ${rub(eomAmount)}`} + Бонус ${eomReceived?'✅':`⏳ ${rub(bonusAmount)}`} (${eomDay}-го, посл. раб. день месяца)
 
 ${salaryAdjustments.length > 0 ? `\nКОРРЕКТИРОВКИ ЗП:\n${salaryAdjustments.map((a: SalaryAdjustment) => {
-  const wdays = computeWorkingDays(now.getFullYear(), now.getMonth()+1)
-  const adj = computeVacationAdjustment(a.days, a.paid_amount, salaryNet, wdays)
+  const adj = computeVacationAdjustment(a.days, a.paid_amount, salaryNet, workingDaysInMonth)
   return `  • ${a.type==='sick'?'больничный':'отпуск'} ${a.days}д: получено ${rub(a.paid_amount)}, вычтено из ${a.deduct_from==='advance'?'аванса':'зп'}: ${rub(a.deduct)}, потеря: ${rub(adj.actualLoss)}`
 }).join('\n')}\n` : ''}ВЫХОДЫ:
   Кредиты неоплаченные: ${rub(pendingLoanPayments)} [платёж 4 кредитов]
@@ -297,7 +300,10 @@ ${goalLines}
   Выплачивается в конце первого месяца следующего квартала
 
 === НАСТРОЙКИ ===
-  Оклад net: ${rub(salaryNet)} | gross: ${rub(Number(user.salary_gross))} | YTD gross: ${rub(Number(user.ytd_gross))}
+  Оклад net: ${rub(salaryNet)} | gross: ${rub(Number(user.salary_gross))}
+  YTD gross: ${rub(Number(user.ytd_gross ?? 0))} | До порога 15% НДФЛ: ${rub(Math.max(0, 2400000 - Number(user.ytd_gross ?? 0)))}
+  Рабочих дней: ${workingDaysInMonth} (с учётом праздников РФ)
+  Дневная ставка оклада: ${rub(Math.round(salaryNet / workingDaysInMonth))}/день
   Порог: ${rub(threshold)} (эквивалент ~${rub(threshold/marginShare)} выручки или клиентов на эту сумму номиналов)
   Момент: ${(momentShare*100).toFixed(0)}% → ежемесячный | Годовой остаток: ${((1-momentShare)*100).toFixed(0)}%
   Марджин выручки: ${(marginShare*100).toFixed(0)}% | НДФЛ: ${(r1*100).toFixed(0)}%
@@ -620,6 +626,23 @@ function extractActions(text: string): { actions: BotAction[], cleanText: string
   return { actions, cleanText: cleanText.replace(/\n{3,}/g, '\n\n').trim() }
 }
 
+// ── Запись истории изменений дебетового баланса ────────────────────────────
+async function recordDebitChange(
+  s: SupabaseClient,
+  prevBalance: number,
+  newBalance: number,
+  description: string,
+  sourceType: string
+): Promise<void> {
+  await s.from('debit_history').insert({
+    user_id: USER_ID,
+    amount: Math.round((newBalance - prevBalance) * 100) / 100,
+    balance_after: Math.round(newBalance * 100) / 100,
+    description,
+    source_type: sourceType,
+  }).then(() => {})
+}
+
 // ── Выполнение действий ───────────────────────────────────────────────────
 export async function executeAction(action: BotAction): Promise<void> {
   const s = db()
@@ -642,7 +665,10 @@ export async function executeAction(action: BotAction): Promise<void> {
   if (action.type === 'add_expense' && action.amount) {
     await s.from('expenses').insert({user_id:USER_ID,month_key:monthKey,expense_date:new Date().toISOString().split('T')[0],category:action.category??'Прочее',amount:Math.round(action.amount),description:action.description??null,source_type:'debit'})
     const { data:u } = await s.from('users').select('debit_balance').eq('id',USER_ID).single()
-    await s.from('users').update({debit_balance:Math.round((Number(u?.debit_balance??0)-action.amount)*100)/100,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
+    const prevBal = Number(u?.debit_balance ?? 0)
+    const newBal = Math.round((prevBal - action.amount) * 100) / 100
+    await s.from('users').update({debit_balance:newBal,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
+    await recordDebitChange(s, prevBal, newBal, `Трата: ${action.description ?? action.category}`, 'expense')
   }
 
   if (action.type === 'delete_expense') {
@@ -657,7 +683,10 @@ export async function executeAction(action: BotAction): Promise<void> {
     if (exp) {
       await s.from('expenses').delete().eq('id',exp.id)
       const { data:u } = await s.from('users').select('debit_balance').eq('id',USER_ID).single()
-      await s.from('users').update({debit_balance:Math.round((Number(u?.debit_balance??0)+Number(exp.amount))*100)/100,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
+      const prevBal = Number(u?.debit_balance ?? 0)
+      const newBal = Math.round((prevBal + Number(exp.amount)) * 100) / 100
+      await s.from('users').update({debit_balance:newBal,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
+      await recordDebitChange(s, prevBal, newBal, `Удаление траты`, 'expense_delete')
     }
   }
 
