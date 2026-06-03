@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
-import { generateMorningBriefing, sendTelegram, executeAction, type BotAction } from '@/lib/bot'
+import { generateMorningBriefing, sendTelegram, sendTelegramWithButtons, executeAction, type BotAction } from '@/lib/bot'
 
 export const dynamic = 'force-dynamic'
 
@@ -50,6 +50,43 @@ export async function GET(req: Request) {
         if (userData?.telegram_chat_id) {
           await sendTelegram(userData.telegram_chat_id, `🏠 *Общежитие ${fc[dormIdx].amount.toLocaleString('ru-RU')}₽ списано автоматически* (12-е число)`)
         }
+      }
+    }
+
+    // Уведомления с inline кнопками за день до recurring
+    const advDay = (() => {
+      const d = new Date(new Date().getFullYear(), new Date().getMonth(), 15)
+      while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() - 1)
+      return d.getDate()
+    })()
+    const monthData = await supabase.from('months').select('salary_adv_received,salary_adv_amount,recurring_received').eq('user_id', USER_ID).eq('month_key', monthKey).maybeSingle()
+    const advReceived = !!monthData?.data?.salary_adv_received
+
+    for (const r of recurringIncomes) {
+      if (r.day === today + 1 && !received.includes(r.name)) {
+        if (user?.telegram_chat_id) {
+          await sendTelegramWithButtons(user.telegram_chat_id,
+            `⏰ Завтра ${r.day}-го — *${r.name}* ${r.amount.toLocaleString('ru-RU')}₽. Получил?`,
+            [[
+              { text: '✅ Получил', callback_data: 'received_stipend' },
+              { text: '⏭ Ещё нет', callback_data: 'skip' },
+            ]]
+          )
+        }
+      }
+    }
+
+    // Аванс за день до
+    if (today + 1 === advDay && !advReceived) {
+      if (user?.telegram_chat_id) {
+        const advAmount = Number(monthData?.data?.salary_adv_amount ?? Math.round(Number(user?.debit_balance ?? 0) / 2))
+        await sendTelegramWithButtons(user.telegram_chat_id,
+          `⏰ Завтра ${advDay}-го — *аванс* ${advAmount.toLocaleString('ru-RU')}₽. Подтвердить получение?`,
+          [[
+            { text: '✅ Получил аванс', callback_data: 'received_advance' },
+            { text: '⏭ Ещё нет', callback_data: 'skip' },
+          ]]
+        )
       }
     }
 

@@ -341,6 +341,24 @@ console.log('\n=== computeWorkingDays с праздниками (Sprint 6) ===')
   check('июнь 2026 с 12 июня праздником = 21', computeWorkingDays(2026, 6, ['2026-06-12']), 21)
 }
 
+console.log('\n=== ПРОМПТ: SPRINT 7 ===')
+{
+  check('compare_months зарегистрирован', TOOLS.some(t => t.name === 'compare_months'), true)
+  check('СТАВКИ в промпте', SYSTEM_PROMPT.includes('СТАВКИ'), true)
+  check('БЭКЛОГ РАЗРАБОТКИ в промпте', SYSTEM_PROMPT.includes('БЭКЛОГ РАЗРАБОТКИ'), true)
+  // ChartsWidget существует
+  const chartsExists = existsSync(join(process.cwd(), 'components/dashboard/ChartsWidget.tsx'))
+  check('ChartsWidget.tsx создан', chartsExists, true)
+  // BalanceHistoryChart существует
+  const balanceHistExists = existsSync(join(process.cwd(), 'components/dashboard/BalanceHistoryChart.tsx'))
+  check('BalanceHistoryChart.tsx создан', balanceHistExists, true)
+  // sendTelegramWithButtons экспортируется
+  const botContent = readFileSync(join(process.cwd(), 'lib/bot.ts'), 'utf-8')
+  check('sendTelegramWithButtons в bot.ts', botContent.includes('sendTelegramWithButtons'), true)
+  check('answerCallbackQuery в route.ts', readFileSync(join(process.cwd(), 'app/api/telegram/route.ts'), 'utf-8').includes('answerCallbackQuery'), true)
+  check('smart alert дебет < 5000', readFileSync(join(process.cwd(), 'app/api/cron/evening/route.ts'), 'utf-8').includes('5000'), true)
+}
+
 console.log(`\n${'='.repeat(40)}`)
 console.log(`ИТОГО: ${passed} прошло, ${failed} провалено`)
 console.log('='.repeat(40))

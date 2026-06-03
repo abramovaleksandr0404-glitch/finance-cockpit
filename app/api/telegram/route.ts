@@ -1,7 +1,15 @@
 import { NextResponse } from 'next/server'
-import { processMessage, processImage, sendTelegram, transcribeVoice, storeChatId } from '@/lib/bot'
+import { processMessage, processImage, sendTelegram, transcribeVoice, storeChatId, executeAction } from '@/lib/bot'
 
 const WEBHOOK_SECRET = process.env.BOT_WEBHOOK_SECRET
+
+async function answerCallbackQuery(callbackQueryId: string, text: string) {
+  await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ callback_query_id: callbackQueryId, text, show_alert: false }),
+  })
+}
 
 export async function POST(req: Request) {
   const secret = req.headers.get('x-telegram-bot-api-secret-token')
@@ -17,6 +25,24 @@ export async function POST(req: Request) {
   if (incomingId !== ALLOWED) return NextResponse.json({ ok: true })
 
   const message = body.message as Record<string, unknown> | undefined
+
+  // ── Callback query (inline кнопки) ──────────────────────────
+  const callbackQuery = body.callback_query as Record<string, unknown> | undefined
+  if (callbackQuery) {
+    const cbData = callbackQuery.data as string | undefined
+    const cbMsgChatId = ((callbackQuery.message as Record<string, unknown>)?.chat as Record<string, number>)?.id
+    if (cbData === 'received_stipend') {
+      await executeAction({ type: 'mark_recurring_received', name: 'Стипендия' })
+      await answerCallbackQuery(callbackQuery.id as string, '✅ Стипендия зачислена!')
+      if (cbMsgChatId) await sendTelegram(cbMsgChatId, '✅ Стипендия 5 900₽ зачислена на дебет')
+    } else if (cbData === 'received_advance') {
+      await executeAction({ type: 'mark_salary', part: 'advance' })
+      await answerCallbackQuery(callbackQuery.id as string, '✅ Аванс зачислен!')
+      if (cbMsgChatId) await sendTelegram(cbMsgChatId, '✅ Аванс зачислен на дебет')
+    }
+    return NextResponse.json({ ok: true })
+  }
+
   if (!message) return NextResponse.json({ ok: true })
 
   const chatId = incomingId

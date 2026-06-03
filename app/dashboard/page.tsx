@@ -33,6 +33,7 @@ export default async function DashboardPage({
     { data: loans },
     { data: cards },
     { data: goals },
+    { data: debitHistory },
   ] = await Promise.all([
     supabase.from('users').select('*').eq('id', user.id).single(),
     supabase.from('months').select('*').eq('user_id', user.id).order('month_key', { ascending: false }),
@@ -42,6 +43,7 @@ export default async function DashboardPage({
     supabase.from('loans').select('*').eq('user_id', user.id).order('sort_order'),
     supabase.from('cards').select('*').eq('user_id', user.id).order('sort_order'),
     supabase.from('goals').select('*').eq('user_id', user.id).order('sort_order'),
+    supabase.from('debit_history').select('amount,balance_after,description,source_type,created_at').eq('user_id', user.id).order('created_at', { ascending: false }).limit(30),
   ])
 
   if (!userRow) redirect('/auth')
@@ -59,6 +61,7 @@ export default async function DashboardPage({
     loans: loans ?? [],
     cards: cards ?? [],
     goals: goals ?? [],
+    debitHistory: (debitHistory ?? []) as DashboardData['debitHistory'],
   }
 
   return <DashboardClient data={data} monthKey={mk} initialTab={initialTab} />

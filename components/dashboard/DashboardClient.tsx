@@ -20,6 +20,8 @@ import DebtChartWidget from './DebtChartWidget'
 import AccountsTransferWidget from './AccountsTransferWidget'
 import GoalsWidget from './GoalsWidget'
 import FinancialHealthCard from './FinancialHealthCard'
+import ChartsWidget from './ChartsWidget'
+import BalanceHistoryChart from './BalanceHistoryChart'
 
 import { undoLastAction } from '@/app/actions'
 import { monthLabel, currentMonthKey } from '@/lib/finance'
@@ -77,6 +79,7 @@ export default function DashboardClient({ data, monthKey, initialTab = 'main' }:
         <div className="flex flex-col gap-4">
           <FinancialHealthCard data={data} monthKey={monthKey} />
           <StatsBar data={data} monthKey={monthKey} />
+          <BalanceHistoryChart history={data.debitHistory} />
           <AccountsTransferWidget user={data.user} cards={data.cards} />
           <CashflowWaterfall data={data} monthKey={monthKey} />
           <MonthCloseCard data={data} monthKey={monthKey} />
@@ -94,6 +97,7 @@ export default function DashboardClient({ data, monthKey, initialTab = 'main' }:
       case 'expenses': return (
         <div className="flex flex-col gap-4">
           <ExpensesWidget data={data} monthKey={monthKey} />
+          <ChartsWidget data={data} monthKey={monthKey} />
           <FixedCostsWidget user={data.user} month={data.allMonths.find(m => m.month_key === monthKey) ?? null} monthKey={monthKey} />
         </div>
       )

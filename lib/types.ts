@@ -377,6 +377,15 @@ export type Loan           = Database['public']['Tables']['loans']['Row']
 export type Card           = Database['public']['Tables']['cards']['Row']
 export type Goal           = Database['public']['Tables']['goals']['Row']
 
+// ── Debit history entry ──────────────────────────────────────────────────────
+export interface DebitHistoryEntry {
+  amount: number
+  balance_after: number
+  description: string
+  source_type: string
+  created_at: string
+}
+
 // ── Dashboard bundle ─────────────────────────────────────────────────────────
 export interface DashboardData {
   user: UserProfile
@@ -388,4 +397,5 @@ export interface DashboardData {
   loans: Loan[]
   cards: Card[]
   goals: Goal[]
+  debitHistory?: DebitHistoryEntry[]
 }

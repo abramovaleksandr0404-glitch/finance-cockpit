@@ -72,6 +72,42 @@ export async function GET(req: Request) {
       }
     }
 
+    // Smart cashflow alerts
+    const now2 = new Date()
+    const today2 = now2.getDate()
+    const daysInMonth2 = new Date(now2.getFullYear(), now2.getMonth() + 1, 0).getDate()
+
+    // А. Половина бюджета меньше чем за полмесяца
+    const pctUsedVar = varSpent / varBudget
+    if (pctUsedVar > 0.5 && today2 < 15) {
+      const dailyLeft = Math.round((varBudget - varSpent) / Math.max(1, daysInMonth2 - today2))
+      alerts.push(`⚡ Уже потрачено *${Math.round(pctUsedVar * 100)}%* переменного лимита, а только ${today2}-е. Дневной бюджет: ${rub(dailyLeft)}`)
+    }
+
+    // Б. Дебет < 5000 и до зп > 5 дней
+    const liquidEvening = Number(user.debit_balance ?? 0) + Number(user.tbank_debit ?? 0)
+    const advDayEvening = (() => {
+      const d = new Date(now2.getFullYear(), now2.getMonth(), 15)
+      while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() - 1)
+      return d.getDate()
+    })()
+    const daysToAdvance = advDayEvening > today2 ? advDayEvening - today2 : 0
+    if (liquidEvening < 5000 && daysToAdvance > 5) {
+      alerts.push(`⚠️ Дебет *${rub(liquidEvening)}* — до аванса ещё *${daysToAdvance} дней*. Осторожно с тратами.`)
+    }
+
+    // В. Вредные расходы > 60%
+    const { data: harmfulCats } = await supabase.from('custom_categories').select('id,name,monthly_limit').eq('user_id', USER_ID).ilike('name', '%вред%')
+    if (harmfulCats?.length) {
+      for (const cat of harmfulCats) {
+        if (!cat.monthly_limit) continue
+        const { data: harmExp } = await supabase.from('expenses').select('amount').eq('user_id', USER_ID).eq('month_key', mk).not('custom_category_id', 'is', null).eq('custom_category_id', cat.id)
+        const harmSum = (harmExp ?? []).reduce((s, e) => s + Number(e.amount), 0)
+        const harmPct = Math.round(harmSum / cat.monthly_limit * 100)
+        if (harmPct > 60) alerts.push(`🔴 *${cat.name}*: ${rub(harmSum)} из ${rub(cat.monthly_limit)} (${harmPct}%) — подумай.`)
+      }
+    }
+
     if (alerts.length === 0) return NextResponse.json({ ok: true, reason: 'no alerts' })
 
     const msg = `🔔 *Вечерний дайджест*\n\n${alerts.join('\n\n')}\n\n_Дебет: ${rub(Number(user.debit_balance??0))}_`
