@@ -49,6 +49,38 @@
 - 4 кредита, аннуитет, ~44 144₽/мес
 - Номиналы: г3=7200, г4=14400, г56=21600, г78=43200, г9=64000, г10=80000
 
+## Deploy Workflow
+
+### Деплой приложения
+Деплой делается через **Vercel MCP tool**, не через `deploy.sh` и не через zip-архивы.
+`deploy.sh` существует в репозитории, но для обычной работы не используется.
+
+```
+mcp__vercel__deploy_to_vercel  ← стандартный деплой
+```
+
+Обычный флоу: `git push` → Vercel автоматически деплоит с main (watch on GitHub).
+Форсированный деплой вручную — через `deploy_to_vercel` MCP tool.
+
+### Миграции БД
+Все изменения схемы Supabase — через **Supabase MCP tool**:
+
+```
+mcp__supabase__apply_migration  ← применить SQL-миграцию
+mcp__supabase__list_tables      ← посмотреть текущую схему
+mcp__supabase__execute_sql      ← разовый SQL-запрос
+```
+
+Перед apply_migration всегда делать `list_tables` чтобы понять текущее состояние схемы.
+
+### Диагностика и логи
+```
+mcp__vercel__get_runtime_logs       ← логи serverless функций (бот, cron)
+mcp__vercel__get_deployment         ← статус конкретного деплоя
+mcp__vercel__get_deployment_build_logs  ← логи сборки при ошибке деплоя
+mcp__supabase__get_logs             ← логи Supabase (PostgREST, auth и т.п.)
+```
+
 ## Константы окружения (Vercel env vars)
 TELEGRAM_BOT_TOKEN, BOT_WEBHOOK_SECRET, SUPABASE_SERVICE_ROLE_KEY,
 ANTHROPIC_API_KEY, GROQ_API_KEY, CRON_SECRET, NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_ANON_KEY
