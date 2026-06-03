@@ -167,8 +167,14 @@ export async function getContext(): Promise<string> {
   const goalLines = (goals ?? []).map(g => `  • ${g.name}: ${rub(Number(g.amount))} ${g.month_key ? '('+g.month_key+')' : '(накопление)'}`).join('\n') || '  (нет)'
   const loanLines = (loans ?? []).map(l => {
     const total = Number(l.principal) + Number(l.accrued_int)
-    const paid = l.paid_month === monthKey ? '✅' : '⏳'
-    return `  • ${l.name}: ${rub(total)} @ ${(Number(l.rate)*100).toFixed(2)}% — ${rub(Number(l.min_payment))}/мес ${paid}`
+    const paid = l.paid_month === monthKey ? '✅' : `⏳ (посл. платёж: ${l.paid_month ?? 'нет'})`
+    let suffix = ''
+    if (l.end_date) {
+      const endD = new Date(l.end_date)
+      const mLeft = Math.max(0, (endD.getFullYear() - now.getFullYear()) * 12 + (endD.getMonth() - now.getMonth()))
+      suffix = ` / осталось ${mLeft} мес. до ${l.end_date}`
+    }
+    return `  • ${l.name} [аннуитет]: ${rub(total)} @ ${(Number(l.rate)*100).toFixed(2)}% — ${rub(Number(l.min_payment))}/мес ${paid}${suffix}`
   }).join('\n')
   const cardLines = (cards ?? []).map(c => `  • ${c.name}: лимит ${rub(Number(c.card_limit))}, долг ${rub(Number(c.current_debt))}, доступно ${rub(Number(c.card_limit) - Number(c.current_debt))}`).join('\n') || '  (нет)'
   const recurringLines = recurringIncomes.map(r => `  • ${r.name}: ${rub(r.amount)} (${r.day} числа каждого месяца)`).join('\n') || '  (нет)'
@@ -321,7 +327,7 @@ ${catLines}
 ПОВТОРЯЮЩИЕСЯ ТРАТЫ:
 ${repeatLines}`
 }
-const SYSTEM_PROMPT = `Ты — финансовый ассистент Александра в Telegram. Александр работает в АТОН (продажи инвестиционных продуктов).
+export const SYSTEM_PROMPT = `Ты — финансовый ассистент Александра в Telegram. Александр работает в АТОН (продажи инвестиционных продуктов).
 
 ФОРМАТ ОТВЕТА — КРИТИЧНО:
 - Telegram на мобильном. НИКОГДА не используй markdown-таблицы (символ |). Они ломаются.
@@ -354,6 +360,22 @@ const SYSTEM_PROMPT = `Ты — финансовый ассистент Алек
   • Сервис/подписка (Claude/ChatGPT/Netflix) → "Это разовая или ежемесячная подписка?"
   • Упоминание контекста ("это касается X") → переспроси
   • Неясное название/категория
+
+ПРАВИЛО №4 — ЧЕСТНОСТЬ ИСТОЧНИКОВ:
+Каждая цифра должна иметь источник:
+• "в базе: X" — взято из контекста/БД
+• "ты сказал: Y" — пользователь сообщил только что
+• "я предполагаю: Z" — расчёт/допущение без точных данных
+НИКОГДА не придумывай данные которых нет в контексте.
+Лучше ответить "не знаю — уточни: [конкретно что нужно]",
+чем дать неточный ответ с выдуманными цифрами.
+
+ПРАВИЛО №5 — КОНФЛИКТ ДАННЫХ:
+Если пользователь называет цифру, которая не совпадает с базой:
+1. Покажи оба варианта: "в базе: X, ты говоришь: Y — что актуально?"
+2. Жди ответа — не делай инструмент до подтверждения
+3. После подтверждения — обнови БД через update_loan / update_settings
+4. Подтверди: "✅ Сохранил Y в базу"
 
 РАСПОЗНАВАНИЕ ПОДПИСОК:
 Claude, ChatGPT, Cursor, Copilot, OpenAI → постоянная "Обучение и ИИ"
@@ -426,6 +448,15 @@ Netflix, Spotify, Apple Music → постоянная "Подписки"
 Стипендия 5900₽ приходит 11 числа каждого месяца. Учитывай в прогнозе если сегодня <= 11.
 Если пользователь говорит "получил стипендию" → вызови инструмент mark_recurring_received с name="Стипендия".
 
+СЛОЖНАЯ ЗАДАЧА — ПРОТОКОЛ:
+При запросе требующем нескольких данных (расчёт, сравнение, план):
+а) Из контекста у меня: [перечисли ключевые цифры]
+б) Нужно для точного ответа: [чего не хватает]
+в) Задай один конкретный вопрос если данных не хватает
+г) Получив ответ — подтверди: "Понял так: ..."
+д) Реши задачу только по подтверждённым данным
+е) Получены новые факты о кредитах/настройках → обнови БД через инструмент
+
 ВАЖНО: если задача требует уточнения — НЕ вызывай инструменты, только задай вопрос. Вызывай инструмент лишь когда уверен.`
 
 interface BotAction {
@@ -433,6 +464,7 @@ interface BotAction {
   amount?: number; category?: string; description?: string; id?: string
   grade?: string; revenue?: number; name?: string; new_name?: string; month_key?: string|null
   field?: string; key?: string; value?: number|string; account?: string; part?: string
+  principal?: number; rate?: number; min_payment?: number; end_date?: string
 }
 
 // ── НАДЁЖНЫЙ ПАРСЕР ACTION ─────────────────────────────────────────────────
@@ -478,7 +510,7 @@ export async function executeAction(action: BotAction): Promise<void> {
     add_income_event:'доход',set_balance:'баланс',close_month:'закрытие',
     mark_recurring_received:'регулярный доход',
     update_settings:'настройки',add_fixed_cost:'+постоянная',
-    remove_fixed_cost:'-постоянная',edit_fixed_cost:'правка',undo:'отмена',
+    remove_fixed_cost:'-постоянная',edit_fixed_cost:'правка',update_loan:'обновление кредита',undo:'отмена',
   }
   if (snapLabel[action.type]) await snap(snapLabel[action.type])
 
@@ -661,6 +693,18 @@ export async function executeAction(action: BotAction): Promise<void> {
     }
   }
 
+  if (action.type === 'update_loan' && action.name) {
+    const { data:loan } = await s.from('loans').select('id').eq('user_id',USER_ID).ilike('name',`%${action.name}%`).maybeSingle()
+    if (loan) {
+      const upd: Record<string,unknown> = {}
+      if (action.principal != null) upd.principal = Math.round(action.principal)
+      if (action.rate != null) upd.rate = action.rate
+      if (action.min_payment != null) upd.min_payment = Math.round(action.min_payment)
+      if (action.end_date) upd.end_date = action.end_date
+      if (Object.keys(upd).length) await s.from('loans').update(upd).eq('id', loan.id)
+    }
+  }
+
   if (action.type === 'update_settings' && action.field) {
     const ALLOWED = ['salary_net','salary_gross','ytd_gross','threshold','moment_share','margin_share','var_budget']
     if (action.field === 'nominal' && action.key) {
@@ -693,7 +737,7 @@ export async function executeAction(action: BotAction): Promise<void> {
 }
 
 // ── ИНСТРУМЕНТЫ (tool calling) — надёжная замена парсингу ACTION ──────────
-const TOOLS = [
+export const TOOLS = [
   { name:'add_expense', description:'Записать переменную трату. Используй когда пользователь сообщает что потратил/купил/заплатил за разовое.',
     input_schema:{type:'object',properties:{amount:{type:'number'},category:{type:'string',enum:['Еда и кафе','Транспорт','Здоровье','Развлечения','Одежда','Инвестиции','Прочее']},description:{type:'string'}},required:['amount']} },
   { name:'delete_expense', description:'Удалить трату. По умолчанию последнюю (id="last") или по фрагменту id.',
@@ -728,6 +772,8 @@ const TOOLS = [
     input_schema:{type:'object',properties:{name:{type:'string'}},required:['name']} },
   { name:'edit_fixed_cost', description:'Изменить постоянную трату: новое имя и/или сумму.',
     input_schema:{type:'object',properties:{name:{type:'string'},new_name:{type:'string'},amount:{type:'number'}},required:['name']} },
+  { name:'update_loan', description:'Обновить параметры кредита (тело долга, ставку, платёж, дату окончания). Используй когда пользователь сообщает актуальные данные из банка или исправляет информацию.',
+    input_schema:{type:'object',properties:{name:{type:'string',description:'Название кредита (фрагмент для поиска)'},principal:{type:'number',description:'Новое тело долга'},rate:{type:'number',description:'Новая ставка (например 0.34)'},min_payment:{type:'number',description:'Новый ежемесячный платёж'},end_date:{type:'string',description:'Дата окончания YYYY-MM-DD'}},required:['name']} },
   { name:'update_settings', description:'Изменить настройку. field: salary_net/salary_gross/ytd_gross/threshold/moment_share/margin_share/var_budget, или nominal с key=g3..g10.',
     input_schema:{type:'object',properties:{field:{type:'string'},value:{type:'number'},key:{type:'string'}},required:['field','value']} },
   { name:'scenario_analysis', description:'Рассчитать экономику решения о покупке. Используй когда спрашивают "стоит ли купить X в кредит/рассрочку", "выгодно ли брать кредит", "лучше ли подождать бонуса". Возвращает сравнение: кредит vs наличные vs ожидание, с переплатой и рекомендацией.',

@@ -1,5 +1,5 @@
 /**
- * evals/run.ts — 51+ тестов чистых функций.
+ * evals/run.ts — тесты чистых функций + инварианты промпта.
  * Запуск: npm run eval
  * Все тесты проходят перед каждым коммитом.
  */
@@ -8,6 +8,7 @@ import {
   computeDailyBudget, advanceDay, lastWorkingDayOfMonth, analyzeDecision,
   suggestEarlyRepayment, type BonusConfig,
 } from '../lib/calc'
+import { SYSTEM_PROMPT, TOOLS } from '../lib/bot'
 
 let passed = 0, failed = 0
 function check(name: string, actual: unknown, expected: unknown) {
@@ -134,6 +135,31 @@ console.log('\n=== ДОСРОЧНОЕ ПОГАШЕНИЕ ===')
   const paid = [{ name:'Погашен', principal:0, accrued_int:0, rate:0.33, min_payment:5000 }]
   const noPrincipal = suggestEarlyRepayment(paid, 50000, 10000)
   check('кредит с principal=0 пропускается', noPrincipal, null)
+}
+
+console.log('\n=== ПРОМПТ: принцип честности (ПРАВИЛО №4) ===')
+{
+  check('промпт содержит "в базе"', SYSTEM_PROMPT.includes('в базе'), true)
+  check('промпт содержит "не знаю"', SYSTEM_PROMPT.includes('не знаю'), true)
+  check('промпт содержит "уточни"', SYSTEM_PROMPT.includes('уточни'), true)
+  check('промпт содержит "КОНФЛИКТ"', SYSTEM_PROMPT.includes('КОНФЛИКТ'), true)
+  check('промпт содержит "СЛОЖНАЯ ЗАДАЧА"', SYSTEM_PROMPT.includes('СЛОЖНАЯ ЗАДАЧА'), true)
+}
+
+console.log('\n=== ИНСТРУМЕНТЫ: update_loan ===')
+{
+  check('инструмент update_loan зарегистрирован', TOOLS.some(t => t.name === 'update_loan'), true)
+  const ul = TOOLS.find(t => t.name === 'update_loan')
+  const props = ul?.input_schema?.properties ?? {}
+  check('update_loan требует name', ul?.input_schema?.required?.includes('name'), true)
+  check('update_loan имеет поле principal', 'principal' in props, true)
+  check('update_loan имеет поле rate', 'rate' in props, true)
+  check('update_loan имеет поле min_payment', 'min_payment' in props, true)
+  check('update_loan имеет поле end_date', 'end_date' in props, true)
+  // scenario_analysis, suggest_early_repayment, early_repay также присутствуют
+  check('scenario_analysis зарегистрирован', TOOLS.some(t => t.name === 'scenario_analysis'), true)
+  check('suggest_early_repayment зарегистрирован', TOOLS.some(t => t.name === 'suggest_early_repayment'), true)
+  check('early_repay зарегистрирован', TOOLS.some(t => t.name === 'early_repay'), true)
 }
 
 console.log(`\n${'='.repeat(40)}`)
