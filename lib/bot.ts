@@ -133,6 +133,17 @@ export async function getContext(): Promise<string> {
   // После плановых покупок
   const projEndAfterPlanned = projEnd - plannedTotal
 
+  // Прогноз следующего месяца
+  const nextMonthDate = new Date(now.getFullYear(), now.getMonth() + 1, 1)
+  const nextYear = nextMonthDate.getFullYear()
+  const nextMonthNum = nextMonthDate.getMonth() + 1
+  const nextMK = `${nextYear}-${String(nextMonthNum).padStart(2,'0')}`
+  const nextAdvDay = advanceDay(nextYear, nextMonthNum)
+  const nextEomDay = lastWorkingDayOfMonth(nextYear, nextMonthNum)
+  const nextRecurringTotal = recurringIncomes.reduce((s,r)=>s+r.amount, 0)
+  const nextIncoming = advAmount + eomAmount + bonusAmount + nextRecurringTotal
+  const nextProjEnd = Math.round(projEnd + nextIncoming - totalMonthlyPayment - fixedTotal - varBudget)
+
   // Бонус
   const nominals = (user.nominals as Record<string,number>) ?? {}
   const clients = (month?.clients as Record<string,number>) ?? {}
@@ -219,6 +230,13 @@ ${plannedPurchases.length ? plannedPurchases.map(g=>`  • ${g.name}: ${rub(Numb
 ПРОГНОЗ ОСТАТКА К 30-го ИЮНЯ: ${rub(projEnd)}
   [формула: ликвидность ${rub(liquid)} + входы ${rub(incomingTotal)} − кредиты ${rub(pendingLoanPayments)} − постоянные ${rub(fixedUnpaid)} − переменные до лимита ${rub(varLeft)}]
 ПОСЛЕ ПЛАНОВЫХ ПОКУПОК (−${rub(plannedTotal)}): ${rub(projEndAfterPlanned)}
+
+=== ПРОГНОЗ СЛЕДУЮЩЕГО МЕСЯЦА (${nextMK}) ===
+  Стартовая ликвидность: ${rub(projEnd)} (= прогноз конца ${monthKey})
+  Входы: Аванс ⏳ ${rub(advAmount)} (${nextAdvDay}-го) + ЗП+Бонус ⏳ ${rub(eomAmount+bonusAmount)} (${nextEomDay}-го) + повтор. ${rub(nextRecurringTotal)}
+  Выходы: Кредиты ${rub(totalMonthlyPayment)} + Постоянные ${rub(fixedTotal)} + Переменные до лимита ${rub(varBudget)}
+  Прогноз остатка к концу ${nextMK}: ${rub(nextProjEnd)}
+  [формула: ${rub(projEnd)} + ${rub(nextIncoming)} − ${rub(totalMonthlyPayment)} − ${rub(fixedTotal)} − ${rub(varBudget)}]
 
 === КРЕДИТЫ (всего ${rub(totalDebt)}, платёж ${rub(totalMonthlyPayment)}/мес) ===
 ${loanLines}
@@ -377,6 +395,18 @@ export const SYSTEM_PROMPT = `Ты — финансовый ассистент �
 3. После подтверждения — обнови БД через update_loan / update_settings
 4. Подтверди: "✅ Сохранил Y в базу"
 
+ПРАВИЛО №6 — ПРАВИЛО ЦИТАТЫ:
+Для любого числа в разделе ГОТОВЫЕ ЦИФРЫ — цитируй ДОСЛОВНО. Не пересчитывай.
+Если хочешь перепроверить — покажи ОБА числа: "в контексте X, я перепроверил Y".
+Если числа расходятся — доверяй контексту (он свежее).
+ЗАПРЕЩЕНО: называть разные цифры одной и той же величины в соседних сообщениях.
+
+ПРОГНОЗ vs ФАКТ:
+Прогноз остатка = ликвидность + ВСЕ ожидаемые входы − ВСЕ обязательные выходы.
+Когда событие случилось (получил аванс) — зафиксируй через инструмент.
+Прогноз пересчитается сам: меньше "ожидаемых входов" + больше дебета.
+НЕ говори "прогноз вырос" — он не изменился, изменилась только разбивка.
+
 РАСПОЗНАВАНИЕ ПОДПИСОК:
 Claude, ChatGPT, Cursor, Copilot, OpenAI → постоянная "Обучение и ИИ"
 Netflix, Spotify, Apple Music → постоянная "Подписки"
@@ -447,6 +477,18 @@ Netflix, Spotify, Apple Music → постоянная "Подписки"
 РЕГУЛЯРНЫЕ ДОХОДЫ:
 Стипендия 5900₽ приходит 11 числа каждого месяца. Учитывай в прогнозе если сегодня <= 11.
 Если пользователь говорит "получил стипендию" → вызови инструмент mark_recurring_received с name="Стипендия".
+
+ПРАВИЛО ДЕЙСТВИЯ ВМЕСТО ВОПРОСА:
+Если из контекста очевиден ответ — отвечай сразу.
+Спрашивай ТОЛЬКО когда:
+  • Нужен факт из реального мира которого нет в контексте
+  • Две интерпретации одинаково правдоподобны
+  • Пользователь явно противоречит данным БД
+НЕ спрашивай: о структуре месяца, датах выплат, составе кредитов — это в контексте.
+
+ОБЪЯСНИТЕЛЬНЫЙ РЕЖИМ:
+Если пользователь просит то чего нет в инструментах — не говори "нет такого инструмента".
+Объясни ЧТО происходит в системе и предложи доступную альтернативу.
 
 СЛОЖНАЯ ЗАДАЧА — ПРОТОКОЛ:
 При запросе требующем нескольких данных (расчёт, сравнение, план):

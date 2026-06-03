@@ -162,6 +162,31 @@ console.log('\n=== ИНСТРУМЕНТЫ: update_loan ===')
   check('early_repay зарегистрирован', TOOLS.some(t => t.name === 'early_repay'), true)
 }
 
+console.log('\n=== ПРОМПТ: надёжный рассуждальщик (SPRINT 3) ===')
+{
+  check('ПРАВИЛО ЦИТАТЫ присутствует', SYSTEM_PROMPT.includes('ЦИТАТЫ'), true)
+  check('промпт содержит "доверяй контексту"', SYSTEM_PROMPT.includes('доверяй контексту'), true)
+  check('ПРОГНОЗ vs ФАКТ присутствует', SYSTEM_PROMPT.includes('ПРОГНОЗ vs ФАКТ'), true)
+  check('ПРАВИЛО ДЕЙСТВИЯ ВМЕСТО ВОПРОСА присутствует', SYSTEM_PROMPT.includes('ВМЕСТО ВОПРОСА'), true)
+  check('промпт содержит "очевиден"', SYSTEM_PROMPT.includes('очевиден'), true)
+  check('ОБЪЯСНИТЕЛЬНЫЙ РЕЖИМ присутствует', SYSTEM_PROMPT.includes('ОБЪЯСНИТЕЛЬНЫЙ'), true)
+  check('промпт содержит "не говори"', SYSTEM_PROMPT.includes('не говори'), true)
+}
+
+console.log('\n=== ДАТЫ СЛЕДУЮЩЕГО МЕСЯЦА ===')
+{
+  // Июль 2026: 15-е среда — рабочий
+  check('аванс июль 2026 (15 ср)', advanceDay(2026, 7), 15)
+  // Июль 2026: 31-е пятница — рабочий
+  check('посл. раб. день июля 2026 (31 пт)', lastWorkingDayOfMonth(2026, 7), 31)
+  // Август 2026: 15-е суббота → сдвиг на 14 пт
+  check('аванс август 2026 (15 сб → 14 пт)', advanceDay(2026, 8), 14)
+  // Декабрь 2026: 31-е четверг — рабочий
+  check('посл. раб. день декабрь 2026 (31 чт)', lastWorkingDayOfMonth(2026, 12), 31)
+  // Январь 2027: 15-е пятница — рабочий
+  check('аванс январь 2027 (15 пт)', advanceDay(2027, 1), 15)
+}
+
 console.log(`\n${'='.repeat(40)}`)
 console.log(`ИТОГО: ${passed} прошло, ${failed} провалено`)
 console.log('='.repeat(40))
