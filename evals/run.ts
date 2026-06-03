@@ -314,6 +314,33 @@ console.log('\n=== ПРОМПТ: SPRINT 5 ===')
   check('КРЕДИТНАЯ НАГРУЗКА в промпте', SYSTEM_PROMPT.includes('КРЕДИТНАЯ НАГРУЗКА'), true)
 }
 
+console.log('\n=== ПРОМПТ: SPRINT 6 ===')
+{
+  check('reclassify_expense зарегистрирован', TOOLS.some(t => t.name === 'reclassify_expense'), true)
+  check('update_cashflow зарегистрирован', TOOLS.some(t => t.name === 'update_cashflow'), true)
+  check('add_backlog_item зарегистрирован', TOOLS.some(t => t.name === 'add_backlog_item'), true)
+  check('add_multiday_expense зарегистрирован', TOOLS.some(t => t.name === 'add_multiday_expense'), true)
+  check('АВТОТРИГГЕР в промпте', SYSTEM_PROMPT.includes('АВТОТРИГГЕР'), true)
+  check('БЭКЛОГ РАЗРАБОТКИ в промпте', SYSTEM_PROMPT.includes('БЭКЛОГ РАЗРАБОТКИ'), true)
+  check('ОБНОВЛЕНИЕ КЕШФЛОУ в промпте', SYSTEM_PROMPT.includes('ОБНОВЛЕНИЕ КЕШФЛОУ'), true)
+  check('СТАВКИ в промпте', SYSTEM_PROMPT.includes('СТАВКИ'), true)
+  check('formula категория в промпте', SYSTEM_PROMPT.includes('formula'), true)
+  check('галлюцинируешь в промпте', SYSTEM_PROMPT.includes('галлюцинируешь'), true)
+}
+
+// computeWorkingDays с праздниками (Sprint 6)
+console.log('\n=== computeWorkingDays с праздниками (Sprint 6) ===')
+{
+  // Проверяем что 2026-06-07 воскресенье — праздник не уменьшает
+  const sun = new Date(2026, 5, 7).getDay() // должно быть 0 (вс)
+  check('2026-06-07 воскресенье', sun, 0)
+  check('праздник на выходной не уменьшает', computeWorkingDays(2026, 6, ['2026-06-07']), 22)
+  // Рабочий день 12 июня = пятница
+  const fri = new Date(2026, 5, 12).getDay()
+  check('2026-06-12 пятница', fri, 5)
+  check('июнь 2026 с 12 июня праздником = 21', computeWorkingDays(2026, 6, ['2026-06-12']), 21)
+}
+
 console.log(`\n${'='.repeat(40)}`)
 console.log(`ИТОГО: ${passed} прошло, ${failed} провалено`)
 console.log('='.repeat(40))
