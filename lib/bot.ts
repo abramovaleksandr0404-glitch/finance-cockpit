@@ -68,7 +68,10 @@ export async function getContext(): Promise<string> {
   const qStartKey = `${now.getFullYear()}-${String(qStartMonth).padStart(2,'0')}`
   const qEndKey = `${now.getFullYear()}-${String(qStartMonth + 2).padStart(2,'0')}`
 
-  const [{data:user},{data:loans},{data:expenses},{data:month},{data:goals},{data:recentExp},{data:quarterMonths},{data:cards},{data:incomeEvents},{data:customCats},{data:corrections},{data:holidays}] = await Promise.all([
+  const prevMonthDate = new Date(now.getFullYear(), now.getMonth() - 1, 1)
+  const prevMK = `${prevMonthDate.getFullYear()}-${String(prevMonthDate.getMonth() + 1).padStart(2, '0')}`
+
+  const [{data:user},{data:loans},{data:expenses},{data:month},{data:goals},{data:recentExp},{data:quarterMonths},{data:cards},{data:incomeEvents},{data:customCats},{data:corrections},{data:holidays},{data:prevExpenses}] = await Promise.all([
     supabase.from('users').select('*').eq('id',USER_ID).single(),
     supabase.from('loans').select('id,name,principal,accrued_int,min_payment,end_date,rate,paid_month,due_day').eq('user_id',USER_ID).order('sort_order'),
     supabase.from('expenses').select('id,amount,category,description,expense_date,custom_category_id,covers_days').eq('user_id',USER_ID).eq('month_key',monthKey),
@@ -81,6 +84,7 @@ export async function getContext(): Promise<string> {
     supabase.from('custom_categories').select('id,name,monthly_limit,alert_at_percent').eq('user_id',USER_ID),
     supabase.from('bot_corrections').select('correction,category,created_at').eq('user_id',USER_ID).order('created_at',{ascending:false}).limit(10),
     supabase.from('ru_holidays').select('holiday_date').gte('holiday_date',`${now.getFullYear()}-${String(curMonth).padStart(2,'0')}-01`).lte('holiday_date',`${now.getFullYear()}-${String(curMonth).padStart(2,'0')}-31`),
+    supabase.from('expenses').select('amount,category').eq('user_id', USER_ID).eq('month_key', prevMK),
   ])
   if (!user) return 'Данные не загружены'
 
@@ -118,6 +122,12 @@ export async function getContext(): Promise<string> {
   const varBudget = Number(user.var_budget ?? 40000)
   const varSpent = (expenses ?? []).reduce((s,e) => s+Number(e.amount), 0)
   const varLeft = Math.max(0, varBudget - varSpent)
+
+  const prevVarSpent = (prevExpenses ?? []).reduce((s, e) => s + Number(e.amount), 0)
+  const deltaVarPct = prevVarSpent > 0 ? Math.round((varSpent - prevVarSpent) / prevVarSpent * 100) : 0
+  const varComparison = prevVarSpent > 0
+    ? `${deltaVarPct > 0 ? '⚠️ +' : '✅ '}${deltaVarPct}% vs прошлый месяц (${rub(prevVarSpent)})`
+    : ''
 
   const daysInMonth = new Date(now.getFullYear(), now.getMonth()+1, 0).getDate()
   const daysLeft = daysInMonth - today + 1
@@ -252,7 +262,7 @@ ${cardLines}
   Потрачено: ${rub(varSpent)} (${pct(varSpent,varBudget)}%)
   Осталось: ${rub(varLeft)}
   Дневной бюджет: ${rub(dailyBudget)}/день  [формула: осталось ÷ дней до конца месяца]
-${multidayReserved > 0 ? `  Зарезервировано под мультидневные: ${rub(multidayReserved)} (ещё не "сожжено")\n  Свободно на сегодня: ${rub(Math.max(0, varLeft - multidayReserved))}\n` : ''}
+${varComparison ? `  Vs прошлый месяц: ${varComparison}\n` : ''}${multidayReserved > 0 ? `  Зарезервировано под мультидневные: ${rub(multidayReserved)} (ещё не "сожжено")\n  Свободно на сегодня: ${rub(Math.max(0, varLeft - multidayReserved))}\n` : ''}
 
 === КЕШФЛОУ ИЮНЯ ===
 ВХОДЫ (всего ожидается ${rub(incomingTotal)}):
@@ -1253,6 +1263,9 @@ export const TOOLS = [
       mandatory_expenses:{type:'number',description:'Обязательные расходы периода (по умолчанию 0)'},
       safe_liquid:{type:'number',description:'Минимальная подушка (по умолчанию 50000)'},
     },required:['available_bonus']} },
+  { name: 'compare_months',
+    description: 'Сравнить траты текущего и прошлого месяца по категориям. Вызывай на: "как я трачу по сравнению с прошлым месяцем", "стал ли я тратить больше/меньше", "сравни месяцы".',
+    input_schema: { type: 'object', properties: {} } },
 ]
 
 interface ContentBlock { type:string; text?:string; id?:string; name?:string; input?:Record<string,unknown> }
@@ -1338,6 +1351,20 @@ async function handleTool(name: string, input: Record<string,unknown>): Promise<
     )
     return JSON.stringify(result)
   }
+  if (name === 'compare_months') {
+    const s = db()
+    const now = new Date()
+    const curMK = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
+    const prevD = new Date(now.getFullYear(), now.getMonth() - 1, 1)
+    const prevMK = `${prevD.getFullYear()}-${String(prevD.getMonth() + 1).padStart(2, '0')}`
+    const [{ data: cur }, { data: prev }] = await Promise.all([
+      s.from('expenses').select('category,amount').eq('user_id', USER_ID).eq('month_key', curMK),
+      s.from('expenses').select('category,amount').eq('user_id', USER_ID).eq('month_key', prevMK),
+    ])
+    const group = (rows: { category: string; amount: number }[] | null) =>
+      (rows ?? []).reduce((acc, e) => ({ ...acc, [e.category]: (acc[e.category] ?? 0) + e.amount }), {} as Record<string, number>)
+    return JSON.stringify({ current: { monthKey: curMK, byCategory: group(cur) }, previous: { monthKey: prevMK, byCategory: group(prev) } })
+  }
   // DB-writing tools
   await executeAction({ type: name, ...input } as BotAction)
   return 'Выполнено успешно.'
@@ -1356,7 +1383,7 @@ async function runToolLoop(modelId: string, systemBlocks: unknown[], initialMess
         if (block.type === 'tool_use' && block.name) {
           try {
             const result = await handleTool(block.name, (block.input ?? {}) as Record<string,unknown>)
-            const readOnlyTools = ['scenario_analysis','suggest_early_repayment','show_balance_history','analyze_credit_burden','calculate_optimal_repayment']
+            const readOnlyTools = ['scenario_analysis','suggest_early_repayment','show_balance_history','analyze_credit_burden','calculate_optimal_repayment','compare_months']
             if (!readOnlyTools.includes(block.name)) {
               actionsRun.push(block.name)
             }
@@ -1492,6 +1519,25 @@ export async function transcribeVoice(fileId: string): Promise<string|null> {
     const { text } = await whisperRes.json()
     return text ?? null
   } catch { return null }
+}
+
+export async function sendTelegramWithButtons(
+  chatId: number,
+  text: string,
+  inlineKeyboard: Array<Array<{ text: string; callback_data: string }>>
+): Promise<void> {
+  const clean = text.replace(/```[\s\S]*?```/g, '').trim()
+  await fetch(`${TG}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text: clean,
+      parse_mode: 'Markdown',
+      disable_web_page_preview: true,
+      reply_markup: { inline_keyboard: inlineKeyboard },
+    }),
+  })
 }
 
 export async function sendTelegram(chatId: number, text: string): Promise<void> {
