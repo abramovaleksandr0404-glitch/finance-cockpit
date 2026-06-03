@@ -71,7 +71,7 @@ export async function getContext(): Promise<string> {
   const [{data:user},{data:loans},{data:expenses},{data:month},{data:goals},{data:recentExp},{data:quarterMonths},{data:cards},{data:incomeEvents},{data:customCats},{data:corrections},{data:holidays}] = await Promise.all([
     supabase.from('users').select('*').eq('id',USER_ID).single(),
     supabase.from('loans').select('id,name,principal,accrued_int,min_payment,end_date,rate,paid_month,due_day').eq('user_id',USER_ID).order('sort_order'),
-    supabase.from('expenses').select('id,amount,category,description,expense_date,custom_category_id').eq('user_id',USER_ID).eq('month_key',monthKey),
+    supabase.from('expenses').select('id,amount,category,description,expense_date,custom_category_id,covers_days').eq('user_id',USER_ID).eq('month_key',monthKey),
     supabase.from('months').select('*').eq('user_id',USER_ID).eq('month_key',monthKey).maybeSingle(),
     supabase.from('goals').select('id,name,amount,month_key,purchased').eq('user_id',USER_ID).eq('purchased',false).limit(6),
     supabase.from('expenses').select('id,category,amount,description,expense_date').eq('user_id',USER_ID).eq('month_key',monthKey).order('created_at',{ascending:false}).limit(5),
@@ -122,6 +122,23 @@ export async function getContext(): Promise<string> {
   const daysInMonth = new Date(now.getFullYear(), now.getMonth()+1, 0).getDate()
   const daysLeft = daysInMonth - today + 1
   const dailyBudget = Math.round(varLeft / Math.max(1, daysLeft))
+
+  // Мультидневные траты: зарезервированная часть (будущие дни)
+  const multidayReserved = (expenses ?? []).reduce((s, e) => {
+    const days = Number((e as Record<string, unknown>).covers_days ?? 1)
+    if (days <= 1) return s
+    const daysSinceExpense = Math.max(0, Math.floor((now.getTime() - new Date(e.expense_date).getTime()) / (1000 * 60 * 60 * 24)))
+    const daysRemaining = Math.max(0, days - daysSinceExpense)
+    return s + (Number(e.amount) / days) * daysRemaining
+  }, 0)
+
+  // Оставшиеся рабочие дни в месяце
+  let daysLeftWorking = 0
+  for (let d = today; d <= daysInMonth; d++) {
+    const dateStr = `${now.getFullYear()}-${String(curMonth).padStart(2,'0')}-${String(d).padStart(2,'0')}`
+    const dow = new Date(now.getFullYear(), curMonth - 1, d).getDay()
+    if (dow !== 0 && dow !== 6 && !holidayDates.includes(dateStr)) daysLeftWorking++
+  }
 
   // Точные даты выплат
   const advDay = advanceDay(now.getFullYear(), curMonth)
@@ -213,7 +230,7 @@ export async function getContext(): Promise<string> {
   }).join('\n')
 
   // Bot corrections
-  const correctionLines = (corrections ?? []).map(c => `  • [${c.category}] ${c.correction}`).join('\n')
+  const correctionLines = (corrections ?? []).map(c => `  • [${c.category ?? 'general'}] ${c.correction}`).join('\n')
 
   return `=== ФИНАНСОВЫЙ КОНТЕКСТ ===
 ДАТА: ${now.toLocaleDateString('ru-RU',{weekday:'long',day:'numeric',month:'long',year:'numeric'})}
@@ -235,6 +252,7 @@ ${cardLines}
   Потрачено: ${rub(varSpent)} (${pct(varSpent,varBudget)}%)
   Осталось: ${rub(varLeft)}
   Дневной бюджет: ${rub(dailyBudget)}/день  [формула: осталось ÷ дней до конца месяца]
+${multidayReserved > 0 ? `  Зарезервировано под мультидневные: ${rub(multidayReserved)} (ещё не "сожжено")\n  Свободно на сегодня: ${rub(Math.max(0, varLeft - multidayReserved))}\n` : ''}
 
 === КЕШФЛОУ ИЮНЯ ===
 ВХОДЫ (всего ожидается ${rub(incomingTotal)}):
@@ -302,8 +320,10 @@ ${goalLines}
 === НАСТРОЙКИ ===
   Оклад net: ${rub(salaryNet)} | gross: ${rub(Number(user.salary_gross))}
   YTD gross: ${rub(Number(user.ytd_gross ?? 0))} | До порога 15% НДФЛ: ${rub(Math.max(0, 2400000 - Number(user.ytd_gross ?? 0)))}
-  Рабочих дней: ${workingDaysInMonth} (с учётом праздников РФ)
-  Дневная ставка оклада: ${rub(Math.round(salaryNet / workingDaysInMonth))}/день
+  Рабочих дней в ${monthKey}: ${workingDaysInMonth} (с праздниками РФ)
+  Дневная ставка: ${rub(Math.round(salaryNet / workingDaysInMonth))}/день
+  Часовая ставка: ${rub(Math.round(salaryNet / workingDaysInMonth / 8))}/час
+  До конца месяца заработаешь ещё: ${rub(Math.round(salaryNet / workingDaysInMonth * daysLeftWorking))}
   Порог: ${rub(threshold)} (эквивалент ~${rub(threshold/marginShare)} выручки или клиентов на эту сумму номиналов)
   Момент: ${(momentShare*100).toFixed(0)}% → ежемесячный | Годовой остаток: ${((1-momentShare)*100).toFixed(0)}%
   Марджин выручки: ${(marginShare*100).toFixed(0)}% | НДФЛ: ${(r1*100).toFixed(0)}%
@@ -613,6 +633,9 @@ export interface BotAction {
   days?: number; paid_amount?: number; start_date?: string; vacation_type?: string
   keyword?: string; custom_category_name?: string; monthly_limit?: number; keywords?: string[]
   bot_answered?: string; correction?: string; trigger?: string; category_name?: string
+  covers_days?: number; new_category?: string
+  // Sprint 6
+  title?: string; priority?: number; adv_amount?: number; eom_amount?: number; bonus_amount?: number
 }
 
 // ── НАДЁЖНЫЙ ПАРСЕР ACTION ─────────────────────────────────────────────────
@@ -679,6 +702,8 @@ export async function executeAction(action: BotAction): Promise<void> {
     record_vacation_pay:'отпускные', create_custom_category:'новая категория',
     add_keyword:'ключевое слово', remove_custom_category:'удал. категории',
     learn_mapping:'обучение', save_correction:'коррекция',
+    reclassify_expense:'переклассификация', update_cashflow:'кешфлоу',
+    add_backlog_item:'бэклог', add_multiday_expense:'мультидневная трата',
   }
   if (snapLabel[action.type]) await snap(snapLabel[action.type])
 
@@ -1013,6 +1038,65 @@ export async function executeAction(action: BotAction): Promise<void> {
     const botAnswered = action.bot_answered ?? (lastBot?.content?.slice(0, 400) ?? '[нет ответа]')
     await s.from('bot_corrections').insert({user_id:USER_ID,user_said:userSaid,bot_answered:botAnswered,correction:action.correction,category:action.category??'logic'})
   }
+
+  if (action.type === 'reclassify_expense') {
+    const monthKey2 = mk()
+    let customCatId: string | null = null
+    if (action.custom_category_name) {
+      const { data: cat } = await s.from('custom_categories').select('id').eq('user_id', USER_ID).ilike('name', `%${action.custom_category_name}%`).maybeSingle()
+      customCatId = cat?.id ?? null
+    }
+    if (action.keyword) {
+      const { data: exps } = await s.from('expenses').select('id').eq('user_id', USER_ID).eq('month_key', monthKey2).ilike('description', `%${action.keyword}%`)
+      if (exps?.length) {
+        const upd: Record<string, unknown> = {}
+        if (action.new_category) upd.category = action.new_category
+        if (customCatId) upd.custom_category_id = customCatId
+        if (Object.keys(upd).length) await s.from('expenses').update(upd).in('id', exps.map(e => e.id))
+      }
+      // Запомнить маппинг
+      await executeAction({ type: 'learn_mapping', trigger: action.keyword.toLowerCase(), category: action.new_category, custom_category_name: action.custom_category_name })
+    }
+  }
+
+  if (action.type === 'update_cashflow') {
+    const monthKey3 = mk()
+    const upd: Record<string, unknown> = {}
+    if (action.adv_amount   != null) upd.salary_adv_amount = action.adv_amount
+    if (action.eom_amount   != null) upd.salary_eom_amount = action.eom_amount
+    if (action.bonus_amount != null) upd.bonus_amount      = action.bonus_amount
+    if (Object.keys(upd).length) {
+      const { data: exists } = await s.from('months').select('month_key').eq('user_id', USER_ID).eq('month_key', monthKey3).maybeSingle()
+      exists ? await s.from('months').update(upd).eq('user_id', USER_ID).eq('month_key', monthKey3)
+             : await s.from('months').insert({ user_id: USER_ID, month_key: monthKey3, ...upd })
+    }
+  }
+
+  if (action.type === 'add_backlog_item' && action.title) {
+    await s.from('bot_backlog').insert({
+      user_id: USER_ID,
+      title: action.title,
+      description: action.description ?? null,
+      priority: action.priority ?? 2,
+      category: action.category ?? 'feature',
+    })
+  }
+
+  if (action.type === 'add_multiday_expense' && action.amount) {
+    await s.from('expenses').insert({
+      user_id: USER_ID, month_key: mk(),
+      expense_date: new Date().toISOString().split('T')[0],
+      category: action.category ?? 'Еда и кафе',
+      amount: Math.round(action.amount),
+      description: action.description ?? null,
+      source_type: 'debit',
+      covers_days: action.covers_days ?? 1,
+    })
+    const { data: u } = await s.from('users').select('debit_balance').eq('id', USER_ID).single()
+    const newBal = Math.round((Number(u?.debit_balance ?? 0) - action.amount) * 100) / 100
+    await s.from('users').update({ debit_balance: newBal, debit_updated_at: new Date().toISOString() }).eq('id', USER_ID)
+    await recordDebitChange(s, Number(u?.debit_balance ?? 0), newBal, `Мультидневная: ${action.description ?? action.category} (${action.covers_days}д)`, 'expense')
+  }
 }
 
 // ── ИНСТРУМЕНТЫ (tool calling) — надёжная замена парсингу ACTION ──────────
@@ -1099,6 +1183,50 @@ export const TOOLS = [
     },required:['bot_answered','correction']} },
   { name:'undo', description:'Отменить последнее изменение (откат к снапшоту).',
     input_schema:{type:'object',properties:{}} },
+  { name: 'reclassify_expense',
+    description: 'Изменить категорию или привязать к кастомной категории существующие траты текущего месяца. Вызывай когда пользователь говорит "перенеси снюс в Вредные", "это вредная трата", "переквалифицируй трату", "отнеси X к категории Y". Также вызывай learn_mapping для будущего.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        keyword: { type: 'string', description: 'ключевое слово в description траты' },
+        new_category: { type: 'string' },
+        custom_category_name: { type: 'string' },
+      },
+    } },
+  { name: 'update_cashflow',
+    description: 'Обновить плановые суммы аванса, ЗП или бонуса в текущем месяце. Вызывай когда: пользователь поправляет цифры входов, после расчёта отпускных/больничных, при несовпадении с контекстом.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        adv_amount:   { type: 'number', description: 'новая сумма аванса' },
+        eom_amount:   { type: 'number', description: 'новая сумма ЗП' },
+        bonus_amount: { type: 'number', description: 'новая сумма бонуса' },
+      },
+    } },
+  { name: 'add_backlog_item',
+    description: 'Записать задачу/идею/баг в бэклог разработки бота. ОБЯЗАТЕЛЬНО вызывай когда пользователь говорит: "запиши в бэклог", "добавь задачу", "надо сделать", "реализуй в следующем спринте", "не хватает инструмента [X]". НИКОГДА не пиши "Записал" без реального вызова этого инструмента.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        title:       { type: 'string' },
+        description: { type: 'string' },
+        priority:    { type: 'number', description: '1=критично 2=важно 3=улучшение' },
+        category:    { type: 'string', enum: ['tool', 'bug', 'feature', 'data', 'prompt'] },
+      },
+      required: ['title'],
+    } },
+  { name: 'add_multiday_expense',
+    description: 'Записать трату рассчитанную на несколько дней (продукты, товары длительного пользования). Вызывай когда пользователь говорит "купил продукты на 5 дней", "взял запас на неделю", "это на N дней".',
+    input_schema: {
+      type: 'object',
+      properties: {
+        amount:      { type: 'number' },
+        category:    { type: 'string' },
+        description: { type: 'string' },
+        covers_days: { type: 'number', description: 'на сколько дней рассчитана трата' },
+      },
+      required: ['amount', 'covers_days'],
+    } },
   { name:'show_balance_history',
     description:'История изменений дебетового баланса. Вызывай на: "история баланса", "как менялся дебет", "откуда деньги", "почему баланс изменился".',
     input_schema:{type:'object',properties:{limit:{type:'number',description:'Кол-во записей, по умолчанию 15'}}} },
