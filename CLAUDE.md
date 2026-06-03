@@ -62,6 +62,13 @@ mcp__vercel__deploy_to_vercel  ← стандартный деплой
 Обычный флоу: `git push` → Vercel автоматически деплоит с main (watch on GitHub).
 Форсированный деплой вручную — через `deploy_to_vercel` MCP tool.
 
+**ОБЯЗАТЕЛЬНО после каждого деплоя:**
+```
+mcp__vercel__web_fetch_vercel_url
+  url: https://finance-cockpit-teal.vercel.app/api/telegram/setup
+```
+Это регистрирует webhook и отправляет в Telegram уведомление об обновлении из CHANGELOG.md.
+
 ### Миграции БД
 Все изменения схемы Supabase — через **Supabase MCP tool**:
 
