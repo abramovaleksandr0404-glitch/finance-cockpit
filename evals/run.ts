@@ -8,6 +8,8 @@ import {
   computeDailyBudget, advanceDay, lastWorkingDayOfMonth, analyzeDecision,
   suggestEarlyRepayment, type BonusConfig,
 } from '../lib/calc'
+import { existsSync, readFileSync } from 'fs'
+import { join } from 'path'
 import { SYSTEM_PROMPT, TOOLS } from '../lib/bot'
 
 let passed = 0, failed = 0
@@ -185,6 +187,24 @@ console.log('\n=== ДАТЫ СЛЕДУЮЩЕГО МЕСЯЦА ===')
   check('посл. раб. день декабрь 2026 (31 чт)', lastWorkingDayOfMonth(2026, 12), 31)
   // Январь 2027: 15-е пятница — рабочий
   check('аванс январь 2027 (15 пт)', advanceDay(2027, 1), 15)
+}
+
+console.log('\n=== ПРОМПТ: ПРАВИЛО №7 (ПРОЗРАЧНОСТЬ ОГРАНИЧЕНИЙ) ===')
+{
+  check('ПРАВИЛО №7 ПРОЗРАЧНОСТЬ присутствует', SYSTEM_PROMPT.includes('ПРОЗРАЧНОСТЬ'), true)
+  check('промпт содержит "⚙️"', SYSTEM_PROMPT.includes('⚙️'), true)
+  check('промпт содержит "бэклог"', SYSTEM_PROMPT.includes('бэклог'), true)
+}
+
+console.log('\n=== CHANGELOG.md ===')
+{
+  const p = join(process.cwd(), 'CHANGELOG.md')
+  check('CHANGELOG.md существует', existsSync(p), true)
+  if (existsSync(p)) {
+    const content = readFileSync(p, 'utf-8')
+    check('CHANGELOG.md содержит ## блок', content.includes('## '), true)
+    check('CHANGELOG.md содержит Sprint', content.includes('Sprint'), true)
+  }
 }
 
 console.log(`\n${'='.repeat(40)}`)

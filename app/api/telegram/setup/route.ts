@@ -1,4 +1,26 @@
 import { NextResponse } from 'next/server'
+import { createClient } from '@supabase/supabase-js'
+import { sendTelegram } from '@/lib/bot'
+import fs from 'fs'
+import path from 'path'
+
+const USER_ID = '5ebdb411-6021-4dfc-9d0d-caa8e0107502'
+
+function getLatestChangelog(): string {
+  try {
+    const p = path.join(process.cwd(), 'CHANGELOG.md')
+    const content = fs.readFileSync(p, 'utf-8')
+    const parts = content.split(/^## /m)
+    const block = parts[1]
+    if (!block) return ''
+    const lines = block.split('\n')
+    const title = lines[0].trim()
+    const bullets = lines.filter(l => l.startsWith('- ')).map(l => `• ${l.slice(2)}`)
+    return `*${title}*\n${bullets.join('\n')}`
+  } catch {
+    return ''
+  }
+}
 
 /**
  * GET /api/telegram/setup
@@ -25,6 +47,25 @@ export async function GET(req: Request) {
   const data = await res.json()
 
   if (data.ok) {
+    // Send update notification to user's Telegram
+    try {
+      const supabase = createClient(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.SUPABASE_SERVICE_ROLE_KEY!
+      )
+      const { data: user } = await supabase
+        .from('users').select('telegram_chat_id').eq('id', USER_ID).single()
+      if (user?.telegram_chat_id) {
+        const changelog = getLatestChangelog()
+        const body = changelog
+          ? `🔄 *Система обновлена*\n\n✅ *Что нового:*\n${changelog}\n\n_Webhook зарегистрирован. Готов к работе._`
+          : `🔄 *Система обновлена*\n\n_Webhook зарегистрирован. Готов к работе._`
+        await sendTelegram(user.telegram_chat_id, body)
+      }
+    } catch (e) {
+      console.error('[setup] notify failed', e)
+    }
+
     return NextResponse.json({
       success: true,
       webhook: webhookUrl,
