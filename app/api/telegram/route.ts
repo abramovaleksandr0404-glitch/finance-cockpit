@@ -7,24 +7,22 @@ export async function POST(req: Request) {
   const secret = req.headers.get('x-telegram-bot-api-secret-token')
   if (WEBHOOK_SECRET && secret !== WEBHOOK_SECRET) return new NextResponse('Unauthorized', { status: 401 })
 
-  let update: Record<string, unknown>
-  try { update = await req.json() } catch { return NextResponse.json({ ok: true }) }
+  let body: Record<string, unknown>
+  try { body = await req.json() } catch { return NextResponse.json({ ok: true }) }
 
-  const message = update?.message as Record<string, unknown> | undefined
-  const callbackQuery = update?.callback_query as Record<string, unknown> | undefined
-  if (!message && !callbackQuery) return NextResponse.json({ ok: true })
+  const ALLOWED = Number(process.env.ALLOWED_TELEGRAM_CHAT_ID)
+  const incomingId = ((body.message as Record<string, Record<string, number>>)?.chat?.id)
+    ?? (((body.callback_query as Record<string, unknown>)?.message as Record<string, Record<string, number>>)?.chat?.id)
+    ?? 0
+  if (incomingId !== ALLOWED) return NextResponse.json({ ok: true })
 
-  const chatId = (message?.chat as Record<string, number>)?.id
-    ?? ((callbackQuery?.message as Record<string, unknown>)?.chat as Record<string, number>)?.id
-  if (!chatId) return NextResponse.json({ ok: true })
+  const message = body.message as Record<string, unknown> | undefined
+  if (!message) return NextResponse.json({ ok: true })
 
-  const ALLOWED_CHAT_ID = Number(process.env.ALLOWED_TELEGRAM_CHAT_ID)
-  if (ALLOWED_CHAT_ID && chatId !== ALLOWED_CHAT_ID) return NextResponse.json({ ok: true })
+  const chatId = incomingId
 
   // Сохранить chat_id для утреннего дежурства
   storeChatId(chatId).catch(() => {})
-
-  if (!message) return NextResponse.json({ ok: true })
 
   try {
     // ── Голосовое сообщение ──────────────────────────────────
@@ -46,7 +44,7 @@ export async function POST(req: Request) {
     // ── Фото / скрин ──────────────────────────────────────────
     const photos = message.photo as { file_id: string; file_size: number }[] | undefined
     const document = message.document as { file_id: string; mime_type?: string } | undefined
-    if (photos?.length || (document?.mime_type?.startsWith('image/'))) {
+    if (photos?.length || document?.mime_type?.startsWith('image/')) {
       const fileId = photos ? photos[photos.length - 1].file_id : document!.file_id
       const caption = (message.caption as string) || undefined
       const reply = await processImage(fileId, chatId, caption)
