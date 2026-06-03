@@ -68,16 +68,18 @@ export async function getContext(): Promise<string> {
   const qStartKey = `${now.getFullYear()}-${String(qStartMonth).padStart(2,'0')}`
   const qEndKey = `${now.getFullYear()}-${String(qStartMonth + 2).padStart(2,'0')}`
 
-  const [{data:user},{data:loans},{data:expenses},{data:month},{data:goals},{data:recentExp},{data:quarterMonths},{data:cards},{data:incomeEvents}] = await Promise.all([
+  const [{data:user},{data:loans},{data:expenses},{data:month},{data:goals},{data:recentExp},{data:quarterMonths},{data:cards},{data:incomeEvents},{data:customCats},{data:corrections}] = await Promise.all([
     supabase.from('users').select('*').eq('id',USER_ID).single(),
     supabase.from('loans').select('id,name,principal,accrued_int,min_payment,end_date,rate,paid_month,due_day').eq('user_id',USER_ID).order('sort_order'),
-    supabase.from('expenses').select('id,amount,category,description,expense_date').eq('user_id',USER_ID).eq('month_key',monthKey),
+    supabase.from('expenses').select('id,amount,category,description,expense_date,custom_category_id').eq('user_id',USER_ID).eq('month_key',monthKey),
     supabase.from('months').select('*').eq('user_id',USER_ID).eq('month_key',monthKey).maybeSingle(),
     supabase.from('goals').select('id,name,amount,month_key,purchased').eq('user_id',USER_ID).eq('purchased',false).limit(6),
     supabase.from('expenses').select('id,category,amount,description,expense_date').eq('user_id',USER_ID).eq('month_key',monthKey).order('created_at',{ascending:false}).limit(5),
     supabase.from('months').select('month_key,clients,revenue').eq('user_id',USER_ID).gte('month_key',qStartKey).lte('month_key',qEndKey),
     supabase.from('cards').select('name,card_limit,current_debt').eq('user_id',USER_ID).order('sort_order'),
     supabase.from('income_events').select('event_date,description,amount').eq('user_id',USER_ID).eq('month_key',monthKey),
+    supabase.from('custom_categories').select('id,name,monthly_limit,alert_at_percent').eq('user_id',USER_ID),
+    supabase.from('bot_corrections').select('correction,category,created_at').eq('user_id',USER_ID).order('created_at',{ascending:false}).limit(10),
   ])
   if (!user) return 'Данные не загружены'
 
@@ -133,17 +135,6 @@ export async function getContext(): Promise<string> {
   // После плановых покупок
   const projEndAfterPlanned = projEnd - plannedTotal
 
-  // Прогноз следующего месяца
-  const nextMonthDate = new Date(now.getFullYear(), now.getMonth() + 1, 1)
-  const nextYear = nextMonthDate.getFullYear()
-  const nextMonthNum = nextMonthDate.getMonth() + 1
-  const nextMK = `${nextYear}-${String(nextMonthNum).padStart(2,'0')}`
-  const nextAdvDay = advanceDay(nextYear, nextMonthNum)
-  const nextEomDay = lastWorkingDayOfMonth(nextYear, nextMonthNum)
-  const nextRecurringTotal = recurringIncomes.reduce((s,r)=>s+r.amount, 0)
-  const nextIncoming = advAmount + eomAmount + bonusAmount + nextRecurringTotal
-  const nextProjEnd = Math.round(projEnd + nextIncoming - totalMonthlyPayment - fixedTotal - varBudget)
-
   // Бонус
   const nominals = (user.nominals as Record<string,number>) ?? {}
   const clients = (month?.clients as Record<string,number>) ?? {}
@@ -173,6 +164,21 @@ export async function getContext(): Promise<string> {
   const qBonusGross = qNominalSum * qMult
   const qBonusNet = Math.round(qBonusGross * (1 - r1))
 
+  // Прогноз следующего месяца
+  const nextMonthDate = new Date(now.getFullYear(), now.getMonth() + 1, 1)
+  const nextYear = nextMonthDate.getFullYear()
+  const nextMonthNum = nextMonthDate.getMonth() + 1
+  const nextMK = `${nextYear}-${String(nextMonthNum).padStart(2,'0')}`
+  const nextAdvDay = advanceDay(nextYear, nextMonthNum)
+  const nextEomDay = lastWorkingDayOfMonth(nextYear, nextMonthNum)
+  const nextRecurringTotal = recurringIncomes.reduce((s,r)=>s+r.amount, 0)
+  // Квартальный бонус выплачивается в первом месяце следующего квартала
+  const nextIsFirstOfNextQuarter = (nextMonthNum % 3 === 1)
+  const nextQBonus = nextIsFirstOfNextQuarter ? qBonusNet : 0
+  // Ежемесячный бонус текущего месяца выплачивается в следующем
+  const nextIncoming = advAmount + eomAmount + bonusJulNet + nextRecurringTotal + nextQBonus
+  const nextProjEnd = Math.round(projEnd + nextIncoming - totalMonthlyPayment - fixedTotal - varBudget)
+
   const recentLines = (recentExp ?? []).map(e => `  • ${e.expense_date} ${e.category}: ${rub(Number(e.amount))}${e.description?' — '+e.description:''}`).join('\n') || '  (нет)'
   const fixedLines = fixedCosts.map((f,i) => `  • ${f.name}${f.day?` (${f.day} числа)`:''}: ${rub(f.amount)} ${fixedPaid[String(i)] ? '✅ оплачено' : '⏳'}`).join('\n')
   const goalLines = (goals ?? []).map(g => `  • ${g.name}: ${rub(Number(g.amount))} ${g.month_key ? '('+g.month_key+')' : '(накопление)'}`).join('\n') || '  (нет)'
@@ -190,6 +196,20 @@ export async function getContext(): Promise<string> {
   const cardLines = (cards ?? []).map(c => `  • ${c.name}: лимит ${rub(Number(c.card_limit))}, долг ${rub(Number(c.current_debt))}, доступно ${rub(Number(c.card_limit) - Number(c.current_debt))}`).join('\n') || '  (нет)'
   const recurringLines = recurringIncomes.map(r => `  • ${r.name}: ${rub(r.amount)} (${r.day} числа каждого месяца)`).join('\n') || '  (нет)'
   const incomeEventLines = (incomeEvents ?? []).map(e => `  • ${e.event_date}: ${e.description}: ${rub(Number(e.amount))}`).join('\n') || '  (нет в этом месяце)'
+
+  // Salary adjustments
+  type SalaryAdjustment = {type:string;days:number;paid_amount:number;deduct:number;date:string;deduct_from:string}
+  const salaryAdjustments = (month?.salary_adjustments as SalaryAdjustment[]) ?? []
+
+  // Custom categories spending
+  const customCatLines = (customCats ?? []).map(cat => {
+    const spent = (expenses ?? []).filter(e => e.custom_category_id === cat.id).reduce((s,e) => s+Number(e.amount), 0)
+    const limitStr = cat.monthly_limit ? ` — ${rub(spent)} из ${rub(Number(cat.monthly_limit))} (${pct(spent,Number(cat.monthly_limit))}%)` : ` — ${rub(spent)}`
+    return `  • ${cat.name}${limitStr}`
+  }).join('\n')
+
+  // Bot corrections
+  const correctionLines = (corrections ?? []).map(c => `  • [${c.category}] ${c.correction}`).join('\n')
 
   return `=== ФИНАНСОВЫЙ КОНТЕКСТ ===
 ДАТА: ${now.toLocaleDateString('ru-RU',{weekday:'long',day:'numeric',month:'long',year:'numeric'})}
@@ -218,7 +238,11 @@ ${cardLines}
   Аванс ${advReceived?'✅ получен':`⏳ ${rub(advAmount)} (${advDay}-го)`}
   ЗП ${eomReceived?'✅':`⏳ ${rub(eomAmount)}`} + Бонус ${eomReceived?'✅':`⏳ ${rub(bonusAmount)}`} (${eomDay}-го, посл. раб. день месяца)
 
-ВЫХОДЫ:
+${salaryAdjustments.length > 0 ? `\nКОРРЕКТИРОВКИ ЗП:\n${salaryAdjustments.map((a: SalaryAdjustment) => {
+  const wdays = computeWorkingDays(now.getFullYear(), now.getMonth()+1)
+  const adj = computeVacationAdjustment(a.days, a.paid_amount, salaryNet, wdays)
+  return `  • ${a.type==='sick'?'больничный':'отпуск'} ${a.days}д: получено ${rub(a.paid_amount)}, вычтено из ${a.deduct_from==='advance'?'аванса':'зп'}: ${rub(a.deduct)}, потеря: ${rub(adj.actualLoss)}`
+}).join('\n')}\n` : ''}ВЫХОДЫ:
   Кредиты неоплаченные: ${rub(pendingLoanPayments)} [платёж 4 кредитов]
   Постоянные неоплаченные: ${rub(fixedUnpaid)} из ${rub(fixedTotal)}
   Переменные ещё доступно до лимита: ${rub(varLeft)}
@@ -233,7 +257,7 @@ ${plannedPurchases.length ? plannedPurchases.map(g=>`  • ${g.name}: ${rub(Numb
 
 === ПРОГНОЗ СЛЕДУЮЩЕГО МЕСЯЦА (${nextMK}) ===
   Стартовая ликвидность: ${rub(projEnd)} (= прогноз конца ${monthKey})
-  Входы: Аванс ⏳ ${rub(advAmount)} (${nextAdvDay}-го) + ЗП+Бонус ⏳ ${rub(eomAmount+bonusAmount)} (${nextEomDay}-го) + повтор. ${rub(nextRecurringTotal)}
+  Входы: Аванс ⏳ ${rub(advAmount)} (${nextAdvDay}-го) + ЗП ⏳ ${rub(eomAmount)} (${nextEomDay}-го) + Бонус за ${monthKey}: ${rub(bonusJulNet)} + Повтор. ${rub(nextRecurringTotal)}${nextQBonus > 0 ? ` + Квартальный Q: ${rub(nextQBonus)}` : ''}
   Выходы: Кредиты ${rub(totalMonthlyPayment)} + Постоянные ${rub(fixedTotal)} + Переменные до лимита ${rub(varBudget)}
   Прогноз остатка к концу ${nextMK}: ${rub(nextProjEnd)}
   [формула: ${rub(projEnd)} + ${rub(nextIncoming)} − ${rub(totalMonthlyPayment)} − ${rub(fixedTotal)} − ${rub(varBudget)}]
@@ -279,7 +303,13 @@ ${goalLines}
   Марджин выручки: ${(marginShare*100).toFixed(0)}% | НДФЛ: ${(r1*100).toFixed(0)}%
   Квартальные множители: qm2=${qm2} (при 2 кл), qm3=${qm3} (при ≥3 кл)
   Номиналы: г3=${nominals.g3}, г4=${nominals.g4}, г5-6=${nominals.g56}, г7-8=${nominals.g78}, г9=${nominals.g9}, г10=${nominals.g10}
-  Лимит переменных: ${rub(varBudget)}`
+  Лимит переменных: ${rub(varBudget)}
+
+=== КАСТОМНЫЕ КАТЕГОРИИ ===
+${customCatLines || '  (нет кастомных категорий)'}
+
+=== МОИ ПРОШЛЫЕ ОШИБКИ (не повторять) ===
+${correctionLines || '  (нет записей)'}`
 }
 
 // ── Анализ паттернов трат ─────────────────────────────────────────────────
@@ -510,7 +540,43 @@ Netflix, Spotify, Apple Music → постоянная "Подписки"
 д) Реши задачу только по подтверждённым данным
 е) Получены новые факты о кредитах/настройках → обнови БД через инструмент
 
-ВАЖНО: если задача требует уточнения — НЕ вызывай инструменты, только задай вопрос. Вызывай инструмент лишь когда уверен.`
+ВАЖНО: если задача требует уточнения — НЕ вызывай инструменты, только задай вопрос. Вызывай инструмент лишь когда уверен.
+
+ПРАВИЛО №8 — ПОДТВЕРЖДЕНИЕ ДЕЙСТВИЯ:
+После каждого инструмента который меняет дебет или траты:
+"✅ [описание]
+   Дебет: {старый} → {новый}₽
+   [если трата] Переменные: {потрачено} из {лимит}₽ ({%}%) · Осталось {остаток}₽/день
+   [если зп/аванс] Ликвидность: → {новый}₽"
+Только релевантные строки. Без лишнего текста.
+
+ОТПУСКНЫЕ И БОЛЬНИЧНЫЕ:
+Если пользователь говорит "получил отпускные X₽ за N дней" или "больничный N дней, пришло X₽":
+СРАЗУ вызови record_vacation_pay.
+После — показывай:
+"✅ Отпускные {paid}₽ → дебет
+   Дневная ставка: {dailyRate}₽
+   Аванс скорректирован: {было} → {стало}₽ (−{deduct}₽)
+   Реальная потеря за отпуск: {loss}₽"
+
+КАСТОМНЫЕ КАТЕГОРИИ:
+Если пользователь говорит "это вредная трата", "определи как [категория]", "добавь кофе в Вредное":
+1. Если кастомная категория не существует — вызови create_custom_category
+2. Вызови add_keyword с этим словом
+3. Запиши трату с нужной кастегорией (в description укажи кастомную)
+4. Подтверди: "✅ Кофе → Вредное. Теперь любой кофе → Вредное автоматически"
+
+СЛОВАРЬ ТРАТ:
+После добавления любой траты — если категорию определил сам (не пользователь) →
+автоматически вызови learn_mapping чтобы запомнить.
+Если пользователь подтвердил или поправил категорию → обязательно вызови
+learn_mapping с правильной категорией.
+
+ОБУЧЕНИЕ НА ОШИБКАХ:
+Если пользователь говорит "неверно", "ты ошибся", "не так", "это неправильно"
+И объясняет в чём ошибка → СРАЗУ вызови save_correction.
+Поле bot_answered = твой предыдущий ответ (первые 500 символов).
+Поле correction = суть поправки пользователя.`
 
 interface BotAction {
   type: string
@@ -518,7 +584,7 @@ interface BotAction {
   grade?: string; revenue?: number; name?: string; new_name?: string; month_key?: string|null
   field?: string; key?: string; value?: number|string; account?: string; part?: string
   principal?: number; rate?: number; min_payment?: number; end_date?: string
-  days?: number; paid_amount?: number; start_date?: string
+  days?: number; paid_amount?: number; start_date?: string; vacation_type?: string
   keyword?: string; custom_category_name?: string; monthly_limit?: number; keywords?: string[]
   bot_answered?: string; correction?: string; trigger?: string
 }
@@ -802,12 +868,13 @@ export async function executeAction(action: BotAction): Promise<void> {
     const adj = computeVacationAdjustment(action.days, action.paid_amount, salaryNet, wdays)
     // Зачислить на дебет
     await s.from('users').update({debit_balance:Math.round((Number(u?.debit_balance??0)+action.paid_amount)*100)/100,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
-    // income_event
-    await s.from('income_events').insert({user_id:USER_ID,month_key:monthKey,event_date:new Date().toISOString().split('T')[0],event_type:action.type??'vacation',description:`${action.type==='sick'?'Больничный':'Отпускные'} ${action.days}д`,amount:Math.round(action.paid_amount),to_debit:true})
+    // income_event — vacation_type поле (sick/vacation) передаётся в input инструмента
+    const vacationType = action.vacation_type ?? 'vacation'
+    await s.from('income_events').insert({user_id:USER_ID,month_key:monthKey,event_date:new Date().toISOString().split('T')[0],event_type:'vacation',description:`${vacationType==='sick'?'Больничный':'Отпускные'} ${action.days}д`,amount:Math.round(action.paid_amount),to_debit:true})
     // Запись корректировки в months
     const { data:month } = await s.from('months').select('salary_adjustments,salary_adv_amount,salary_eom_amount').eq('user_id',USER_ID).eq('month_key',monthKey).maybeSingle()
     const adjustments = (month?.salary_adjustments as unknown[]) ?? []
-    const newAdj = {type:action.type,days:action.days,paid_amount:action.paid_amount,deduct:adj.deductFromSalary,date:action.start_date??new Date().toISOString().split('T')[0],deduct_from:adj.deductFrom}
+    const newAdj = {type:vacationType,days:action.days!,paid_amount:action.paid_amount!,deduct:adj.deductFromSalary,date:action.start_date??new Date().toISOString().split('T')[0],deduct_from:adj.deductFrom}
     adjustments.push(newAdj)
     const salaryNet2 = Number(u?.salary_net??121600)
     const advAmt = Number(month?.salary_adv_amount ?? Math.round(salaryNet2/2))
@@ -908,7 +975,7 @@ export const TOOLS = [
       days:{type:'number',description:'Количество дней'},
       paid_amount:{type:'number',description:'Сумма отпускных/больничных'},
       start_date:{type:'string',description:'Дата начала YYYY-MM-DD'},
-      type:{type:'string',enum:['vacation','sick']}
+      vacation_type:{type:'string',enum:['vacation','sick'],description:'Тип: отпуск или больничный'}
     },required:['days','paid_amount']} },
   { name:'create_custom_category',
     description:'Создать кастомную категорию трат с опциональным лимитом и ключевыми словами.',

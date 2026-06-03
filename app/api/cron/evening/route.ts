@@ -59,6 +59,19 @@ export async function GET(req: Request) {
       }
     }
 
+    // Кастомные категории алерты
+    const { data: customCats } = await supabase.from('custom_categories').select('name,monthly_limit,alert_at_percent,id').eq('user_id',USER_ID)
+    if (customCats?.length) {
+      const { data: custExp } = await supabase.from('expenses').select('amount,custom_category_id').eq('user_id',USER_ID).eq('month_key',mk).not('custom_category_id','is',null)
+      for (const cat of customCats) {
+        if (!cat.monthly_limit) continue
+        const spent = (custExp??[]).filter(e=>e.custom_category_id===cat.id).reduce((s,e)=>s+Number(e.amount),0)
+        const pct = Math.round(spent/cat.monthly_limit*100)
+        const threshold = cat.alert_at_percent ?? 80
+        if (pct >= threshold) alerts.push(`🎯 *${cat.name}*: ${rub(spent)} из ${rub(cat.monthly_limit)} (${pct}%)`)
+      }
+    }
+
     if (alerts.length === 0) return NextResponse.json({ ok: true, reason: 'no alerts' })
 
     const msg = `🔔 *Вечерний дайджест*\n\n${alerts.join('\n\n')}\n\n_Дебет: ${rub(Number(user.debit_balance??0))}_`

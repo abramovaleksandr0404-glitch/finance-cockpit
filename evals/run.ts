@@ -6,7 +6,7 @@
 import {
   computeMonthlyBonus, computeQuarterlyBonus, computeProjectedEnd,
   computeDailyBudget, advanceDay, lastWorkingDayOfMonth, analyzeDecision,
-  suggestEarlyRepayment, type BonusConfig,
+  suggestEarlyRepayment, computeWorkingDays, computeVacationAdjustment, type BonusConfig,
 } from '../lib/calc'
 import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
@@ -205,6 +205,52 @@ console.log('\n=== CHANGELOG.md ===')
     check('CHANGELOG.md содержит ## блок', content.includes('## '), true)
     check('CHANGELOG.md содержит Sprint', content.includes('Sprint'), true)
   }
+}
+
+console.log('\n=== РАСЧЁТ РАБОЧИХ ДНЕЙ ===')
+{
+  check('июнь 2026 = 22 рабочих дня', computeWorkingDays(2026, 6), 22)
+  check('февраль 2024 (високосный) = 21 рабочий день', computeWorkingDays(2024, 2), 21)
+  check('декабрь 2025 = 23 рабочих дня', computeWorkingDays(2025, 12), 23)
+  check('январь 2026 = 22 рабочих дня', computeWorkingDays(2026, 1), 22)
+  check('июль 2026 = 23 рабочих дня', computeWorkingDays(2026, 7), 23)
+}
+
+console.log('\n=== РАСЧЁТ КОРРЕКТИРОВКИ ОТПУСКА ===')
+{
+  // 121600/22 = 5527.27 → dailyRate=5527, deductFromSalary=5527
+  const adj1 = computeVacationAdjustment(1, 3000, 121600, 22)
+  approx('дневная ставка (121600/22)', adj1.dailyRate, 5527, 1)
+  approx('вычет за 1 день', adj1.deductFromSalary, 5527, 1)
+  approx('реальная потеря (5527-3000)', adj1.actualLoss, 2527, 1)
+  check('1 день → из аванса', adj1.deductFrom, 'advance')
+
+  // Больничный 5 дней, 0₽ → deductFromSalary = 5×5527 = 27635
+  const adj2 = computeVacationAdjustment(5, 0, 121600, 22)
+  approx('5 дней больничный: вычет', adj2.deductFromSalary, 5527*5, 5)
+  approx('5 дней больничный: потеря = вычет', adj2.actualLoss, adj2.deductFromSalary, 1)
+  check('5 дней → из аванса', adj2.deductFrom, 'advance')
+
+  // 10 дней → из eom
+  const adj3 = computeVacationAdjustment(10, 50000, 121600, 22)
+  check('10 дней → из eom', adj3.deductFrom, 'eom')
+
+  // 0 рабочих дней — не делится на 0
+  const adj4 = computeVacationAdjustment(5, 0, 121600, 0)
+  check('0 рабочих дней → dailyRate=0', adj4.dailyRate, 0)
+}
+
+console.log('\n=== ПРОМПТ: SPRINT 4 ===')
+{
+  check('record_vacation_pay зарегистрирован', TOOLS.some(t => t.name === 'record_vacation_pay'), true)
+  check('create_custom_category зарегистрирован', TOOLS.some(t => t.name === 'create_custom_category'), true)
+  check('learn_mapping зарегистрирован', TOOLS.some(t => t.name === 'learn_mapping'), true)
+  check('save_correction зарегистрирован', TOOLS.some(t => t.name === 'save_correction'), true)
+  check('ПРАВИЛО №8 присутствует', SYSTEM_PROMPT.includes('ПРАВИЛО №8'), true)
+  check('ПОДТВЕРЖДЕНИЕ ДЕЙСТВИЯ присутствует', SYSTEM_PROMPT.includes('ПОДТВЕРЖДЕНИЕ ДЕЙСТВИЯ'), true)
+  check('ОТПУСКНЫЕ в промпте', SYSTEM_PROMPT.includes('ОТПУСКНЫЕ'), true)
+  check('ОБУЧЕНИЕ НА ОШИБКАХ в промпте', SYSTEM_PROMPT.includes('ОБУЧЕНИЕ НА ОШИБКАХ'), true)
+  check('КАСТОМНЫЕ КАТЕГОРИИ в промпте', SYSTEM_PROMPT.includes('КАСТОМНЫЕ КАТЕГОРИИ'), true)
 }
 
 console.log(`\n${'='.repeat(40)}`)
