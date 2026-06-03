@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
-import { generateMorningBriefing, sendTelegram } from '@/lib/bot'
+import { generateMorningBriefing, sendTelegram, executeAction, type BotAction } from '@/lib/bot'
 
 export const dynamic = 'force-dynamic'
 
@@ -33,6 +33,22 @@ export async function GET(req: Request) {
               : await supabase.from('months').insert({user_id:USER_ID,month_key:monthKey,recurring_received:newReceived})
         if (user?.telegram_chat_id) {
           await sendTelegram(user.telegram_chat_id, `💰 *${r.name} зачислена автоматически*\n\n• Сумма: ${r.amount.toLocaleString('ru-RU')} ₽\n• Дебет пополнен`)
+        }
+      }
+    }
+
+    // Автосписание общежития 12-го числа
+    if (today === 12) {
+      const { data: monthData } = await supabase.from('months').select('fixed_paid').eq('user_id', USER_ID).eq('month_key', monthKey).maybeSingle()
+      const { data: userData } = await supabase.from('users').select('fixed_costs,telegram_chat_id').eq('id', USER_ID).single()
+      const fc = (userData?.fixed_costs as { name: string; amount: number }[]) ?? []
+      const fp = (monthData?.fixed_paid as Record<string, number | boolean>) ?? {}
+      const dormIdx = fc.findIndex(f => f.name.toLowerCase().includes('общежити'))
+      if (dormIdx >= 0 && !fp[String(dormIdx)]) {
+        const dormAction: BotAction = { type: 'mark_single_fixed', name: fc[dormIdx].name }
+        await executeAction(dormAction)
+        if (userData?.telegram_chat_id) {
+          await sendTelegram(userData.telegram_chat_id, `🏠 *Общежитие ${fc[dormIdx].amount.toLocaleString('ru-RU')}₽ списано автоматически* (12-е число)`)
         }
       }
     }

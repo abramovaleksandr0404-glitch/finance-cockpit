@@ -6,7 +6,8 @@
 import {
   computeMonthlyBonus, computeQuarterlyBonus, computeProjectedEnd,
   computeDailyBudget, advanceDay, lastWorkingDayOfMonth, analyzeDecision,
-  suggestEarlyRepayment, computeWorkingDays, computeVacationAdjustment, type BonusConfig,
+  suggestEarlyRepayment, computeWorkingDays, computeVacationAdjustment,
+  computeCreditBurden, computeOptimalRepayment, type BonusConfig,
 } from '../lib/calc'
 import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
@@ -251,6 +252,66 @@ console.log('\n=== ПРОМПТ: SPRINT 4 ===')
   check('ОТПУСКНЫЕ в промпте', SYSTEM_PROMPT.includes('ОТПУСКНЫЕ'), true)
   check('ОБУЧЕНИЕ НА ОШИБКАХ в промпте', SYSTEM_PROMPT.includes('ОБУЧЕНИЕ НА ОШИБКАХ'), true)
   check('КАСТОМНЫЕ КАТЕГОРИИ в промпте', SYSTEM_PROMPT.includes('КАСТОМНЫЕ КАТЕГОРИИ'), true)
+}
+
+console.log('\n=== computeWorkingDays с праздниками ===')
+{
+  // Базовые случаи
+  check('июнь 2026 без праздников = 22', computeWorkingDays(2026, 6), 22)
+  check('июнь 2026 с праздником 12-го = 21', computeWorkingDays(2026, 6, ['2026-06-12']), 21)
+  // 2026-06-13 — суббота, праздник на субботу не уменьшает рабочие дни
+  check('июнь 2026 с праздниками 12 и 11 = 20', computeWorkingDays(2026, 6, ['2026-06-12', '2026-06-11']), 20)
+  check('пустой массив = то же что без праздников', computeWorkingDays(2026, 6, []), 22)
+  // 2026-06-07 — воскресенье, праздник на воскресенье не уменьшает счёт
+  check('праздник на выходной не уменьшает счёт', computeWorkingDays(2026, 6, ['2026-06-07']), 22)
+}
+
+console.log('\n=== computeCreditBurden ===')
+{
+  const loans = [
+    { name: 'Кредит А', min_payment: 10000, principal: 100000, rate: 0.25 },
+    { name: 'Кредит Б', min_payment: 5000, principal: 50000, rate: 0.30 },
+  ]
+  const result = computeCreditBurden(loans, 100000, 22)
+  check('totalMonthlyPayment', result.totalMonthlyPayment, 15000)
+  approx('dailyRate (100000/22)', result.dailyRate, 4545, 1)
+  check('workingDaysForLoans (ceil(15000/dailyRate))', result.workingDaysForLoans, Math.ceil(15000 / Math.round(100000/22)))
+  check('percentOfIncome (15%)', result.percentOfIncome, 15)
+  check('freedomWorkingDay = workingDaysForLoans + 1', result.freedomWorkingDay, result.workingDaysForLoans + 1)
+  check('loanDetails length', result.loanDetails.length, 2)
+  check('нет кредитов → 0 дней', computeCreditBurden([], 100000, 22).workingDaysForLoans, 0)
+}
+
+console.log('\n=== computeOptimalRepayment ===')
+{
+  const loans = [
+    { name: 'Малый', principal: 30000, rate: 0.25, min_payment: 3000 },
+    { name: 'Дорогой', principal: 200000, rate: 0.35, min_payment: 15000 },
+  ]
+  // Бонус 50000, расходы 0, подушка 10000 → доступно 40000
+  const r1 = computeOptimalRepayment(loans, 50000, 0, 10000)
+  check('availableForRepayment = 40000', r1.availableForRepayment, 40000)
+  check('может закрыть Малый (30000 <= 40000)', r1.strategies.some(s => s.type === 'close_fully' && s.loanName === 'Малый'), true)
+  check('есть стратегия partial_highest_rate для Дорогой', r1.strategies.some(s => s.type === 'partial_highest_rate' && s.loanName === 'Дорогой'), true)
+  check('стратегии отсортированы по ROI desc', r1.strategies[0].annualROI >= r1.strategies[r1.strategies.length-1].annualROI, true)
+
+  // Мало денег: бонус 5000, подушка 10000 → доступно 0 (отрицательно → 0)
+  const r2 = computeOptimalRepayment(loans, 5000, 0, 10000)
+  check('мало денег → availableForRepayment = 0', r2.availableForRepayment, 0)
+  check('мало денег → пустые стратегии', r2.strategies.length, 0)
+
+  // Достаточно для частичного но не полного закрытия
+  const r3 = computeOptimalRepayment(loans, 20000, 0, 5000) // доступно 15000, Малый стоит 30000 → только partial
+  check('недостаточно для close_fully', r3.strategies.every(s => s.type !== 'close_fully'), true)
+}
+
+console.log('\n=== ПРОМПТ: SPRINT 5 ===')
+{
+  check('show_balance_history зарегистрирован', TOOLS.some(t => t.name === 'show_balance_history'), true)
+  check('analyze_credit_burden зарегистрирован', TOOLS.some(t => t.name === 'analyze_credit_burden'), true)
+  check('calculate_optimal_repayment зарегистрирован', TOOLS.some(t => t.name === 'calculate_optimal_repayment'), true)
+  check('АВТОТРИГГЕР в промпте', SYSTEM_PROMPT.includes('АВТОТРИГГЕР'), true)
+  check('КРЕДИТНАЯ НАГРУЗКА в промпте', SYSTEM_PROMPT.includes('КРЕДИТНАЯ НАГРУЗКА'), true)
 }
 
 console.log(`\n${'='.repeat(40)}`)

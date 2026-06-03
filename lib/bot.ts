@@ -579,12 +579,32 @@ Netflix, Spotify, Apple Music → постоянная "Подписки"
 learn_mapping с правильной категорией.
 
 ОБУЧЕНИЕ НА ОШИБКАХ:
-Если пользователь говорит "неверно", "ты ошибся", "не так", "это неправильно"
-И объясняет в чём ошибка → СРАЗУ вызови save_correction.
-Поле bot_answered = твой предыдущий ответ (первые 500 символов).
-Поле correction = суть поправки пользователя.`
+Если пользователь говорит "неверно", "ты ошибся", "не так", "это неправильно", "ошибка"
+И объясняет что именно не так → вызови save_correction немедленно, ДО ответа на поправку.
+Поле bot_answered = твой предыдущий ответ (первые 400 символов).
+Поле correction = суть поправки пользователя.
+Поле category: 'math' если ошибка в цифрах, 'context' если перепутал факты, 'logic' если логическая ошибка, 'tool' если не вызвал нужный инструмент.
 
-interface BotAction {
+АВТОТРИГГЕР СЦЕНАРНОГО АНАЛИЗА:
+Если пользователь упоминает:
+  • покупку дороже 15 000₽ (iPhone, MacBook, техника, мебель, поездка)
+  • слова 'кредит', 'рассрочка', 'в долг', 'занять', 'ипотека'
+  • вопрос 'стоит ли', 'брать или нет', 'выгодно ли'
+→ АВТОМАТИЧЕСКИ вызови инструмент scenario_analysis с:
+  itemCost: извлечь из текста
+  loanRate: 0.33 (ставка по умолчанию, уточни если другая)
+  loanMonths: 12 (по умолчанию, уточни)
+Не передавай currentLiquid — он берётся из БД автоматически.
+НЕ жди когда пользователь сам спросит об анализе — делай проактивно.
+
+КРЕДИТНАЯ НАГРУЗКА — ФОРМАТ ОТВЕТА:
+На вопросы о тяжести кредитов — показывай в рабочих днях.
+Используй инструмент analyze_credit_burden, затем форматируй ответ:
+"До {freedomWorkingDay}-го рабочего дня каждого месяца ты работаешь на банк ({workingDaysForLoans} из {workingDays} рабочих дней = {percentOfIncome}% дохода).
+С {freedomWorkingDay}-го рабочего дня — работаешь на себя."
+Это главная мотивация досрочного погашения.`
+
+export interface BotAction {
   type: string
   amount?: number; category?: string; description?: string; id?: string
   grade?: string; revenue?: number; name?: string; new_name?: string; month_key?: string|null
@@ -592,7 +612,7 @@ interface BotAction {
   principal?: number; rate?: number; min_payment?: number; end_date?: string
   days?: number; paid_amount?: number; start_date?: string; vacation_type?: string
   keyword?: string; custom_category_name?: string; monthly_limit?: number; keywords?: string[]
-  bot_answered?: string; correction?: string; trigger?: string
+  bot_answered?: string; correction?: string; trigger?: string; category_name?: string
 }
 
 // ── НАДЁЖНЫЙ ПАРСЕР ACTION ─────────────────────────────────────────────────
@@ -718,16 +738,26 @@ export async function executeAction(action: BotAction): Promise<void> {
     const net = Number(u?.salary_net??121600)
     if (action.part === 'advance') {
       const advAmt = Number(month?.salary_adv_amount??Math.round(net/2))
+      const prevBal = Number(u?.debit_balance??0)
+      const newBal = Math.round((prevBal+advAmt)*100)/100
       await s.from('months').update({salary_adv_received:true,salary_adv_amount:advAmt}).eq('user_id',USER_ID).eq('month_key',monthKey)
-      await s.from('users').update({debit_balance:Math.round((Number(u?.debit_balance??0)+advAmt)*100)/100,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
+      await s.from('users').update({debit_balance:newBal,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
+      await recordDebitChange(s, prevBal, newBal, `Аванс`, 'salary')
     }
     if (action.part === 'eom') {
       const advAmt = Number(month?.salary_adv_amount??Math.round(net/2))
       const eomSalary = Number(month?.salary_eom_amount??net-advAmt)
       const bonusAmt = Number(month?.bonus_amount??0)
       const total = eomSalary + bonusAmt
+      const prevBal = Number(u?.debit_balance??0)
+      const newBal = Math.round((prevBal+total)*100)/100
       await s.from('months').update({salary_eom_received:true,salary_eom_amount:eomSalary}).eq('user_id',USER_ID).eq('month_key',monthKey)
-      await s.from('users').update({debit_balance:Math.round((Number(u?.debit_balance??0)+total)*100)/100,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
+      await s.from('users').update({debit_balance:newBal,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
+      await recordDebitChange(s, prevBal, newBal, `ЗП + бонус`, 'salary')
+      // Update YTD gross
+      const { data: u3 } = await s.from('users').select('salary_gross,ytd_gross').eq('id', USER_ID).single()
+      const newYtd = Number(u3?.ytd_gross ?? 0) + Number(u3?.salary_gross ?? 0)
+      await s.from('users').update({ ytd_gross: newYtd }).eq('id', USER_ID)
     }
   }
 
@@ -740,8 +770,11 @@ export async function executeAction(action: BotAction): Promise<void> {
       const fp = (month?.fixed_paid as Record<string,number|boolean>) ?? {}
       if (!fp[String(idx)]) {
         const amount = action.amount ?? fc[idx].amount
+        const prevBal = Number(u?.debit_balance??0)
+        const newBal = Math.round((prevBal - amount)*100)/100
         await s.from('months').update({fixed_paid:{...fp,[String(idx)]:amount}}).eq('user_id',USER_ID).eq('month_key',monthKey)
-        await s.from('users').update({debit_balance:Math.round((Number(u?.debit_balance??0)-amount)*100)/100,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
+        await s.from('users').update({debit_balance:newBal,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
+        await recordDebitChange(s, prevBal, newBal, `Постоянная: ${fc[idx].name}`, 'fixed')
       }
     }
   }
@@ -755,8 +788,11 @@ export async function executeAction(action: BotAction): Promise<void> {
     let total = 0
     fc.forEach((f,i) => { if (!fp[String(i)]) { newFp[String(i)]=f.amount; total+=f.amount } })
     if (total > 0) {
+      const prevBal = Number(u?.debit_balance??0)
+      const newBal = Math.round((prevBal-total)*100)/100
       await s.from('months').update({fixed_paid:{...fp,...newFp}}).eq('user_id',USER_ID).eq('month_key',monthKey)
-      await s.from('users').update({debit_balance:Math.round((Number(u?.debit_balance??0)-total)*100)/100,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
+      await s.from('users').update({debit_balance:newBal,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
+      await recordDebitChange(s, prevBal, newBal, `Все постоянные`, 'fixed')
     }
   }
 
@@ -768,7 +804,10 @@ export async function executeAction(action: BotAction): Promise<void> {
       const toPrincipal = pay - toInt
       await s.from('loans').update({accrued_int:Number(loan.accrued_int)-toInt,principal:Math.max(0,Number(loan.principal)-toPrincipal),paid_month:monthKey,last_pay_principal:toPrincipal,last_pay_interest:toInt}).eq('id',loan.id)
       const { data:u } = await s.from('users').select('debit_balance').eq('id',USER_ID).single()
-      await s.from('users').update({debit_balance:Math.round((Number(u?.debit_balance??0)-pay)*100)/100,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
+      const prevBal = Number(u?.debit_balance??0)
+      const newBal = Math.round((prevBal-pay)*100)/100
+      await s.from('users').update({debit_balance:newBal,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
+      await recordDebitChange(s, prevBal, newBal, `Кредит: ${loan.name}`, 'loan')
     }
   }
 
@@ -780,14 +819,20 @@ export async function executeAction(action: BotAction): Promise<void> {
       const newPayment = Math.round(Number(loan.min_payment)*ratio*100)/100
       await s.from('loans').update({principal:newPrincipal,min_payment:newPayment}).eq('id',loan.id)
       const { data:u } = await s.from('users').select('debit_balance').eq('id',USER_ID).single()
-      await s.from('users').update({debit_balance:Math.round((Number(u?.debit_balance??0)-action.amount)*100)/100,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
+      const prevBal = Number(u?.debit_balance??0)
+      const newBal = Math.round((prevBal-action.amount)*100)/100
+      await s.from('users').update({debit_balance:newBal,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
+      await recordDebitChange(s, prevBal, newBal, `Досрочное: ${loan.name}`, 'loan')
     }
   }
 
   if (action.type === 'add_income_event' && action.amount) {
     await s.from('income_events').insert({user_id:USER_ID,month_key:monthKey,event_date:new Date().toISOString().split('T')[0],event_type:'other',description:action.description??'Доход',amount:Math.round(action.amount),to_debit:true})
     const { data:u } = await s.from('users').select('debit_balance').eq('id',USER_ID).single()
-    await s.from('users').update({debit_balance:Math.round((Number(u?.debit_balance??0)+action.amount)*100)/100,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
+    const prevBal = Number(u?.debit_balance??0)
+    const newBal = Math.round((prevBal+action.amount)*100)/100
+    await s.from('users').update({debit_balance:newBal,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
+    await recordDebitChange(s, prevBal, newBal, action.description ?? 'Доход', 'income')
   }
 
   // Получена регулярная выплата (стипендия и т.п.): зачислить + пометить чтобы не дублировать в прогнозе
@@ -800,7 +845,10 @@ export async function executeAction(action: BotAction): Promise<void> {
       // income_event для истории
       await s.from('income_events').insert({user_id:USER_ID,month_key:monthKey,event_date:new Date().toISOString().split('T')[0],event_type:'recurring',description:item?.name??action.name,amount:Math.round(amount),to_debit:true})
       // зачисление на дебет
-      await s.from('users').update({debit_balance:Math.round((Number(u?.debit_balance??0)+amount)*100)/100,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
+      const prevBalR = Number(u?.debit_balance??0)
+      const newBalR = Math.round((prevBalR+amount)*100)/100
+      await s.from('users').update({debit_balance:newBalR,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
+      await recordDebitChange(s, prevBalR, newBalR, action.name ?? item?.name ?? 'Регулярный доход', 'income')
       // пометка received (чтобы forecast не считал ещё раз)
       const { data:month } = await s.from('months').select('recurring_received').eq('user_id',USER_ID).eq('month_key',monthKey).maybeSingle()
       const received = (month?.recurring_received as string[]) ?? []
@@ -815,7 +863,10 @@ export async function executeAction(action: BotAction): Promise<void> {
 
   if (action.type === 'set_balance' && action.account && action.amount != null) {
     const field = action.account === 'sber' ? 'debit_balance' : 'tbank_debit'
+    const { data:uBal } = await s.from('users').select('debit_balance,tbank_debit').eq('id',USER_ID).single()
+    const prevBal = Number(action.account === 'sber' ? uBal?.debit_balance : uBal?.tbank_debit ?? 0)
     await s.from('users').update({[field]:action.amount,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
+    await recordDebitChange(s, prevBal, Number(action.amount), `Установка баланса (${action.account})`, 'manual')
   }
 
   if (action.type === 'close_month') {
@@ -896,7 +947,10 @@ export async function executeAction(action: BotAction): Promise<void> {
     const wdays = computeWorkingDays(now.getFullYear(), now.getMonth()+1)
     const adj = computeVacationAdjustment(action.days, action.paid_amount, salaryNet, wdays)
     // Зачислить на дебет
-    await s.from('users').update({debit_balance:Math.round((Number(u?.debit_balance??0)+action.paid_amount)*100)/100,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
+    const prevBalV = Number(u?.debit_balance??0)
+    const newBalV = Math.round((prevBalV+action.paid_amount)*100)/100
+    await s.from('users').update({debit_balance:newBalV,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
+    await recordDebitChange(s, prevBalV, newBalV, 'Отпускные/больничный', 'income')
     // income_event — vacation_type поле (sick/vacation) передаётся в input инструмента
     const vacationType = action.vacation_type ?? 'vacation'
     await s.from('income_events').insert({user_id:USER_ID,month_key:monthKey,event_date:new Date().toISOString().split('T')[0],event_type:'vacation',description:`${vacationType==='sick'?'Больничный':'Отпускные'} ${action.days}д`,amount:Math.round(action.paid_amount),to_debit:true})
@@ -949,8 +1003,15 @@ export async function executeAction(action: BotAction): Promise<void> {
     await s.from('bot_learnings').upsert(upsertData,{onConflict:'user_id,trigger',ignoreDuplicates:false})
   }
 
-  if (action.type === 'save_correction' && action.bot_answered && action.correction) {
-    await s.from('bot_corrections').insert({user_id:USER_ID,user_said:'[last message]',bot_answered:(action.bot_answered??'').slice(0,500),correction:action.correction,category:action.category??'logic'})
+  if (action.type === 'save_correction' && action.correction) {
+    // Читаем последние сообщения из истории чата для контекста
+    const { data: recentMsgs } = await s.from('bot_messages').select('role,content,created_at').eq('user_id', USER_ID).order('created_at', {ascending: false}).limit(4)
+    const msgs = (recentMsgs ?? []).reverse()
+    const lastUser = msgs.filter(m => m.role === 'user').pop()
+    const lastBot = msgs.filter(m => m.role === 'assistant').pop()
+    const userSaid = lastUser?.content ?? '[нет сообщения]'
+    const botAnswered = action.bot_answered ?? (lastBot?.content?.slice(0, 400) ?? '[нет ответа]')
+    await s.from('bot_corrections').insert({user_id:USER_ID,user_said:userSaid,bot_answered:botAnswered,correction:action.correction,category:action.category??'logic'})
   }
 }
 
@@ -1038,6 +1099,19 @@ export const TOOLS = [
     },required:['bot_answered','correction']} },
   { name:'undo', description:'Отменить последнее изменение (откат к снапшоту).',
     input_schema:{type:'object',properties:{}} },
+  { name:'show_balance_history',
+    description:'История изменений дебетового баланса. Вызывай на: "история баланса", "как менялся дебет", "откуда деньги", "почему баланс изменился".',
+    input_schema:{type:'object',properties:{limit:{type:'number',description:'Кол-во записей, по умолчанию 15'}}} },
+  { name:'analyze_credit_burden',
+    description:'Кредитная нагрузка в единицах рабочего дня. Вызывай на: "сколько дней работаю на банк", "кредитная нагрузка", "когда начну работать на себя", "насколько тяжелы кредиты".',
+    input_schema:{type:'object',properties:{}} },
+  { name:'calculate_optimal_repayment',
+    description:'Оптимальная стратегия досрочного погашения из бонуса/накоплений. Вызывай на: "сколько погасить из бонуса", "куда направить квартальный бонус", "как быстрее закрыть кредиты", "стратегия погашения".',
+    input_schema:{type:'object',properties:{
+      available_bonus:{type:'number',description:'Сумма доступная для погашения'},
+      mandatory_expenses:{type:'number',description:'Обязательные расходы периода (по умолчанию 0)'},
+      safe_liquid:{type:'number',description:'Минимальная подушка (по умолчанию 50000)'},
+    },required:['available_bonus']} },
 ]
 
 interface ContentBlock { type:string; text?:string; id?:string; name?:string; input?:Record<string,unknown> }
@@ -1056,11 +1130,16 @@ async function callClaude(modelId: string, systemBlocks: unknown[], messages: un
 async function handleTool(name: string, input: Record<string,unknown>): Promise<string> {
   // Computation tools (read-only, не пишут в БД)
   if (name === 'scenario_analysis') {
+    let liqCurrent = Number(input.currentLiquid ?? 0)
+    if (!liqCurrent) {
+      const { data: u } = await db().from('users').select('debit_balance,tbank_debit').eq('id', USER_ID).single()
+      liqCurrent = Number(u?.debit_balance ?? 0) + Number(u?.tbank_debit ?? 0)
+    }
     const result = analyzeDecision({
       itemCost: Number(input.itemCost ?? 0),
       loanRate: Number(input.loanRate ?? 0.33),
       loanMonths: Number(input.loanMonths ?? 12),
-      currentLiquid: Number(input.currentLiquid ?? 0),
+      currentLiquid: liqCurrent,
       expectedBonus: input.expectedBonus != null ? Number(input.expectedBonus) : undefined,
       weeksUntilBonus: input.weeksUntilBonus != null ? Number(input.weeksUntilBonus) : undefined,
       minSafeLiquid: 10000,
@@ -1083,6 +1162,41 @@ async function handleTool(name: string, input: Record<string,unknown>): Promise<
     if (!suggestion) return JSON.stringify({suggestion:null,reason:'Недостаточно свободных средств (< 5000₽ после подушки в 10000₽)'})
     return JSON.stringify(suggestion)
   }
+  if (name === 'show_balance_history') {
+    const limit = Number(input.limit ?? 15)
+    const { data: hist } = await db().from('debit_history')
+      .select('amount,balance_after,description,source_type,created_at')
+      .eq('user_id', USER_ID)
+      .order('created_at', { ascending: false })
+      .limit(limit)
+    return JSON.stringify(hist ?? [])
+  }
+  if (name === 'analyze_credit_burden') {
+    const s = db()
+    const [{ data: u }, { data: loans }] = await Promise.all([
+      s.from('users').select('salary_net').eq('id', USER_ID).single(),
+      s.from('loans').select('name,principal,rate,min_payment').eq('user_id', USER_ID),
+    ])
+    const salaryNet = Number(u?.salary_net ?? 121600)
+    const now = new Date()
+    const workingDays = computeWorkingDays(now.getFullYear(), now.getMonth() + 1)
+    const result = computeCreditBurden(
+      (loans ?? []).map(l => ({ name: l.name, min_payment: Number(l.min_payment), principal: Number(l.principal), rate: Number(l.rate) })),
+      salaryNet,
+      workingDays
+    )
+    return JSON.stringify(result)
+  }
+  if (name === 'calculate_optimal_repayment') {
+    const { data: loans } = await db().from('loans').select('name,principal,rate,min_payment').eq('user_id', USER_ID)
+    const result = computeOptimalRepayment(
+      (loans ?? []).map(l => ({ name: l.name, principal: Number(l.principal), rate: Number(l.rate), min_payment: Number(l.min_payment) })),
+      Number(input.available_bonus ?? 0),
+      Number(input.mandatory_expenses ?? 0),
+      Number(input.safe_liquid ?? 50000),
+    )
+    return JSON.stringify(result)
+  }
   // DB-writing tools
   await executeAction({ type: name, ...input } as BotAction)
   return 'Выполнено успешно.'
@@ -1101,7 +1215,8 @@ async function runToolLoop(modelId: string, systemBlocks: unknown[], initialMess
         if (block.type === 'tool_use' && block.name) {
           try {
             const result = await handleTool(block.name, (block.input ?? {}) as Record<string,unknown>)
-            if (block.name !== 'scenario_analysis' && block.name !== 'suggest_early_repayment') {
+            const readOnlyTools = ['scenario_analysis','suggest_early_repayment','show_balance_history','analyze_credit_burden','calculate_optimal_repayment']
+            if (!readOnlyTools.includes(block.name)) {
               actionsRun.push(block.name)
             }
             toolResults.push({ type:'tool_result', tool_use_id:block.id, content: result })
