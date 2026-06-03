@@ -3,7 +3,7 @@
  * Жёсткий мобильный формат + надёжный парсер ACTION + квартальный бонус
  */
 import { createClient, SupabaseClient } from '@supabase/supabase-js'
-import { analyzeDecision, suggestEarlyRepayment } from './calc'
+import { analyzeDecision, suggestEarlyRepayment, computeWorkingDays, computeVacationAdjustment } from './calc'
 
 const USER_ID = '5ebdb411-6021-4dfc-9d0d-caa8e0107502'
 const TG = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}`
@@ -518,6 +518,9 @@ interface BotAction {
   grade?: string; revenue?: number; name?: string; new_name?: string; month_key?: string|null
   field?: string; key?: string; value?: number|string; account?: string; part?: string
   principal?: number; rate?: number; min_payment?: number; end_date?: string
+  days?: number; paid_amount?: number; start_date?: string
+  keyword?: string; custom_category_name?: string; monthly_limit?: number; keywords?: string[]
+  bot_answered?: string; correction?: string; trigger?: string
 }
 
 // ── НАДЁЖНЫЙ ПАРСЕР ACTION ─────────────────────────────────────────────────
@@ -564,6 +567,9 @@ export async function executeAction(action: BotAction): Promise<void> {
     mark_recurring_received:'регулярный доход',
     update_settings:'настройки',add_fixed_cost:'+постоянная',
     remove_fixed_cost:'-постоянная',edit_fixed_cost:'правка',update_loan:'обновление кредита',undo:'отмена',
+    record_vacation_pay:'отпускные', create_custom_category:'новая категория',
+    add_keyword:'ключевое слово', remove_custom_category:'удал. категории',
+    learn_mapping:'обучение', save_correction:'коррекция',
   }
   if (snapLabel[action.type]) await snap(snapLabel[action.type])
 
@@ -787,6 +793,69 @@ export async function executeAction(action: BotAction): Promise<void> {
       await s.from('undo_snapshots').delete().eq('id',sn.id)
     }
   }
+
+  if (action.type === 'record_vacation_pay' && action.days && action.paid_amount) {
+    const now = new Date()
+    const { data:u } = await s.from('users').select('debit_balance,salary_net').eq('id',USER_ID).single()
+    const salaryNet = Number(u?.salary_net ?? 121600)
+    const wdays = computeWorkingDays(now.getFullYear(), now.getMonth()+1)
+    const adj = computeVacationAdjustment(action.days, action.paid_amount, salaryNet, wdays)
+    // Зачислить на дебет
+    await s.from('users').update({debit_balance:Math.round((Number(u?.debit_balance??0)+action.paid_amount)*100)/100,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
+    // income_event
+    await s.from('income_events').insert({user_id:USER_ID,month_key:monthKey,event_date:new Date().toISOString().split('T')[0],event_type:action.type??'vacation',description:`${action.type==='sick'?'Больничный':'Отпускные'} ${action.days}д`,amount:Math.round(action.paid_amount),to_debit:true})
+    // Запись корректировки в months
+    const { data:month } = await s.from('months').select('salary_adjustments,salary_adv_amount,salary_eom_amount').eq('user_id',USER_ID).eq('month_key',monthKey).maybeSingle()
+    const adjustments = (month?.salary_adjustments as unknown[]) ?? []
+    const newAdj = {type:action.type,days:action.days,paid_amount:action.paid_amount,deduct:adj.deductFromSalary,date:action.start_date??new Date().toISOString().split('T')[0],deduct_from:adj.deductFrom}
+    adjustments.push(newAdj)
+    const salaryNet2 = Number(u?.salary_net??121600)
+    const advAmt = Number(month?.salary_adv_amount ?? Math.round(salaryNet2/2))
+    const eomAmt = Number(month?.salary_eom_amount ?? salaryNet2 - advAmt)
+    const updateData: Record<string,unknown> = { salary_adjustments: adjustments }
+    if (adj.deductFrom === 'advance') updateData.salary_adv_amount = Math.max(0, advAmt - adj.deductFromSalary)
+    else updateData.salary_eom_amount = Math.max(0, eomAmt - adj.deductFromSalary)
+    month ? await s.from('months').update(updateData).eq('user_id',USER_ID).eq('month_key',monthKey)
+          : await s.from('months').insert({user_id:USER_ID,month_key:monthKey,...updateData})
+  }
+
+  if (action.type === 'create_custom_category' && action.name) {
+    const { data:existing } = await s.from('custom_categories').select('id').eq('user_id',USER_ID).ilike('name',action.name).maybeSingle()
+    if (!existing) {
+      const ins: Record<string,unknown> = {user_id:USER_ID,name:action.name}
+      if (action.monthly_limit != null) ins.monthly_limit = action.monthly_limit
+      if (action.keywords) ins.keywords = action.keywords
+      await s.from('custom_categories').insert(ins)
+    }
+  }
+
+  if (action.type === 'add_keyword' && action.name && action.keyword) {
+    const { data:cat } = await s.from('custom_categories').select('id,keywords').eq('user_id',USER_ID).ilike('name',`%${action.name}%`).maybeSingle()
+    if (cat) {
+      const kws = (cat.keywords as string[]) ?? []
+      if (!kws.includes(action.keyword)) {
+        await s.from('custom_categories').update({keywords:[...kws,action.keyword]}).eq('id',cat.id)
+      }
+    }
+  }
+
+  if (action.type === 'remove_custom_category' && action.name) {
+    await s.from('custom_categories').delete().eq('user_id',USER_ID).ilike('name',`%${action.name}%`)
+  }
+
+  if (action.type === 'learn_mapping' && action.trigger) {
+    const upsertData: Record<string,unknown> = {user_id:USER_ID,trigger:action.trigger.toLowerCase()}
+    if (action.category) upsertData.category = action.category
+    if (action.custom_category_name) {
+      const { data:cat } = await s.from('custom_categories').select('id').eq('user_id',USER_ID).ilike('name',`%${action.custom_category_name}%`).maybeSingle()
+      if (cat) upsertData.custom_category_id = cat.id
+    }
+    await s.from('bot_learnings').upsert(upsertData,{onConflict:'user_id,trigger',ignoreDuplicates:false})
+  }
+
+  if (action.type === 'save_correction' && action.bot_answered && action.correction) {
+    await s.from('bot_corrections').insert({user_id:USER_ID,user_said:'[last message]',bot_answered:(action.bot_answered??'').slice(0,500),correction:action.correction,category:action.category??'logic'})
+  }
 }
 
 // ── ИНСТРУМЕНТЫ (tool calling) — надёжная замена парсингу ACTION ──────────
@@ -833,6 +902,44 @@ export const TOOLS = [
     input_schema:{type:'object',properties:{itemCost:{type:'number',description:'Стоимость покупки в рублях'},loanRate:{type:'number',description:'Годовая ставка кредита (например 0.33 для 33%)'},loanMonths:{type:'number',description:'Срок в месяцах'},expectedBonus:{type:'number',description:'Ожидаемый бонус (если есть)'},weeksUntilBonus:{type:'number',description:'Через сколько недель бонус'}},required:['itemCost','loanRate','loanMonths']} },
   { name:'suggest_early_repayment', description:'Рассчитать выгоду от досрочного погашения кредита при текущей ликвидности. Используй когда спрашивают "куда вложить свободные деньги" или проактивно.',
     input_schema:{type:'object',properties:{}} },
+  { name:'record_vacation_pay',
+    description:'Записать отпускные или больничные. Зачисляет на дебет СРАЗУ. Из ближайшего аванса/зп вычитается дневная ставка×кол-во дней. Вызывай когда "получил отпускные X₽ за N дней" или "больничный N дней, пришло X₽".',
+    input_schema:{type:'object',properties:{
+      days:{type:'number',description:'Количество дней'},
+      paid_amount:{type:'number',description:'Сумма отпускных/больничных'},
+      start_date:{type:'string',description:'Дата начала YYYY-MM-DD'},
+      type:{type:'string',enum:['vacation','sick']}
+    },required:['days','paid_amount']} },
+  { name:'create_custom_category',
+    description:'Создать кастомную категорию трат с опциональным лимитом и ключевыми словами.',
+    input_schema:{type:'object',properties:{
+      name:{type:'string'},
+      monthly_limit:{type:'number'},
+      keywords:{type:'array',items:{type:'string'}}
+    },required:['name']} },
+  { name:'add_keyword',
+    description:'Добавить ключевое слово в кастомную категорию для автоматического распознавания.',
+    input_schema:{type:'object',properties:{
+      category_name:{type:'string'},
+      keyword:{type:'string'}
+    },required:['category_name','keyword']} },
+  { name:'remove_custom_category',
+    description:'Удалить кастомную категорию.',
+    input_schema:{type:'object',properties:{name:{type:'string'}},required:['name']} },
+  { name:'learn_mapping',
+    description:'Запомнить соответствие trigger→категория. Вызывай после любой траты где определил категорию сам или пользователь подтвердил/поправил.',
+    input_schema:{type:'object',properties:{
+      trigger:{type:'string',description:'Слово/фраза из описания траты'},
+      category:{type:'string'},
+      custom_category_name:{type:'string'}
+    },required:['trigger']} },
+  { name:'save_correction',
+    description:'Сохранить ошибку бота для обучения. Вызывай когда пользователь говорит "неверно", "ты ошибся", "не так".',
+    input_schema:{type:'object',properties:{
+      bot_answered:{type:'string',description:'Что ответил бот (неверно) — первые 500 символов'},
+      correction:{type:'string',description:'Правильный ответ/объяснение пользователя'},
+      category:{type:'string',enum:['math','context','logic','tool']}
+    },required:['bot_answered','correction']} },
   { name:'undo', description:'Отменить последнее изменение (откат к снапшоту).',
     input_schema:{type:'object',properties:{}} },
 ]

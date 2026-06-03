@@ -138,6 +138,32 @@ export function suggestEarlyRepayment(
   }
 }
 
+/** Кол-во рабочих дней (пн-пт) в месяце */
+export function computeWorkingDays(year: number, month: number): number {
+  const daysInMonth = new Date(year, month, 0).getDate()
+  let count = 0
+  for (let d = 1; d <= daysInMonth; d++) {
+    const day = new Date(year, month - 1, d).getDay()
+    if (day !== 0 && day !== 6) count++
+  }
+  return count
+}
+
+/** Расчёт корректировки за отпуск/больничный */
+export function computeVacationAdjustment(
+  vacationDays: number,
+  paidAmount: number,
+  salaryNet: number,
+  workingDays: number
+): { dailyRate: number; deductFromSalary: number; actualLoss: number; deductFrom: 'advance' | 'eom' } {
+  const dailyRate = workingDays > 0 ? Math.round(salaryNet / workingDays) : 0
+  const deductFromSalary = dailyRate * vacationDays
+  const actualLoss = deductFromSalary - paidAmount
+  // Простое правило: если дней меньше половины месяца — из аванса, иначе из eom
+  const deductFrom: 'advance' | 'eom' = vacationDays <= 7 ? 'advance' : 'eom'
+  return { dailyRate, deductFromSalary, actualLoss, deductFrom }
+}
+
 function annuityPayment(principal: number, monthlyRate: number, months: number): number {
   if (monthlyRate === 0) return principal / months
   const k = Math.pow(1 + monthlyRate, months)
