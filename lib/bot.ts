@@ -726,6 +726,8 @@ export interface BotAction {
   covers_days?: number; new_category?: string
   // Sprint 6
   title?: string; priority?: number; adv_amount?: number; eom_amount?: number; bonus_amount?: number
+  // Sprint 9
+  formula?: string
 }
 
 // ── НАДЁЖНЫЙ ПАРСЕР ACTION ─────────────────────────────────────────────────
