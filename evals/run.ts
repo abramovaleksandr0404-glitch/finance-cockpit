@@ -377,6 +377,33 @@ console.log('\n=== БЕЗОПАСНОСТЬ: SPRINT 8 ===')
   check('sprint_queue в CLAUDE.md', claudeContent.includes('sprint_queue'), true)
 }
 
+console.log('\n=== ЯКОРЯ: SPRINT 9 ===')
+{
+  const bot = readFileSync(join(process.cwd(), 'lib/bot.ts'), 'utf-8')
+  // Задача 1: bot_anchors читается в getContext
+  check('bot_anchors запрос в getContext', bot.includes("from('bot_anchors')"), true)
+  check('anchorSection формируется', bot.includes('buildAnchorSection'), true)
+  check('anchorSection включён в return', bot.includes('${anchorSection}'), true)
+  // Задача 2: update_anchor инструмент
+  check('update_anchor в TOOLS', TOOLS.some(t => t.name === 'update_anchor'), true)
+  const ua = TOOLS.find(t => t.name === 'update_anchor')
+  check('update_anchor требует month_key', ua?.input_schema?.required?.includes('month_key'), true)
+  check('update_anchor требует key', ua?.input_schema?.required?.includes('key'), true)
+  check('update_anchor требует value', ua?.input_schema?.required?.includes('value'), true)
+  // Задача 3: ПРАВИЛО №0 в промпте
+  check('ПРАВИЛО №0 в SYSTEM_PROMPT', SYSTEM_PROMPT.includes('ПРАВИЛО №0'), true)
+  check('АБСОЛЮТНЫЙ ПРИОРИТЕТ в промпте', SYSTEM_PROMPT.includes('АБСОЛЮТНЫЙ ПРИОРИТЕТ'), true)
+  check('ЯКОРЯ в промпте', SYSTEM_PROMPT.includes('ЯКОРЯ'), true)
+  // Задача 4: Sprint 6 инструменты
+  check('reclassify_expense в TOOLS', TOOLS.some(t => t.name === 'reclassify_expense'), true)
+  check('update_cashflow в TOOLS', TOOLS.some(t => t.name === 'update_cashflow'), true)
+  check('add_backlog_item в TOOLS', TOOLS.some(t => t.name === 'add_backlog_item'), true)
+  check('add_multiday_expense в TOOLS', TOOLS.some(t => t.name === 'add_multiday_expense'), true)
+  // Задача 6: forecast якорь используется
+  check('anchorForecast используется для projEnd', bot.includes('anchorForecast'), true)
+  check('ANCHOR MISMATCH лог', bot.includes('ANCHOR MISMATCH'), true)
+}
+
 console.log(`\n${'='.repeat(40)}`)
 console.log(`ИТОГО: ${passed} прошло, ${failed} провалено`)
 console.log('='.repeat(40))

@@ -70,8 +70,10 @@ export async function getContext(): Promise<string> {
 
   const prevMonthDate = new Date(now.getFullYear(), now.getMonth() - 1, 1)
   const prevMK = `${prevMonthDate.getFullYear()}-${String(prevMonthDate.getMonth() + 1).padStart(2, '0')}`
+  const nextMonthDate = new Date(now.getFullYear(), now.getMonth() + 1, 1)
+  const nextMonthKey = `${nextMonthDate.getFullYear()}-${String(nextMonthDate.getMonth() + 1).padStart(2, '0')}`
 
-  const [{data:user},{data:loans},{data:expenses},{data:month},{data:goals},{data:recentExp},{data:quarterMonths},{data:cards},{data:incomeEvents},{data:customCats},{data:corrections},{data:holidays},{data:prevExpenses}] = await Promise.all([
+  const [{data:user},{data:loans},{data:expenses},{data:month},{data:goals},{data:recentExp},{data:quarterMonths},{data:cards},{data:incomeEvents},{data:customCats},{data:corrections},{data:holidays},{data:prevExpenses},{data:anchors}] = await Promise.all([
     supabase.from('users').select('*').eq('id',USER_ID).single(),
     supabase.from('loans').select('id,name,principal,accrued_int,min_payment,end_date,rate,paid_month,due_day').eq('user_id',USER_ID).order('sort_order'),
     supabase.from('expenses').select('id,amount,category,description,expense_date,custom_category_id,covers_days').eq('user_id',USER_ID).eq('month_key',monthKey),
@@ -85,12 +87,45 @@ export async function getContext(): Promise<string> {
     supabase.from('bot_corrections').select('correction,category,created_at').eq('user_id',USER_ID).order('created_at',{ascending:false}).limit(10),
     supabase.from('ru_holidays').select('holiday_date').gte('holiday_date',`${now.getFullYear()}-${String(curMonth).padStart(2,'0')}-01`).lte('holiday_date',`${now.getFullYear()}-${String(curMonth).padStart(2,'0')}-31`),
     supabase.from('expenses').select('amount,category').eq('user_id', USER_ID).eq('month_key', prevMK),
+    supabase.from('bot_anchors').select('month_key,key,value,formula').eq('user_id',USER_ID).in('month_key',[monthKey,nextMonthKey,'global']).order('month_key'),
   ])
   if (!user) return 'Данные не загружены'
 
   const holidayDates = (holidays ?? []).map((h: {holiday_date: string}) => String(h.holiday_date).substring(0, 10))
   const workingDaysInMonth = computeWorkingDays(now.getFullYear(), curMonth, holidayDates)
   console.log('[getContext] workingDays:', workingDaysInMonth, 'holidays:', holidayDates.length)
+
+  // Якоря: индекс по ключу для быстрого поиска
+  type Anchor = {month_key:string; key:string; value:string; formula:string|null}
+  const anchorMap: Record<string, Record<string, Anchor>> = {}
+  for (const a of (anchors ?? []) as Anchor[]) {
+    if (!anchorMap[a.month_key]) anchorMap[a.month_key] = {}
+    anchorMap[a.month_key][a.key] = a
+  }
+  function getAnchor(mk: string, key: string): string | null {
+    return anchorMap[mk]?.[key]?.value ?? null
+  }
+
+  // Форматирование раздела якорей
+  function buildAnchorSection(): string {
+    if (!anchors?.length) return ''
+    const lines: string[] = [
+      '╔══════════════════════════════════════════╗',
+      '║  ЯКОРЯ — БРАТЬ ДОСЛОВНО, НЕ ПЕРЕСЧИТЫВАТЬ ║',
+      '╚══════════════════════════════════════════╝',
+    ]
+    for (const mk of [monthKey, nextMonthKey, 'global']) {
+      const rows = Object.values(anchorMap[mk] ?? {})
+      if (!rows.length) continue
+      const label = mk === 'global' ? '📌 ГЛОБАЛЬНЫЕ' : `📌 ${mk}`
+      lines.push(`\n${label}:`)
+      for (const r of rows) {
+        lines.push(`  ${r.key}: ${r.value}${r.formula ? ` (${r.formula})` : ''}`)
+      }
+    }
+    return lines.join('\n') + '\n'
+  }
+  const anchorSection = buildAnchorSection()
 
   const debitSber = Number(user.debit_balance ?? 0)
   const debitTbank = Number(user.tbank_debit ?? 0)
@@ -163,7 +198,12 @@ export async function getContext(): Promise<string> {
   const totalDebt = (loans ?? []).reduce((s,l) => s+Number(l.principal)+Number(l.accrued_int), 0)
   const totalMonthlyPayment = (loans ?? []).reduce((s,l) => s+Number(l.min_payment), 0)
   // Прогноз остатка = баланс + входы − кредиты − постоянные − переменные до лимита
-  const projEnd = liquid + incomingTotal - pendingLoanPayments - fixedUnpaid - varLeft
+  const projEndComputed = liquid + incomingTotal - pendingLoanPayments - fixedUnpaid - varLeft
+  const anchorForecast = getAnchor(monthKey, 'forecast_end')
+  if (anchorForecast && Math.abs(projEndComputed - Number(anchorForecast)) > 100) {
+    console.error('[ANCHOR MISMATCH] forecast computed:', projEndComputed, 'anchor:', anchorForecast)
+  }
+  const projEnd = anchorForecast ? Number(anchorForecast) : projEndComputed
   // После плановых покупок
   const projEndAfterPlanned = projEnd - plannedTotal
 
@@ -196,11 +236,10 @@ export async function getContext(): Promise<string> {
   const qBonusGross = qNominalSum * qMult
   const qBonusNet = Math.round(qBonusGross * (1 - r1))
 
-  // Прогноз следующего месяца
-  const nextMonthDate = new Date(now.getFullYear(), now.getMonth() + 1, 1)
+  // Прогноз следующего месяца (nextMonthDate/nextMonthKey уже определены выше)
   const nextYear = nextMonthDate.getFullYear()
   const nextMonthNum = nextMonthDate.getMonth() + 1
-  const nextMK = `${nextYear}-${String(nextMonthNum).padStart(2,'0')}`
+  const nextMK = nextMonthKey
   const nextAdvDay = advanceDay(nextYear, nextMonthNum)
   const nextEomDay = lastWorkingDayOfMonth(nextYear, nextMonthNum)
   const nextRecurringTotal = recurringIncomes.reduce((s,r)=>s+r.amount, 0)
@@ -244,7 +283,8 @@ export async function getContext(): Promise<string> {
   const correctionLines = (corrections ?? []).map(c => `  • [${c.category ?? 'general'}] ${c.correction}`).join('\n')
   console.log('[getContext] corrections loaded:', corrections?.length ?? 0)
 
-  return `=== ФИНАНСОВЫЙ КОНТЕКСТ ===
+  return `${anchorSection}
+=== ФИНАНСОВЫЙ КОНТЕКСТ ===
 ДАТА: ${now.toLocaleDateString('ru-RU',{weekday:'long',day:'numeric',month:'long',year:'numeric'})}
 МЕСЯЦ: ${monthKey} (день ${today} из ${daysInMonth}, осталось ${daysLeft} дней)
 КВАРТАЛ: Q${curQuarter} (${qStartKey}…${qEndKey})
@@ -413,7 +453,32 @@ ${catLines}
 ПОВТОРЯЮЩИЕСЯ ТРАТЫ:
 ${repeatLines}`
 }
-export const SYSTEM_PROMPT = `Ты — финансовый ассистент Александра в Telegram. Александр работает в АТОН (продажи инвестиционных продуктов).
+export const SYSTEM_PROMPT = `╔═══════════════════════════════════════╗
+║  ПРАВИЛО №0 — АБСОЛЮТНЫЙ ПРИОРИТЕТ  ║
+╚═══════════════════════════════════════╝
+
+Всё что находится в секции ЯКОРЯ контекста — ЕСТЬ ФИНАЛЬНАЯ ИСТИНА.
+КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО:
+  ✗ Пересчитывать значения из секции ЯКОРЯ
+  ✗ Сомневаться в значениях якорей
+  ✗ Давать другое число чем в якоре (даже если считаешь иначе)
+  ✗ Писать 'расхождение' или 'не совпадает' для якорных значений
+
+РАЗРЕШЕНО:
+  ✓ Объяснить формулу (как посчитано) — но результат взять из якоря
+  ✓ Обновить якорь через update_anchor если пользователь подтвердил новое значение
+
+Примеры:
+  Пользователь: 'как считается аванс?'
+  Правильно: 'Аванс = 10 раб.дней × 5790₽ − 2 дня отпуска × 5790₽ = 46320₽ [якорь]'
+  Неправильно: 'Я считаю 10×5527=55270, расхождение с контекстом...'
+
+ФОРМУЛА РАБОЧИХ ДНЕЙ:
+  daily_rate = salary_net / working_days_month (с праздниками РФ)
+  Аванс = рабочие дни 1-14 × daily_rate − vacation_days × daily_rate
+  ЗП = рабочие дни 15-end × daily_rate
+
+Ты — финансовый ассистент Александра в Telegram. Александр работает в АТОН (продажи инвестиционных продуктов).
 
 ФОРМАТ ОТВЕТА — КРИТИЧНО:
 - Telegram на мобильном. НИКОГДА не используй markdown-таблицы (символ |). Они ломаются.
@@ -1142,6 +1207,17 @@ export async function executeAction(action: BotAction): Promise<void> {
     await s.from('users').update({ debit_balance: newBal, debit_updated_at: new Date().toISOString() }).eq('id', USER_ID)
     await recordDebitChange(s, Number(u?.debit_balance ?? 0), newBal, `Мультидневная: ${action.description ?? action.category} (${action.covers_days}д)`, 'expense')
   }
+
+  if (action.type === 'update_anchor' && action.month_key && action.key && action.value != null) {
+    await s.from('bot_anchors').upsert({
+      user_id: USER_ID,
+      month_key: action.month_key,
+      key: action.key,
+      value: String(action.value),
+      formula: action.formula ?? null,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'user_id,month_key,key' })
+  }
 }
 
 // ── ИНСТРУМЕНТЫ (tool calling) — надёжная замена парсингу ACTION ──────────
@@ -1288,6 +1364,16 @@ export const TOOLS = [
   { name: 'compare_months',
     description: 'Сравнить траты текущего и прошлого месяца по категориям. Вызывай на: "как я трачу по сравнению с прошлым месяцем", "стал ли я тратить больше/меньше", "сравни месяцы".',
     input_schema: { type: 'object', properties: {} } },
+  { name: 'update_anchor',
+    description: 'Обновить якорное значение когда пользователь подтверждает новую верную цифру. Вызывай когда пользователь говорит: "аванс теперь X", "запомни что в июле Y дней", "исправь: ЗП = Z".',
+    input_schema: { type: 'object',
+      properties: {
+        month_key: { type: 'string', description: '2026-06, 2026-07, или global' },
+        key: { type: 'string', description: 'working_days, daily_rate, advance_actual, eom_salary, forecast_end и т.п.' },
+        value: { type: 'string', description: 'Новое значение' },
+        formula: { type: 'string', description: 'Как посчитано (необязательно)' },
+      },
+      required: ['month_key', 'key', 'value'] } },
 ]
 
 interface ContentBlock { type:string; text?:string; id?:string; name?:string; input?:Record<string,unknown> }

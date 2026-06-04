@@ -1,3 +1,10 @@
+## [Sprint 9] — 2026-06-04
+- ПРАВИЛО №0 в промпте: якоря — абсолютная истина, не пересчитывать
+- bot_anchors в контексте: раздел ЯКОРЯ в самом начале, данные из Supabase
+- update_anchor инструмент: бот обновляет якоря когда пользователь подтверждает новое значение
+- forecast mismatch guard: если прогноз расходится с якорём >100₽ → используется якорное значение
+- 16 новых eval-тестов, итого 171
+
 ## [Sprint 8] — 2026-06-04
 - Security headers: X-Frame-Options, X-Content-Type-Options, XSS-Protection, Referrer-Policy, CSP в vercel.json
 - Export auth: /api/bot/export требует Bearer BOT_WEBHOOK_SECRET
