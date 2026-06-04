@@ -88,8 +88,9 @@ export async function getContext(): Promise<string> {
   ])
   if (!user) return 'Данные не загружены'
 
-  const holidayDates = (holidays ?? []).map((h: {holiday_date: string}) => h.holiday_date)
+  const holidayDates = (holidays ?? []).map((h: {holiday_date: string}) => String(h.holiday_date).substring(0, 10))
   const workingDaysInMonth = computeWorkingDays(now.getFullYear(), curMonth, holidayDates)
+  console.log('[getContext] workingDays:', workingDaysInMonth, 'holidays:', holidayDates.length)
 
   const debitSber = Number(user.debit_balance ?? 0)
   const debitTbank = Number(user.tbank_debit ?? 0)
@@ -241,6 +242,7 @@ export async function getContext(): Promise<string> {
 
   // Bot corrections
   const correctionLines = (corrections ?? []).map(c => `  • [${c.category ?? 'general'}] ${c.correction}`).join('\n')
+  console.log('[getContext] corrections loaded:', corrections?.length ?? 0)
 
   return `=== ФИНАНСОВЫЙ КОНТЕКСТ ===
 ДАТА: ${now.toLocaleDateString('ru-RU',{weekday:'long',day:'numeric',month:'long',year:'numeric'})}
