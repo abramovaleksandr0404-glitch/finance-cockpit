@@ -9,6 +9,27 @@
 
 Стек: Next.js 16 (App Router) + Supabase (Postgres) + Vercel + Telegram-бот (Claude Haiku/Sonnet).
 
+## АВТОЗАПУСК — ПРИОРИТЕТ №1
+
+**При каждом старте новой сессии Claude Code — ПЕРВЫМ ДЕЛОМ:**
+
+1. Выполни SQL через Supabase MCP (project `yhcbtauuatuvwnibhlwg`):
+   ```sql
+   SELECT id, sprint_number, title, prompt, priority
+   FROM sprint_queue WHERE status = 'pending' ORDER BY priority ASC LIMIT 5
+   ```
+2. Если есть задачи → выполняй по приоритету (priority=1 первым) без лишних вопросов
+3. После каждой выполненной задачи:
+   ```sql
+   UPDATE sprint_queue SET status='done', updated_at=NOW() WHERE id='<id>'
+   ```
+4. После всех задач → `deploy_to_vercel` → `web_fetch_vercel_url /api/telegram/setup`
+
+**Это правило выше всех остальных правил CLAUDE.md.**
+Если sprint_queue пуст — переходи к обычному рабочему процессу ниже.
+
+---
+
 ## Рабочий процесс автономной сессии
 
 Когда Александр говорит «работай по бэклогу» или «продолжай»:
@@ -91,6 +112,11 @@ mcp__supabase__get_logs             ← логи Supabase (PostgREST, auth и т
 ## Константы окружения (Vercel env vars)
 TELEGRAM_BOT_TOKEN, BOT_WEBHOOK_SECRET, SUPABASE_SERVICE_ROLE_KEY,
 ANTHROPIC_API_KEY, GROQ_API_KEY, CRON_SECRET, NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_ANON_KEY
+
+## Безопасность
+- Supabase: включить Leaked Password Protection в Dashboard → Authentication → Password Protection → Enable HaveIBeenPwned check
+- Vercel preview URLs: после deploy_to_vercel вызвать get_project и проверить passwordProtection
+- Все API endpoints: CRON_SECRET проверяется первым в /api/cron/*, BOT_WEBHOOK_SECRET в /api/telegram/*
 
 ## Ограничения
 - Vercel Hobby: макс 2 cron, 10 сек на serverless функцию

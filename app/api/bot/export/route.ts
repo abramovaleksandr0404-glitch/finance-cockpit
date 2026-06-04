@@ -5,6 +5,12 @@ export const dynamic = 'force-dynamic'
 const USER_ID = '5ebdb411-6021-4dfc-9d0d-caa8e0107502'
 
 export async function GET(req: Request) {
+  const auth = req.headers.get('authorization')
+  const secret = process.env.BOT_WEBHOOK_SECRET
+  if (!secret || auth !== `Bearer ${secret}`) {
+    return new NextResponse('Unauthorized', { status: 401 })
+  }
+
   const { searchParams } = new URL(req.url)
   const days = Math.min(90, Math.max(1, Number(searchParams.get('days') ?? 7)))
   const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString()

@@ -1,3 +1,10 @@
+## [Sprint 8] — 2026-06-04
+- Security headers: X-Frame-Options, X-Content-Type-Options, XSS-Protection, Referrer-Policy, CSP в vercel.json
+- Export auth: /api/bot/export требует Bearer BOT_WEBHOOK_SECRET
+- Input sanitization: валидация amount, grade, category, settings перед записью в БД
+- CLAUDE.md автозапуск + раздел Безопасность: sprint_queue, preview protection, Supabase HaveIBeenPwned
+- Secrets audit: нет захардкоженных ключей, все cron endpoints проверяют CRON_SECRET первым
+
 ## [Sprint 7] — 2026-06-03
 - Графики трат: BarChart по категориям + LineChart тренд vs идеальный темп (recharts)
 - История баланса: BalanceHistoryChart из debit_history (последние 30 изменений)

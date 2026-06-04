@@ -6,8 +6,8 @@
 import {
   computeMonthlyBonus, computeQuarterlyBonus, computeProjectedEnd,
   computeDailyBudget, advanceDay, lastWorkingDayOfMonth, analyzeDecision,
-  suggestEarlyRepayment, computeWorkingDays, computeVacationAdjustment,
-  computeCreditBurden, computeOptimalRepayment, type BonusConfig,
+  suggestEarlyRepayment, computeWorkingDays, computeCreditBurden,
+  computeOptimalRepayment, computeVacationAdjustment, type BonusConfig,
 } from '../lib/calc'
 import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
@@ -357,6 +357,24 @@ console.log('\n=== ПРОМПТ: SPRINT 7 ===')
   check('sendTelegramWithButtons в bot.ts', botContent.includes('sendTelegramWithButtons'), true)
   check('answerCallbackQuery в route.ts', readFileSync(join(process.cwd(), 'app/api/telegram/route.ts'), 'utf-8').includes('answerCallbackQuery'), true)
   check('smart alert дебет < 5000', readFileSync(join(process.cwd(), 'app/api/cron/evening/route.ts'), 'utf-8').includes('5000'), true)
+}
+
+console.log('\n=== БЕЗОПАСНОСТЬ: SPRINT 8 ===')
+{
+  const exportContent = readFileSync(join(process.cwd(), 'app/api/bot/export/route.ts'), 'utf-8')
+  const vercelContent = readFileSync(join(process.cwd(), 'vercel.json'), 'utf-8')
+  const botContent = readFileSync(join(process.cwd(), 'lib/bot.ts'), 'utf-8')
+  const claudeContent = readFileSync(join(process.cwd(), 'CLAUDE.md'), 'utf-8')
+  check('export route требует auth', exportContent.includes('Unauthorized'), true)
+  check('export route проверяет Bearer', exportContent.includes('Bearer'), true)
+  check('vercel.json содержит X-Frame-Options', vercelContent.includes('X-Frame-Options'), true)
+  check('vercel.json содержит X-Content-Type-Options', vercelContent.includes('X-Content-Type-Options'), true)
+  check('vercel.json содержит Referrer-Policy', vercelContent.includes('Referrer-Policy'), true)
+  check('input validation VALID_GRADES в bot.ts', botContent.includes('VALID_GRADES'), true)
+  check('sanitizeStr в bot.ts', botContent.includes('sanitizeStr'), true)
+  check('amount > 10_000_000 блокируется', botContent.includes('10_000_000'), true)
+  check('АВТОЗАПУСК в CLAUDE.md', claudeContent.includes('АВТОЗАПУСК'), true)
+  check('sprint_queue в CLAUDE.md', claudeContent.includes('sprint_queue'), true)
 }
 
 console.log(`\n${'='.repeat(40)}`)

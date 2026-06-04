@@ -730,6 +730,26 @@ export async function executeAction(action: BotAction): Promise<void> {
   }
   if (snapLabel[action.type]) await snap(snapLabel[action.type])
 
+  // Input validation — защита от некорректных данных
+  const VALID_GRADES = ['g3','g4','g56','g78','g9','g10']
+  const VALID_CATEGORIES = ['Еда и кафе','Транспорт','Здоровье','Развлечения','Одежда','Инвестиции','Обучение и ИИ','Прочее']
+  const VALID_SETTINGS = ['salary_net','salary_gross','ytd_gross','threshold','moment_share','margin_share','var_budget']
+  function sanitizeStr(s: string | undefined, maxLen = 500): string | undefined {
+    return s ? s.replace(/[<>'"]/g, '').substring(0, maxLen) : s
+  }
+  if (action.amount != null && (isNaN(action.amount) || action.amount < 0 || action.amount > 10_000_000)) return
+  if (action.type === 'add_expense') {
+    action.description = sanitizeStr(action.description)
+    if (action.category && !VALID_CATEGORIES.includes(action.category)) action.category = 'Прочее'
+  }
+  if (action.type === 'add_client' && action.grade && !VALID_GRADES.includes(action.grade)) return
+  if (action.type === 'update_settings') {
+    if (action.field && !VALID_SETTINGS.includes(action.field) && action.field !== 'nominal') return
+    if (action.value != null && (isNaN(Number(action.value)) || !isFinite(Number(action.value)))) return
+  }
+  action.name = sanitizeStr(action.name) as string | undefined
+  action.description = sanitizeStr(action.description)
+
   if (action.type === 'add_expense' && action.amount) {
     await s.from('expenses').insert({user_id:USER_ID,month_key:monthKey,expense_date:new Date().toISOString().split('T')[0],category:action.category??'Прочее',amount:Math.round(action.amount),description:action.description??null,source_type:'debit'})
     const { data:u } = await s.from('users').select('debit_balance').eq('id',USER_ID).single()
