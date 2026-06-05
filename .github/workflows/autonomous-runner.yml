@@ -79,6 +79,22 @@ with open('/tmp/task_prompt.txt','w') as f: f.write(d[0]['prompt'])
           echo "Task: $(cat /tmp/task_title.txt)"
           claude --dangerously-skip-permissions --max-turns 80 < /tmp/task_prompt.txt
 
+      - name: Merge Claude branch to main
+        if: steps.queue.outputs.count != '0'
+        run: |
+          CURRENT_BRANCH=$(git branch --show-current)
+          echo "Current branch after Claude Code: $CURRENT_BRANCH"
+          if [ "$CURRENT_BRANCH" != "main" ]; then
+            git checkout main
+            git pull origin main
+            git merge "$CURRENT_BRANCH" --no-ff -m "Auto-merge sprint from $CURRENT_BRANCH to main"
+            git push origin main
+            echo "Merged $CURRENT_BRANCH to main"
+          else
+            git push origin main || true
+            echo "Already on main, pushed"
+          fi
+
       - name: Mark done
         if: steps.queue.outputs.count != '0' && success()
         env:
