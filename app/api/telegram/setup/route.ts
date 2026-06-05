@@ -57,9 +57,8 @@ export async function GET(req: Request) {
         .from('users').select('telegram_chat_id').eq('id', USER_ID).single()
       if (user?.telegram_chat_id) {
         const changelog = getLatestChangelog()
-        const body = changelog
-          ? `🔄 *Система обновлена*\n\n✅ *Что нового:*\n${changelog}\n\n_Webhook зарегистрирован. Готов к работе._`
-          : `🔄 *Система обновлена*\n\n_Webhook зарегистрирован. Готов к работе._`
+        const fallback = `[Sprint 10]\n• Календарь ближайших 7 дней в контексте\n• Все траты месяца видны боту\n• Инструменты: list_backlog, add_idea\n• Тестовый endpoint /api/bot/test\n• Node.js 24 в GitHub Actions runner`
+        const body = `🔄 *Система обновлена*\n\n✅ *Что нового:*\n${changelog || fallback}\n\n_Webhook зарегистрирован. Готов к работе._`
         await sendTelegram(user.telegram_chat_id, body)
       }
     } catch (e) {

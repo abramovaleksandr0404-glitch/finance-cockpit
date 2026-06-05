@@ -283,7 +283,43 @@ export async function getContext(): Promise<string> {
   const correctionLines = (corrections ?? []).map(c => `  • [${c.category ?? 'general'}] ${c.correction}`).join('\n')
   console.log('[getContext] corrections loaded:', corrections?.length ?? 0)
 
-  return `${anchorSection}
+  // Ближайшие 7 дней — платежи
+  const upcomingLoans = (loans ?? []).filter(l => {
+    const dueDay = l.due_day === 'last' ? lastWorkingDayOfMonth(now.getFullYear(), curMonth) : Number(l.due_day)
+    const diff = dueDay - today
+    return diff >= 0 && diff <= 7 && l.paid_month !== monthKey
+  }).map(l => `  • ${l.name}: ${rub(Number(l.min_payment))} (${l.due_day} числа)`)
+
+  const upcomingFixed = fixedCosts.filter((f, i) => {
+    const fday = (f as {day?:number}).day
+    if (!fday) return false
+    const diff = fday - today
+    return diff >= 0 && diff <= 7 && !fixedPaid[String(i)]
+  }).map(f => `  • ${(f as {name:string}).name}: ${rub((f as {amount:number}).amount)}`)
+
+  const calendarLines = [...upcomingLoans, ...upcomingFixed]
+  const calendarSection = `\n📅 БЛИЖАЙШИЕ 7 ДНЕЙ:\n${calendarLines.length ? calendarLines.join('\n') : '  Платежей нет'}\n`
+
+  // Все траты месяца — по категориям + последние 7 дней
+  const expensesByCategory: Record<string, number> = {}
+  for (const e of expenses ?? []) {
+    const cat = e.category ?? 'Прочее'
+    expensesByCategory[cat] = (expensesByCategory[cat] ?? 0) + Number(e.amount)
+  }
+  const catLines = Object.entries(expensesByCategory)
+    .sort(([,a],[,b]) => b - a)
+    .map(([cat, sum]) => `  • ${cat}: ${rub(sum)}`)
+    .join('\n')
+  const sevenDaysAgo = new Date(now); sevenDaysAgo.setDate(today - 7)
+  const sevenDaysAgoISO = sevenDaysAgo.toISOString().split('T')[0]
+  const recentExp7 = (expenses ?? [])
+    .filter(e => e.expense_date >= sevenDaysAgoISO)
+    .sort((a, b) => b.expense_date.localeCompare(a.expense_date))
+    .slice(0, 15)
+  const recentExp7Lines = recentExp7.map(e => `  • ${e.expense_date}: ${e.description ?? e.category} — ${rub(Number(e.amount))}`).join('\n')
+  const allExpensesSection = `\n📊 ПЕРЕМЕННЫЕ ТРАТЫ ${monthKey} (все ${expenses?.length ?? 0} шт = ${rub(varSpent)}):\n${catLines || '  (нет трат)'}\n\n  Последние 7 дней:\n${recentExp7Lines || '  (нет трат)'}\n`
+
+  return `${anchorSection}${calendarSection}
 === ФИНАНСОВЫЙ КОНТЕКСТ ===
 ДАТА: ${now.toLocaleDateString('ru-RU',{weekday:'long',day:'numeric',month:'long',year:'numeric'})}
 МЕСЯЦ: ${monthKey} (день ${today} из ${daysInMonth}, осталось ${daysLeft} дней)
@@ -344,7 +380,8 @@ ${fixedLines}
 === РЕГУЛЯРНЫЕ ДОХОДЫ ===
 ${recurringLines}
 
-=== ПОСЛЕДНИЕ ПЕРЕМЕННЫЕ ТРАТЫ ===
+=== ПЕРЕМЕННЫЕ ТРАТЫ — ДЕТАЛЬНО ===${allExpensesSection}
+=== ПОСЛЕДНИЕ 5 ТРАТ ===
 ${recentLines}
 
 === ДОХОДНЫЕ СОБЫТИЯ ИЮНЯ (отпускные, премии и т.п.) ===
@@ -710,6 +747,11 @@ learn_mapping с правильной категорией.
 Когда пользователь говорит "нет такого инструмента", "добавь в бэклог", "надо реализовать X":
 1. Вызови add_backlog_item (ОБЯЗАТЕЛЬНО, без него запись не происходит)
 2. Подтверди: "✅ Записал в бэклог: [title]"
+
+ИДЕИ ПОЛЬЗОВАТЕЛЯ:
+Когда пользователь говорит "хочу добавить X", "было бы круто если", "в следующем спринте сделай", "идея: ...", "предложение: ..." → вызови add_idea.
+add_idea ≠ add_backlog_item: идея — сырое пожелание, backlog — конкретная задача с известным решением.
+После записи идеи: "💡 Идея записана. Клод рассмотрит на следующей сессии."
 
 СТАВКИ:
 На вопросы 'сколько я зарабатываю в день/час', 'сколько стоит мой рабочий день' → отвечай дневной и часовой ставкой из контекста (раздел НАСТРОЙКИ).`
@@ -1194,6 +1236,16 @@ export async function executeAction(action: BotAction): Promise<void> {
     })
   }
 
+  if (action.type === 'add_idea' && action.description) {
+    await s.from('bot_ideas').insert({
+      user_id: USER_ID,
+      idea: action.description,
+      context: action.name ?? null,
+      category: action.category ?? 'feature',
+      priority: action.priority ?? 2,
+    }).select()
+  }
+
   if (action.type === 'add_multiday_expense' && action.amount) {
     await s.from('expenses').insert({
       user_id: USER_ID, month_key: mk(),
@@ -1366,6 +1418,19 @@ export const TOOLS = [
   { name: 'compare_months',
     description: 'Сравнить траты текущего и прошлого месяца по категориям. Вызывай на: "как я трачу по сравнению с прошлым месяцем", "стал ли я тратить больше/меньше", "сравни месяцы".',
     input_schema: { type: 'object', properties: {} } },
+  { name: 'list_backlog',
+    description: 'Показать задачи бэклога разработки. Вызывай при: "что в бэклоге", "какие задачи накопились", "что планируется", "бэклог".',
+    input_schema: { type: 'object', properties: { status: { type: 'string', enum: ['pending', 'done', 'all'], description: 'По умолчанию pending' } } } },
+  { name: 'add_idea',
+    description: 'Записать идею или пожелание в пайплайн разработки. Вызывай когда пользователь говорит: "хочу добавить X", "было бы круто если", "в следующем спринте сделай", "идея: ...", "предложение: ...". Отличие от add_backlog_item: идея — сырое пожелание, backlog — конкретная задача.',
+    input_schema: { type: 'object',
+      properties: {
+        description: { type: 'string', description: 'Текст идеи' },
+        name: { type: 'string', description: 'Краткое объяснение от бота почему важно (1 предложение)' },
+        category: { type: 'string', enum: ['feature', 'bug', 'optimization', 'sprint'] },
+        priority: { type: 'number', description: '1=критично, 2=нормально, 3=когда-нибудь' },
+      },
+      required: ['description'] } },
   { name: 'update_anchor',
     description: 'Обновить якорное значение когда пользователь подтверждает новую верную цифру. Вызывай когда пользователь говорит: "аванс теперь X", "запомни что в июле Y дней", "исправь: ЗП = Z".',
     input_schema: { type: 'object',
@@ -1475,6 +1540,13 @@ async function handleTool(name: string, input: Record<string,unknown>): Promise<
       (rows ?? []).reduce((acc, e) => ({ ...acc, [e.category]: (acc[e.category] ?? 0) + e.amount }), {} as Record<string, number>)
     return JSON.stringify({ current: { monthKey: curMK, byCategory: group(cur) }, previous: { monthKey: prevMK, byCategory: group(prev) } })
   }
+  if (name === 'list_backlog') {
+    const status = String(input.status ?? 'pending')
+    let q = db().from('bot_backlog').select('title,description,priority,status,created_at').eq('user_id', USER_ID).order('priority', { ascending: true }).limit(20)
+    if (status !== 'all') q = q.eq('status', status)
+    const { data: items } = await q
+    return JSON.stringify(items ?? [])
+  }
   // DB-writing tools
   await executeAction({ type: name, ...input } as BotAction)
   return 'Выполнено успешно.'
@@ -1493,7 +1565,7 @@ async function runToolLoop(modelId: string, systemBlocks: unknown[], initialMess
         if (block.type === 'tool_use' && block.name) {
           try {
             const result = await handleTool(block.name, (block.input ?? {}) as Record<string,unknown>)
-            const readOnlyTools = ['scenario_analysis','suggest_early_repayment','show_balance_history','analyze_credit_burden','calculate_optimal_repayment','compare_months']
+            const readOnlyTools = ['scenario_analysis','suggest_early_repayment','show_balance_history','analyze_credit_burden','calculate_optimal_repayment','compare_months','list_backlog']
             if (!readOnlyTools.includes(block.name)) {
               actionsRun.push(block.name)
             }

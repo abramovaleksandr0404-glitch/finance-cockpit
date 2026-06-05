@@ -404,6 +404,29 @@ console.log('\n=== ЯКОРЯ: SPRINT 9 ===')
   check('ANCHOR MISMATCH лог', bot.includes('ANCHOR MISMATCH'), true)
 }
 
+console.log('\n=== КОНТЕКСТ + ИНСТРУМЕНТЫ: SPRINT 10 ===')
+{
+  const bot = readFileSync(join(process.cwd(), 'lib/bot.ts'), 'utf-8')
+  // Задача 1: Node.js 24
+  const runner = readFileSync(join(process.cwd(), '.github/workflows/autonomous-runner.yml'), 'utf-8')
+  check('Node.js 24 в runner', runner.includes("node-version: '24'"), true)
+  // Задача 2: Календарь
+  check('calendarSection в getContext', bot.includes('calendarSection'), true)
+  check('upcomingLoans в getContext', bot.includes('upcomingLoans'), true)
+  // Задача 3: Все траты
+  check('allExpensesSection в getContext', bot.includes('allExpensesSection'), true)
+  check('expensesByCategory в getContext', bot.includes('expensesByCategory'), true)
+  // Задача 4: Test endpoint
+  check('/api/bot/test существует', existsSync(join(process.cwd(), 'app/api/bot/test/route.ts')), true)
+  // Задача 5: list_backlog
+  check('list_backlog в TOOLS', TOOLS.some(t => t.name === 'list_backlog'), true)
+  check('list_backlog в handleTool', bot.includes("name === 'list_backlog'"), true)
+  // Задача 7: add_idea
+  check('add_idea в TOOLS', TOOLS.some(t => t.name === 'add_idea'), true)
+  check('add_idea в executeAction', bot.includes("action.type === 'add_idea'"), true)
+  check('ИДЕИ ПОЛЬЗОВАТЕЛЯ в промпте', SYSTEM_PROMPT.includes('ИДЕИ ПОЛЬЗОВАТЕЛЯ'), true)
+}
+
 console.log(`\n${'='.repeat(40)}`)
 console.log(`ИТОГО: ${passed} прошло, ${failed} провалено`)
 console.log('='.repeat(40))
