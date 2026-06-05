@@ -40,6 +40,36 @@ export async function storeChatId(chatId: number) {
   await db().from('users').update({ telegram_chat_id: chatId }).eq('id', USER_ID)
 }
 
+async function updateAnchors(s: SupabaseClient): Promise<void> {
+  const now = new Date()
+  const year = now.getFullYear()
+  const month = now.getMonth() + 1
+  const monthK = `${year}-${String(month).padStart(2, '0')}`
+  const [{ data: u }, { data: loans }, { data: holidays }] = await Promise.all([
+    s.from('users').select('salary_net,fixed_costs').eq('id', USER_ID).single(),
+    s.from('loans').select('min_payment,principal').eq('user_id', USER_ID),
+    s.from('ru_holidays').select('holiday_date')
+      .gte('holiday_date', `${year}-${String(month).padStart(2, '0')}-01`)
+      .lte('holiday_date', `${year}-${String(month).padStart(2, '0')}-31`),
+  ])
+  const wd = computeWorkingDays(year, month, (holidays ?? []).map((h: { holiday_date: string }) => String(h.holiday_date).slice(0, 10)))
+  const dailyRate = Math.round(Number(u?.salary_net ?? 0) / wd)
+  const totalLoans = (loans ?? []).reduce((acc, l) => acc + Number(l.min_payment), 0)
+  const totalFixed = (u?.fixed_costs as Array<{ amount: number }> ?? []).reduce((acc, f) => acc + f.amount, 0)
+  const anchorRows = [
+    { key: 'working_days', value: String(wd), formula: 'рабочих дней с праздниками' },
+    { key: 'daily_rate', value: String(dailyRate), formula: `${u?.salary_net}/${wd}` },
+    { key: 'monthly_loan_payment', value: String(Math.round(totalLoans)), formula: 'сумма min_payment' },
+    { key: 'fixed_total', value: String(totalFixed), formula: 'сумма fixed_costs' },
+  ]
+  for (const a of anchorRows) {
+    await s.from('bot_anchors').upsert(
+      { user_id: USER_ID, month_key: monthK, ...a, updated_at: new Date().toISOString() },
+      { onConflict: 'user_id,month_key,key' }
+    )
+  }
+}
+
 async function snap(label: string) {
   const s = db()
   const [us,mo,lo,ca,go,ex,ie] = await Promise.all([
@@ -635,14 +665,26 @@ Netflix, Spotify, Apple Music → постоянная "Подписки"
 Категории трат: Еда и кафе, Транспорт, Здоровье, Развлечения, Одежда, Инвестиции, Обучение и ИИ, Прочее
 
 ОТВЕТ НА "ПОЛНЫЙ БЮДЖЕТ" — ОБЯЗАТЕЛЬНАЯ СТРУКТУРА:
-Когда спрашивают полный бюджет/все цифры — ВСЕГДА включай ВСЕ разделы:
-1. 💰 Ликвидность (дебет Сбер + Т-Банк)
-2. 💳 Кредитные карты (лимиты и долги) — НЕ ЗАБЫВАЙ
-3. 📥 Входы с точными датами (стипендия 11-го, аванс, зп+бонус)
-4. 📤 Выходы (кредиты, постоянные, переменные)
-5. 🎯 Плановые покупки месяца — НЕ ЗАБЫВАЙ (из раздела ПЛАНОВЫЕ ПОКУПКИ)
-6. 🏁 Прогноз остатка + остаток ПОСЛЕ плановых покупок
-7. Формула расчёта одной строкой
+На запросы 'полный бюджет', 'бюджет месяца', 'что с деньгами' — ЭТАЛОННЫЙ ФОРМАТ:
+
+💰 ЛИКВИДНОСТЬ СЕЙЧАС
+• Сбер дебет: {debit_balance}₽
+• Т-Банк: {tbank_debit}₽
+• Итого: {total}₽
+
+📥 ВХОДЫ (ещё не получены):
+• [источник, дата]: [сумма]₽
+• Итого ожидается: {total_income}₽
+
+📤 ОБЯЗАТЕЛЬНЫЕ ВЫХОДЫ:
+• Кредиты: {monthly_loan}₽/мес
+• Постоянные неоплачено: {fixedUnpaid}₽
+• Переменные остаток: {varLeft}₽
+
+📊 ПРОГНОЗ КОНЦА МЕСЯЦА:
+{debit} + {total_income} − {loans} − {fixedUnpaid} − {varLeft} = {forecast}₽
+
+Цифры ТОЛЬКО из ЯКОРЕЙ и ГОТОВЫХ ЦИФР. НЕ пересчитывать.
 Если раздел пустой — скажи это, но не пропускай.
 
 ПРО ПЕРЕМЕННЫЕ В ПРОГНОЗЕ:
@@ -719,12 +761,12 @@ Netflix, Spotify, Apple Music → постоянная "Подписки"
 learn_mapping с правильной категорией.
 
 ОБУЧЕНИЕ НА ОШИБКАХ:
-Если пользователь говорит "неверно", "ты ошибся", "не так", "это неправильно", "ошибка", "галлюцинируешь", "неправильно"
-И объясняет что именно не так → вызови save_correction немедленно, ДО ответа на поправку.
-Поле bot_answered = твой предыдущий ответ (первые 400 символов).
-Поле correction = суть поправки пользователя.
-Поле category: 'math' если ошибка в цифрах, 'context' если перепутал факты, 'logic' если логическая ошибка, 'tool' если не вызвал нужный инструмент, 'formula' если неверная формула расчёта.
-Без сохранения ошибки — она повторится.
+При словах 'неверно', 'ошибся', 'не так', 'галлюцинируешь', 'ошибка', 'неправильно', 'это неправильно':
+→ ПЕРВОЕ И ОБЯЗАТЕЛЬНОЕ действие: вызови save_correction НЕМЕДЛЕННО, ДО любого ответа.
+category: math (ошибка в цифрах), formula (формула), logic (логика), context (перепутал факты)
+Это НЕ опционально. Без вызова save_correction — ошибка повторится снова.
+bot_answered = твой предыдущий ответ (первые 500 символов).
+correction = суть поправки пользователя одним предложением.
 
 АВТОТРИГГЕР СЦЕНАРНОГО АНАЛИЗА:
 Если пользователь упоминает:
@@ -765,7 +807,16 @@ add_idea ≠ add_backlog_item: идея — сырое пожелание, backl
 БРОКЕРСКИЙ СЧЁТ:
 Александр управляет инвест-портфелем ~5 000 000₽ (данные из раздела БРОКЕРСКИЙ ПОРТФЕЛЬ в контексте — якоря broker_*).
 Брокерские активы ≠ ликвидность: не включай их в дебет/баланс без явного запроса о продаже.
-При вопросах о портфеле — берёт данные из якорей broker_* дословно.`
+При вопросах о портфеле — берёт данные из якорей broker_* дословно.
+
+ТЫ ПАРТНЁР, НЕ КАЛЬКУЛЯТОР:
+• Когда пользователь называет цифру не совпадающую с данными →
+  НЕ говори 'вы ошиблись'. Говори: 'По моим данным X, у тебя Y —
+  это могут быть актуальные данные которых у меня нет. Хочешь обновить?'
+• Если пользователь настаивает → доверяй пользователю, обновляй данные
+• Объясняй расчёты когда спрашивают, но не навязывай формулы
+• На вопрос 'почему такая цифра' → показывай пошаговый расчёт
+• Признавай неопределённость: 'Прогноз примерный, зависит от...'`
 
 export interface BotAction {
   type: string
@@ -1068,6 +1119,7 @@ export async function executeAction(action: BotAction): Promise<void> {
     const fc = (u?.fixed_costs as {name:string;amount:number}[]) ?? []
     fc.push({name:action.name, amount:Math.round(action.amount)})
     await s.from('users').update({fixed_costs:fc}).eq('id',USER_ID)
+    await updateAnchors(s)
   }
 
   if (action.type === 'remove_fixed_cost' && action.name) {
@@ -1075,6 +1127,7 @@ export async function executeAction(action: BotAction): Promise<void> {
     const fc = (u?.fixed_costs as {name:string;amount:number}[]) ?? []
     const filtered = fc.filter(f => !f.name.toLowerCase().includes((action.name??'').toLowerCase()))
     await s.from('users').update({fixed_costs:filtered}).eq('id',USER_ID)
+    await updateAnchors(s)
   }
 
   if (action.type === 'edit_fixed_cost' && action.name) {
@@ -1085,6 +1138,7 @@ export async function executeAction(action: BotAction): Promise<void> {
       if (action.new_name) fc[idx].name = action.new_name
       if (action.amount) fc[idx].amount = Math.round(action.amount)
       await s.from('users').update({fixed_costs:fc}).eq('id',USER_ID)
+      await updateAnchors(s)
     }
   }
 
@@ -1096,7 +1150,10 @@ export async function executeAction(action: BotAction): Promise<void> {
       if (action.rate != null) upd.rate = action.rate
       if (action.min_payment != null) upd.min_payment = Math.round(action.min_payment)
       if (action.end_date) upd.end_date = action.end_date
-      if (Object.keys(upd).length) await s.from('loans').update(upd).eq('id', loan.id)
+      if (Object.keys(upd).length) {
+        await s.from('loans').update(upd).eq('id', loan.id)
+        await updateAnchors(s)
+      }
     }
   }
 
@@ -1194,7 +1251,7 @@ export async function executeAction(action: BotAction): Promise<void> {
   }
 
   if (action.type === 'save_correction' && action.correction) {
-    // Читаем последние сообщения из истории чата для контекста
+    console.log('[save_correction] called:', action.correction?.slice(0, 50))
     const { data: recentMsgs } = await s.from('bot_messages').select('role,content,created_at').eq('user_id', USER_ID).order('created_at', {ascending: false}).limit(4)
     const msgs = (recentMsgs ?? []).reverse()
     const lastUser = msgs.filter(m => m.role === 'user').pop()

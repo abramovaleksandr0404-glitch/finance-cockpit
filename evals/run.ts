@@ -450,6 +450,27 @@ console.log('\n=== КЛАВИАТУРА + БРОКЕР: SPRINT 11 ===')
   check('daysLeft вычисляется', bot.includes('daysLeft'), true)
 }
 
+console.log('\n=== НАДЁЖНОСТЬ + ПАРТНЁР: SPRINT 13 ===')
+{
+  const bot = readFileSync(join(process.cwd(), 'lib/bot.ts'), 'utf-8')
+  // Задача 1: save_correction
+  check('save_correction логирование', bot.includes("[save_correction] called:"), true)
+  check('save_correction ПЕРВОЕ действие в промпте', SYSTEM_PROMPT.includes('ПЕРВОЕ И ОБЯЗАТЕЛЬНОЕ'), true)
+  check('save_correction НЕ опционально в промпте', SYSTEM_PROMPT.includes('НЕ опционально'), true)
+  // Задача 2: updateAnchors
+  check('updateAnchors функция', bot.includes('async function updateAnchors'), true)
+  check('updateAnchors вызов в update_loan', bot.includes("await updateAnchors(s)"), true)
+  check('updateAnchors monthly_loan_payment якорь', bot.includes("'monthly_loan_payment'"), true)
+  check('updateAnchors fixed_total якорь', bot.includes("'fixed_total'"), true)
+  // Задача 4: партнёрский режим
+  check('ТЫ ПАРТНЁР в промпте', SYSTEM_PROMPT.includes('ТЫ ПАРТНЁР'), true)
+  check('доверяй пользователю в промпте', SYSTEM_PROMPT.includes('доверяй пользователю'), true)
+  // Задача 5: шаблон бюджета
+  check('ЛИКВИДНОСТЬ СЕЙЧАС в промпте', SYSTEM_PROMPT.includes('ЛИКВИДНОСТЬ СЕЙЧАС'), true)
+  check('ПРОГНОЗ КОНЦА МЕСЯЦА в промпте', SYSTEM_PROMPT.includes('ПРОГНОЗ КОНЦА МЕСЯЦА'), true)
+  check('Цифры ТОЛЬКО из ЯКОРЕЙ в промпте', SYSTEM_PROMPT.includes('Цифры ТОЛЬКО из ЯКОРЕЙ'), true)
+}
+
 console.log(`\n${'='.repeat(40)}`)
 console.log(`ИТОГО: ${passed} прошло, ${failed} провалено`)
 console.log('='.repeat(40))
