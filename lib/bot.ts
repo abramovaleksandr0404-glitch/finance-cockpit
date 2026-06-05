@@ -127,6 +127,12 @@ export async function getContext(): Promise<string> {
   }
   const anchorSection = buildAnchorSection()
 
+  // Брокерский портфель из якорей (broker_* ключи глобальные)
+  const brokerAnchorRows = Object.values(anchorMap['global'] ?? {}).filter(a => a.key.startsWith('broker_'))
+  const brokerSection = brokerAnchorRows.length
+    ? `\n📈 БРОКЕРСКИЙ ПОРТФЕЛЬ:\n${brokerAnchorRows.map(a => `  ${a.key}: ${a.value}${a.formula ? ` (${a.formula})` : ''}`).join('\n')}\n`
+    : ''
+
   const debitSber = Number(user.debit_balance ?? 0)
   const debitTbank = Number(user.tbank_debit ?? 0)
   const liquid = debitSber + debitTbank
@@ -319,7 +325,7 @@ export async function getContext(): Promise<string> {
   const recentExp7Lines = recentExp7.map(e => `  • ${e.expense_date}: ${e.description ?? e.category} — ${rub(Number(e.amount))}`).join('\n')
   const allExpensesSection = `\n📊 ПЕРЕМЕННЫЕ ТРАТЫ ${monthKey} (все ${expenses?.length ?? 0} шт = ${rub(varSpent)}):\n${catLines || '  (нет трат)'}\n\n  Последние 7 дней:\n${recentExp7Lines || '  (нет трат)'}\n`
 
-  return `${anchorSection}${calendarSection}
+  return `${anchorSection}${brokerSection}${calendarSection}
 === ФИНАНСОВЫЙ КОНТЕКСТ ===
 ДАТА: ${now.toLocaleDateString('ru-RU',{weekday:'long',day:'numeric',month:'long',year:'numeric'})}
 МЕСЯЦ: ${monthKey} (день ${today} из ${daysInMonth}, осталось ${daysLeft} дней)
@@ -754,7 +760,12 @@ add_idea ≠ add_backlog_item: идея — сырое пожелание, backl
 После записи идеи: "💡 Идея записана. Клод рассмотрит на следующей сессии."
 
 СТАВКИ:
-На вопросы 'сколько я зарабатываю в день/час', 'сколько стоит мой рабочий день' → отвечай дневной и часовой ставкой из контекста (раздел НАСТРОЙКИ).`
+На вопросы 'сколько я зарабатываю в день/час', 'сколько стоит мой рабочий день' → отвечай дневной и часовой ставкой из контекста (раздел НАСТРОЙКИ).
+
+БРОКЕРСКИЙ СЧЁТ:
+Александр управляет инвест-портфелем ~5 000 000₽ (данные из раздела БРОКЕРСКИЙ ПОРТФЕЛЬ в контексте — якоря broker_*).
+Брокерские активы ≠ ликвидность: не включай их в дебет/баланс без явного запроса о продаже.
+При вопросах о портфеле — берёт данные из якорей broker_* дословно.`
 
 export interface BotAction {
   type: string
@@ -1441,6 +1452,9 @@ export const TOOLS = [
         formula: { type: 'string', description: 'Как посчитано (необязательно)' },
       },
       required: ['month_key', 'key', 'value'] } },
+  { name: 'days_until_advance',
+    description: 'Рассчитать сколько дней осталось до ближайшего аванса (15 числа). Вызывай на: "когда аванс", "сколько дней до аванса", "дней до 15", "когда придут деньги", "успею до аванса".',
+    input_schema: { type: 'object', properties: {} } },
 ]
 
 interface ContentBlock { type:string; text?:string; id?:string; name?:string; input?:Record<string,unknown> }
@@ -1546,6 +1560,36 @@ async function handleTool(name: string, input: Record<string,unknown>): Promise<
     if (status !== 'all') q = q.eq('status', status)
     const { data: items } = await q
     return JSON.stringify(items ?? [])
+  }
+  if (name === 'days_until_advance') {
+    const now = new Date()
+    const today = now.getDate()
+    const y = now.getFullYear()
+    const m = now.getMonth() + 1
+    const advDay = advanceDay(y, m)
+    let daysLeft: number
+    let targetAdvDay: number
+    let targetMonth: string
+    if (today <= advDay) {
+      daysLeft = advDay - today
+      targetAdvDay = advDay
+      targetMonth = `${y}-${String(m).padStart(2, '0')}`
+    } else {
+      const nextM = m === 12 ? 1 : m + 1
+      const nextY = m === 12 ? y + 1 : y
+      const nextAdvDay = advanceDay(nextY, nextM)
+      const daysInMonth = new Date(y, m, 0).getDate()
+      daysLeft = daysInMonth - today + nextAdvDay
+      targetAdvDay = nextAdvDay
+      targetMonth = `${nextY}-${String(nextM).padStart(2, '0')}`
+    }
+    const monthKey2 = mk()
+    const { data: month } = await db().from('months').select('salary_adv_received,salary_adv_amount').eq('user_id', USER_ID).eq('month_key', monthKey2).maybeSingle()
+    const { data: u } = await db().from('users').select('salary_net').eq('id', USER_ID).single()
+    const net = Number(u?.salary_net ?? 121600)
+    const advAmt = Number(month?.salary_adv_amount ?? Math.round(net / 2))
+    const advReceived = !!month?.salary_adv_received
+    return JSON.stringify({ daysLeft, advDay: targetAdvDay, targetMonth, advReceived, advAmt })
   }
   // DB-writing tools
   await executeAction({ type: name, ...input } as BotAction)

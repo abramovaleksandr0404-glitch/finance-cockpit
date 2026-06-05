@@ -427,6 +427,29 @@ console.log('\n=== КОНТЕКСТ + ИНСТРУМЕНТЫ: SPRINT 10 ===')
   check('ИДЕИ ПОЛЬЗОВАТЕЛЯ в промпте', SYSTEM_PROMPT.includes('ИДЕИ ПОЛЬЗОВАТЕЛЯ'), true)
 }
 
+console.log('\n=== КЛАВИАТУРА + БРОКЕР: SPRINT 11 ===')
+{
+  const routeContent = readFileSync(join(process.cwd(), 'app/api/telegram/route.ts'), 'utf-8')
+  const setupContent = readFileSync(join(process.cwd(), 'app/api/telegram/setup/route.ts'), 'utf-8')
+  const bot = readFileSync(join(process.cwd(), 'lib/bot.ts'), 'utf-8')
+  // Задача 1: клавиатура
+  check('QUICK_ACTIONS в route.ts', routeContent.includes('QUICK_ACTIONS'), true)
+  check('💰 Аванс кнопка в route.ts', routeContent.includes('💰 Аванс'), true)
+  check('mappedText в route.ts', routeContent.includes('mappedText'), true)
+  check('persistent keyboard в setup', setupContent.includes('persistent'), true)
+  check('resize_keyboard в setup', setupContent.includes('resize_keyboard'), true)
+  check('keyboard 9 кнопок — 3 ряда в setup', setupContent.includes('💰 Аванс'), true)
+  // Задача 2: брокерский контекст
+  check('brokerSection в getContext', bot.includes('brokerSection'), true)
+  check('broker_ фильтр в getContext', bot.includes("startsWith('broker_')"), true)
+  check('БРОКЕРСКИЙ СЧЁТ в промпте', SYSTEM_PROMPT.includes('БРОКЕРСКИЙ СЧЁТ'), true)
+  check('broker_* в промпте', SYSTEM_PROMPT.includes('broker_*'), true)
+  // Задача 3: days_until_advance
+  check('days_until_advance в TOOLS', TOOLS.some(t => t.name === 'days_until_advance'), true)
+  check('days_until_advance в handleTool', bot.includes("name === 'days_until_advance'"), true)
+  check('daysLeft вычисляется', bot.includes('daysLeft'), true)
+}
+
 console.log(`\n${'='.repeat(40)}`)
 console.log(`ИТОГО: ${passed} прошло, ${failed} провалено`)
 console.log('='.repeat(40))

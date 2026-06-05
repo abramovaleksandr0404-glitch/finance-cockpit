@@ -57,9 +57,28 @@ export async function GET(req: Request) {
         .from('users').select('telegram_chat_id').eq('id', USER_ID).single()
       if (user?.telegram_chat_id) {
         const changelog = getLatestChangelog()
-        const fallback = `[Sprint 10]\n• Календарь ближайших 7 дней в контексте\n• Все траты месяца видны боту\n• Инструменты: list_backlog, add_idea\n• Тестовый endpoint /api/bot/test\n• Node.js 24 в GitHub Actions runner`
+        const fallback = `[Sprint 11]\n• Быстрая клавиатура: 9 кнопок с горячими вопросами\n• Брокерский контекст из якорей broker_*\n• Инструмент days_until_advance\n• Маппинг кнопок в полные запросы`
         const body = `🔄 *Система обновлена*\n\n✅ *Что нового:*\n${changelog || fallback}\n\n_Webhook зарегистрирован. Готов к работе._`
         await sendTelegram(user.telegram_chat_id, body)
+
+        // Отправить постоянную клавиатуру с быстрыми действиями
+        await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: user.telegram_chat_id,
+            text: '⚡ Быстрые действия активированы',
+            reply_markup: {
+              keyboard: [
+                [{ text: '💰 Аванс' }, { text: '💵 Зарплата' }, { text: '🎯 Бонус' }],
+                [{ text: '📊 Бюджет месяца' }, { text: '💳 Кредиты' }, { text: '📉 Вредные' }],
+                [{ text: '💸 До аванса' }, { text: '⚡ Баланс' }, { text: '📋 Бэклог' }],
+              ],
+              resize_keyboard: true,
+              persistent: true,
+            },
+          }),
+        })
       }
     } catch (e) {
       console.error('[setup] notify failed', e)
