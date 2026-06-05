@@ -493,6 +493,25 @@ console.log('\n=== UX + ВРЕДНЫЕ + ИСТОРИЯ: SPRINT 14 ===')
   check('Уверенность % в промпте', SYSTEM_PROMPT.includes('Уверенность: X%'), true)
 }
 
+console.log('\n=== AI-КАТ + DARK MODE + СКРИНШОТ: SPRINT 15 ===')
+{
+  const bot = readFileSync(join(process.cwd(), 'lib/bot.ts'), 'utf-8')
+  const css = readFileSync(join(process.cwd(), 'app/globals.css'), 'utf-8')
+  // Задача 1: AI-категоризация
+  check('AI-КАТЕГОРИЗАЦИЯ в промпте', SYSTEM_PROMPT.includes('AI-КАТЕГОРИЗАЦИЯ'), true)
+  check('bot_learnings fallback в executeAction', bot.includes("bot_learnings"), true)
+  check('keyword guesses для Еда и кафе', bot.includes("'Еда и кафе'"), true)
+  check('keyword guesses для Транспорт', bot.includes("'Транспорт'"), true)
+  // Задача 2: dark mode
+  check('[data-theme="light"] в CSS', css.includes('[data-theme="light"]'), true)
+  check('ThemeToggle создан', existsSync(join(process.cwd(), 'components/dashboard/ThemeToggle.tsx')), true)
+  check('ThemeToggle в DashboardClient', readFileSync(join(process.cwd(), 'components/dashboard/DashboardClient.tsx'), 'utf-8').includes('ThemeToggle'), true)
+  // Задача 3: скриншот
+  check('MonthSummary создан', existsSync(join(process.cwd(), 'components/dashboard/MonthSummary.tsx')), true)
+  check('/dashboard/summary страница', existsSync(join(process.cwd(), 'app/dashboard/summary/page.tsx')), true)
+  check('html2canvas в package.json', existsSync(join(process.cwd(), 'node_modules/html2canvas')), true)
+}
+
 console.log(`\n${'='.repeat(40)}`)
 console.log(`ИТОГО: ${passed} прошло, ${failed} провалено`)
 console.log('='.repeat(40))

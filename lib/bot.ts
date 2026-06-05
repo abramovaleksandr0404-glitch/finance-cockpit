@@ -664,6 +664,17 @@ Netflix, Spotify, Apple Music → постоянная "Подписки"
 
 Категории трат: Еда и кафе, Транспорт, Здоровье, Развлечения, Одежда, Инвестиции, Обучение и ИИ, Прочее
 
+AI-КАТЕГОРИЗАЦИЯ ТРАТ:
+При добавлении траты без явной категории — используй словарь ключевых слов:
+• Еда и кафе: кафе, ресторан, суши, пицца, бургер, кофе, завтрак, обед, ужин, продукты
+• Транспорт: такси, метро, автобус, uber, каршеринг, электричка
+• Развлечения: кино, театр, концерт, клуб, билет, игры
+• Здоровье: аптека, лекарства, врач, клиника, витамины
+• Одежда: одежда, куртка, кроссовки, футболка, штаны
+Если слово из словаря в описании → применяй без вопроса (высокая уверенность).
+Если похожее слово → уточни: "Отнести к [категория]?"
+Если не нашёл → 'Прочее' + вызови learn_mapping для записи.
+
 ОТВЕТ НА "ПОЛНЫЙ БЮДЖЕТ" — ОБЯЗАТЕЛЬНАЯ СТРУКТУРА:
 На запросы 'полный бюджет', 'бюджет месяца', 'что с деньгами' — ЭТАЛОННЫЙ ФОРМАТ:
 
@@ -921,6 +932,27 @@ export async function executeAction(action: BotAction): Promise<void> {
   if (action.type === 'add_expense') {
     action.description = sanitizeStr(action.description)
     if (action.category && !VALID_CATEGORIES.includes(action.category)) action.category = 'Прочее'
+    // AI-категоризация: fallback если категория не указана или Прочее
+    if ((!action.category || action.category === 'Прочее') && action.description) {
+      const desc = action.description.toLowerCase()
+      // Check bot_learnings first
+      const { data: mapping } = await s.from('bot_learnings').select('category').eq('user_id', USER_ID).limit(50)
+      const matched = (mapping ?? []).find(m => desc.includes(String(m.category ?? '').toLowerCase()) || desc.includes((m as {trigger?:string}).trigger?.toLowerCase() ?? '~~~~'))
+      if (matched?.category && VALID_CATEGORIES.includes(String(matched.category))) {
+        action.category = String(matched.category)
+      } else {
+        const guesses: [string, string[]][] = [
+          ['Еда и кафе', ['кафе','ресторан','еда','суши','пицца','бургер','кофе','чай','завтрак','обед','ужин','продукт','магазин','перекус']],
+          ['Транспорт', ['такси','метро','автобус','uber','каршеринг','электричк','маршрутк']],
+          ['Развлечения', ['кино','театр','концерт','клуб','билет','игр','кино']],
+          ['Здоровье', ['аптек','лекарств','врач','клиник','витамин','медицин']],
+          ['Одежда', ['одежда','штан','рубашк','куртк','обувь','кроссовк','футболк']],
+        ]
+        for (const [cat, kws] of guesses) {
+          if (kws.some(kw => desc.includes(kw))) { action.category = cat; break }
+        }
+      }
+    }
   }
   if (action.type === 'add_client' && action.grade && !VALID_GRADES.includes(action.grade)) return
   if (action.type === 'update_settings') {

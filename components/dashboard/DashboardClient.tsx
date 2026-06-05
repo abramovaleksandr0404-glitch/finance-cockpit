@@ -23,6 +23,7 @@ import FinancialHealthCard from './FinancialHealthCard'
 import ChartsWidget from './ChartsWidget'
 import BalanceHistoryChart from './BalanceHistoryChart'
 import HarmfulExpensesWidget from './HarmfulExpensesWidget'
+import ThemeToggle from './ThemeToggle'
 
 import { undoLastAction } from '@/app/actions'
 import { monthLabel, currentMonthKey } from '@/lib/finance'
@@ -165,6 +166,7 @@ export default function DashboardClient({ data, monthKey, initialTab = 'main' }:
           <div className="flex-1 min-w-0">
             <MonthPill />
           </div>
+          <ThemeToggle />
           <UndoBtn />
         </header>
 
@@ -225,8 +227,9 @@ export default function DashboardClient({ data, monthKey, initialTab = 'main' }:
             ))}
           </nav>
 
-          {/* Undo */}
-          <div className="px-1 mt-4">
+          {/* Theme + Undo */}
+          <div className="px-1 mt-4 flex flex-col gap-2">
+            <ThemeToggle />
             <button onClick={undo} disabled={undoPending}
               className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm w-full"
               style={{ background: 'rgba(245,158,11,0.06)', border: '1px solid rgba(245,158,11,0.2)', color: 'var(--accent-amber)', cursor: undoPending ? 'wait' : 'pointer' }}>
