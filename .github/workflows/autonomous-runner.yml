@@ -3,15 +3,11 @@ on:
   schedule:
     - cron: '0 */4 * * *'
   workflow_dispatch:
-    inputs:
-      force:
-        description: 'Force run even if no pending tasks'
-        default: 'false'
 
 jobs:
   check-and-run:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -19,83 +15,92 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
 
-      - name: Check sprint_queue for pending tasks
-        id: queue
-        run: |
-          RESULT=$(curl -sf \
-            "${{ secrets.SUPABASE_URL }}/rest/v1/sprint_queue?status=eq.pending&order=priority.asc,sprint_number.asc&limit=1&select=id,title,prompt" \
-            -H "apikey: ${{ secrets.SUPABASE_SERVICE_KEY }}" \
-            -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_KEY }}" \
-            -H "Accept: application/json") || { echo "count=0" >> $GITHUB_OUTPUT; exit 0; }
-          COUNT=$(echo "$RESULT" | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d))" 2>/dev/null || echo "0")
-          echo "count=$COUNT" >> $GITHUB_OUTPUT
-          if [ "$COUNT" -gt "0" ]; then
-            ID=$(echo "$RESULT" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0]['id'])")
-            TITLE=$(echo "$RESULT" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0]['title'])")
-            PROMPT=$(echo "$RESULT" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0]['prompt'])")
-            echo "task_id=$ID" >> $GITHUB_OUTPUT
-            echo "task_title=$TITLE" >> $GITHUB_OUTPUT
-            {
-              echo 'task_prompt<<PROMPT_EOF'
-              echo "$PROMPT"
-              echo 'PROMPT_EOF'
-            } >> $GITHUB_OUTPUT
-          fi
-
-      - name: Mark task in_progress
-        if: steps.queue.outputs.count > 0
-        run: |
-          curl -sf -X PATCH \
-            "${{ secrets.SUPABASE_URL }}/rest/v1/sprint_queue?id=eq.${{ steps.queue.outputs.task_id }}" \
-            -H "apikey: ${{ secrets.SUPABASE_SERVICE_KEY }}" \
-            -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_KEY }}" \
-            -H "Content-Type: application/json" \
-            -d '{"status":"in_progress","updated_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}'
-
       - name: Setup Node.js
-        if: steps.queue.outputs.count > 0
         uses: actions/setup-node@v4
         with:
           node-version: '24'
 
-      - name: Install Claude Code CLI
-        if: steps.queue.outputs.count > 0
+      - name: Check sprint_queue and write prompt to file
+        id: queue
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          RESULT=$(curl -sf \
+            "${SUPABASE_URL}/rest/v1/sprint_queue?status=eq.pending&order=priority.asc,sprint_number.asc&limit=1&select=id,title,prompt" \
+            -H "apikey: ${SUPABASE_KEY}" \
+            -H "Authorization: Bearer ${SUPABASE_KEY}" \
+            -H "Accept: application/json" 2>/dev/null) || RESULT="[]"
+          COUNT=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(len(d))" "$RESULT" 2>/dev/null || echo "0")
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          if [ "$COUNT" -gt "0" ]; then
+            python3 -c "
+import json, sys
+d = json.loads(sys.argv[1])
+with open('/tmp/task_id.txt','w') as f: f.write(d[0]['id'])
+with open('/tmp/task_title.txt','w') as f: f.write(d[0]['title'])
+with open('/tmp/task_prompt.txt','w') as f: f.write(d[0]['prompt'])
+" "$RESULT"
+            echo "task_id=$(cat /tmp/task_id.txt)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: No tasks
+        if: steps.queue.outputs.count == '0'
+        run: echo "No pending sprint tasks. System idle."
+
+      - name: Mark in_progress
+        if: steps.queue.outputs.count != '0'
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          curl -sf -X PATCH \
+            "${SUPABASE_URL}/rest/v1/sprint_queue?id=eq.$(cat /tmp/task_id.txt)" \
+            -H "apikey: ${SUPABASE_KEY}" \
+            -H "Authorization: Bearer ${SUPABASE_KEY}" \
+            -H "Content-Type: application/json" \
+            -d '{"status":"in_progress"}'
+
+      - name: Install Claude Code
+        if: steps.queue.outputs.count != '0'
         run: npm install -g @anthropic-ai/claude-code
 
       - name: Configure git
-        if: steps.queue.outputs.count > 0
+        if: steps.queue.outputs.count != '0'
         run: |
-          git config user.name "Claude"
-          git config user.email "noreply@anthropic.com"
+          git config user.name "Claude Runner"
+          git config user.email "runner@anthropic.com"
 
-      - name: Run Claude Code on task
-        if: steps.queue.outputs.count > 0
-        run: |
-          echo "Running task: ${{ steps.queue.outputs.task_title }}"
-          claude --max-turns 80 --no-interactive "${{ steps.queue.outputs.task_prompt }}"
+      - name: Run Claude Code
+        if: steps.queue.outputs.count != '0'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          echo "Task: $(cat /tmp/task_title.txt)"
+          claude --dangerously-skip-permissions --max-turns 80 < /tmp/task_prompt.txt
 
-      - name: Mark task done
-        if: steps.queue.outputs.count > 0 && success()
+      - name: Mark done
+        if: steps.queue.outputs.count != '0' && success()
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: |
           curl -sf -X PATCH \
-            "${{ secrets.SUPABASE_URL }}/rest/v1/sprint_queue?id=eq.${{ steps.queue.outputs.task_id }}" \
-            -H "apikey: ${{ secrets.SUPABASE_SERVICE_KEY }}" \
-            -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_KEY }}" \
+            "${SUPABASE_URL}/rest/v1/sprint_queue?id=eq.$(cat /tmp/task_id.txt)" \
+            -H "apikey: ${SUPABASE_KEY}" \
+            -H "Authorization: Bearer ${SUPABASE_KEY}" \
             -H "Content-Type: application/json" \
-            -d '{"status":"done","updated_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}'
+            -d '{"status":"done"}'
 
-      - name: Mark task failed
-        if: steps.queue.outputs.count > 0 && failure()
+      - name: Mark failed
+        if: steps.queue.outputs.count != '0' && failure()
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: |
           curl -sf -X PATCH \
-            "${{ secrets.SUPABASE_URL }}/rest/v1/sprint_queue?id=eq.${{ steps.queue.outputs.task_id }}" \
-            -H "apikey: ${{ secrets.SUPABASE_SERVICE_KEY }}" \
-            -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_KEY }}" \
+            "${SUPABASE_URL}/rest/v1/sprint_queue?id=eq.$(cat /tmp/task_id.txt)" \
+            -H "apikey: ${SUPABASE_KEY}" \
+            -H "Authorization: Bearer ${SUPABASE_KEY}" \
             -H "Content-Type: application/json" \
-            -d '{"status":"failed","updated_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}'
-
-      - name: No tasks message
-        if: steps.queue.outputs.count == 0
-        run: echo "No pending sprint tasks. System idle."
+            -d '{"status":"failed"}'
