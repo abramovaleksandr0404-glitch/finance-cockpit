@@ -471,6 +471,28 @@ console.log('\n=== НАДЁЖНОСТЬ + ПАРТНЁР: SPRINT 13 ===')
   check('Цифры ТОЛЬКО из ЯКОРЕЙ в промпте', SYSTEM_PROMPT.includes('Цифры ТОЛЬКО из ЯКОРЕЙ'), true)
 }
 
+console.log('\n=== UX + ВРЕДНЫЕ + ИСТОРИЯ: SPRINT 14 ===')
+{
+  const bot = readFileSync(join(process.cwd(), 'lib/bot.ts'), 'utf-8')
+  const dashClient = readFileSync(join(process.cwd(), 'components/dashboard/DashboardClient.tsx'), 'utf-8')
+  const types = readFileSync(join(process.cwd(), 'lib/types.ts'), 'utf-8')
+  const pageTs = readFileSync(join(process.cwd(), 'app/dashboard/page.tsx'), 'utf-8')
+  // Задача 1: add_multiday_expense уже реализован
+  check('add_multiday_expense в TOOLS', TOOLS.some(t => t.name === 'add_multiday_expense'), true)
+  check('add_multiday_expense в executeAction', bot.includes("action.type === 'add_multiday_expense'"), true)
+  // Задача 2: вредные расходы на сайте
+  check('HarmfulExpensesWidget создан', existsSync(join(process.cwd(), 'components/dashboard/HarmfulExpensesWidget.tsx')), true)
+  check('customCategories в DashboardData', types.includes('customCategories'), true)
+  check('custom_categories в page.tsx', pageTs.includes('custom_categories'), true)
+  check('HarmfulExpensesWidget в DashboardClient', dashClient.includes('HarmfulExpensesWidget'), true)
+  // Задача 3: история дебета
+  check('BalanceHistoryChart timeline список', readFileSync(join(process.cwd(), 'components/dashboard/BalanceHistoryChart.tsx'), 'utf-8').includes('timeline'), true)
+  check('BalanceHistoryChart в desktop main', dashClient.includes('BalanceHistoryChart'), true)
+  // Задача 4: уверенность прогноза
+  check('УВЕРЕННОСТЬ ПРОГНОЗА в промпте', SYSTEM_PROMPT.includes('УВЕРЕННОСТЬ ПРОГНОЗА'), true)
+  check('Уверенность % в промпте', SYSTEM_PROMPT.includes('Уверенность: X%'), true)
+}
+
 console.log(`\n${'='.repeat(40)}`)
 console.log(`ИТОГО: ${passed} прошло, ${failed} провалено`)
 console.log('='.repeat(40))

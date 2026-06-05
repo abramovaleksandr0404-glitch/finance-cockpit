@@ -386,6 +386,14 @@ export interface DebitHistoryEntry {
   created_at: string
 }
 
+// ── Custom category ──────────────────────────────────────────────────────────
+export interface CustomCategory {
+  id: string
+  name: string
+  monthly_limit: number | null
+  keywords?: string[] | null
+}
+
 // ── Dashboard bundle ─────────────────────────────────────────────────────────
 export interface DashboardData {
   user: UserProfile
@@ -398,4 +406,5 @@ export interface DashboardData {
   cards: Card[]
   goals: Goal[]
   debitHistory?: DebitHistoryEntry[]
+  customCategories?: CustomCategory[]
 }
