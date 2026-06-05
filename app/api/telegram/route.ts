@@ -82,7 +82,19 @@ export async function POST(req: Request) {
     const text = ((message.text as string) ?? '').trim()
     if (!text) return NextResponse.json({ ok: true })
 
-    const reply = await processMessage(text, chatId)
+    const QUICK_ACTIONS: Record<string, string> = {
+      '💰 Аванс': 'когда и сколько будет аванс, с учётом всех корректировок',
+      '💵 Зарплата': 'когда и сколько будет зарплата в конце месяца',
+      '🎯 Бонус': 'какой бонус ожидается и когда',
+      '📊 Бюджет месяца': 'полный бюджет текущего месяца: входы, расходы, прогноз',
+      '💳 Кредиты': 'все кредиты: остатки, платежи, ближайшие даты, нагрузка в рабочих днях',
+      '📉 Вредные': 'вредные расходы: сколько потрачено, лимит, что входит',
+      '💸 До аванса': 'сколько осталось потратить до аванса 15 числа: дней, бюджет/день, критичные платежи',
+      '⚡ Баланс': 'текущий баланс на всех счетах и прогноз',
+      '📋 Бэклог': 'что в бэклоге разработки',
+    }
+    const mappedText = QUICK_ACTIONS[text] ?? text
+    const reply = await processMessage(mappedText, chatId)
     await sendTelegram(chatId, reply)
 
   } catch (err) {
