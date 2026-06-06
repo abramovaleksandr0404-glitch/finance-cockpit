@@ -1,13 +1,15 @@
 name: Autonomous Sprint Runner
+
 on:
   schedule:
     - cron: '0 */4 * * *'
   workflow_dispatch:
 
 jobs:
-  run-sprint:
+  run-sprints:
     runs-on: self-hosted
-    timeout-minutes: 90
+    timeout-minutes: 360
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -15,91 +17,106 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
 
-      - name: Check queue and write files
-        id: queue
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-        run: |
-          RESULT=$(curl -sf \
-            "${SUPABASE_URL}/rest/v1/sprint_queue?status=eq.pending&order=priority.asc,sprint_number.asc&limit=1&select=id,title,prompt,sprint_number" \
-            -H "apikey: ${SUPABASE_KEY}" \
-            -H "Authorization: Bearer ${SUPABASE_KEY}" 2>/dev/null) || RESULT="[]"
-
-          COUNT=$(echo "$RESULT" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
-          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
-
-          if [ "$COUNT" -gt "0" ]; then
-            echo "$RESULT" | python3 -c "
-import json, sys
-d = json.load(sys.stdin)[0]
-open('/tmp/task_id.txt','w').write(d['id'])
-open('/tmp/task_title.txt','w').write(d['title'])
-open('/tmp/task_prompt.txt','w').write(d['prompt'])
-"
-            echo "task_id=$(cat /tmp/task_id.txt)" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: No tasks
-        if: steps.queue.outputs.count == '0'
-        run: echo "No pending tasks."
-
-      - name: Mark in_progress
-        if: steps.queue.outputs.count != '0'
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-        run: |
-          curl -sf -X PATCH \
-            "${SUPABASE_URL}/rest/v1/sprint_queue?id=eq.$(cat /tmp/task_id.txt)" \
-            -H "apikey: ${SUPABASE_KEY}" \
-            -H "Authorization: Bearer ${SUPABASE_KEY}" \
-            -H "Content-Type: application/json" \
-            -d '{"status":"in_progress"}'
-
       - name: Configure git
-        if: steps.queue.outputs.count != '0'
         run: |
           git config user.name "Claude Runner"
           git config user.email "runner@anthropic.com"
 
-      - name: Run Claude Code
-        if: steps.queue.outputs.count != '0'
+      - name: Run sprint loop
         env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: claude --dangerously-skip-permissions --max-turns 80 < /tmp/task_prompt.txt
-
-      - name: Merge to main
-        if: steps.queue.outputs.count != '0' && success()
         run: |
-          BRANCH=$(git branch --show-current)
-          if [ "$BRANCH" != "main" ]; then
-            git checkout main && git pull origin main
-            git merge "$BRANCH" --no-ff -m "Auto-merge sprint" && git push origin main
-          else
-            git push origin main || true
-          fi
+          set -e
 
-      - name: Mark done + notify
-        if: steps.queue.outputs.count != '0' && success()
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-        run: |
-          curl -sf -X PATCH \
-            "${SUPABASE_URL}/rest/v1/sprint_queue?id=eq.$(cat /tmp/task_id.txt)" \
-            -H "apikey: ${SUPABASE_KEY}" -H "Authorization: Bearer ${SUPABASE_KEY}" \
-            -H "Content-Type: application/json" -d '{"status":"done"}'
-          sleep 30
-          curl -sf "https://finance-cockpit-teal.vercel.app/api/telegram/setup" || true
+          while true; do
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "Checking for pending sprints..."
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-      - name: Mark failed
-        if: steps.queue.outputs.count != '0' && failure()
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-        run: |
-          curl -sf -X PATCH \
-            "${SUPABASE_URL}/rest/v1/sprint_queue?id=eq.$(cat /tmp/task_id.txt)" \
-            -H "apikey: ${SUPABASE_KEY}" -H "Authorization: Bearer ${SUPABASE_KEY}" \
-            -H "Content-Type: application/json" -d '{"status":"failed"}'
+            RESULT=$(curl -sf \
+              "${SUPABASE_URL}/rest/v1/sprint_queue?status=eq.pending&order=priority.asc,sprint_number.asc&limit=1" \
+              -H "apikey: ${SUPABASE_KEY}" \
+              -H "Authorization: Bearer ${SUPABASE_KEY}" 2>/dev/null) || RESULT="[]"
+
+            COUNT=$(echo "$RESULT" | python3 -c "import json,sys; data=json.load(sys.stdin); print(len(data))" 2>/dev/null || echo "0")
+
+            if [ "$COUNT" -eq "0" ]; then
+              echo "✓ No pending sprints. Done."
+              break
+            fi
+
+            TASK_ID=$(echo "$RESULT"     | python3 -c "import json,sys; print(json.load(sys.stdin)[0]['id'])")
+            TASK_TITLE=$(echo "$RESULT"  | python3 -c "import json,sys; print(json.load(sys.stdin)[0]['title'])")
+            TASK_SPRINT=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin)[0]['sprint_number'])")
+
+            echo "→ Sprint #${TASK_SPRINT}: ${TASK_TITLE}"
+            echo "→ Task ID: ${TASK_ID}"
+
+            # Пишем промпт в файл (безопаснее чем через env)
+            echo "$RESULT" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)[0]
+with open('/tmp/task_prompt.txt', 'w') as f:
+    f.write(data['prompt'])
+with open('/tmp/task_id.txt', 'w') as f:
+    f.write(data['id'])
+"
+
+            # Отмечаем in_progress
+            curl -sf -X PATCH \
+              "${SUPABASE_URL}/rest/v1/sprint_queue?id=eq.${TASK_ID}" \
+              -H "apikey: ${SUPABASE_KEY}" \
+              -H "Authorization: Bearer ${SUPABASE_KEY}" \
+              -H "Content-Type: application/json" \
+              -d '{"status":"in_progress"}' > /dev/null
+
+            echo "→ Marked in_progress. Running Claude Code..."
+
+            # Запускаем Claude Code
+            if claude --dangerously-skip-permissions --max-turns 80 < /tmp/task_prompt.txt; then
+              echo "✓ Claude Code finished"
+
+              # Пушим в main
+              BRANCH=$(git branch --show-current)
+              if [ "$BRANCH" != "main" ]; then
+                echo "→ Merging ${BRANCH} into main..."
+                git checkout main
+                git pull origin main
+                git merge "$BRANCH" --no-ff -m "Auto-merge: Sprint ${TASK_SPRINT}"
+              fi
+              git push origin main || true
+
+              # Отмечаем done
+              curl -sf -X PATCH \
+                "${SUPABASE_URL}/rest/v1/sprint_queue?id=eq.${TASK_ID}" \
+                -H "apikey: ${SUPABASE_KEY}" \
+                -H "Authorization: Bearer ${SUPABASE_KEY}" \
+                -H "Content-Type: application/json" \
+                -d '{"status":"done"}' > /dev/null
+
+              echo "→ Marked done. Notifying Telegram..."
+              sleep 15
+              curl -sf "https://finance-cockpit-teal.vercel.app/api/telegram/setup" > /dev/null || true
+
+              echo "✓ Sprint #${TASK_SPRINT} deployed successfully"
+              echo "→ Checking for next sprint in 5 seconds..."
+              sleep 5
+
+            else
+              echo "✗ Claude Code failed for Sprint #${TASK_SPRINT}"
+
+              # Отмечаем failed
+              curl -sf -X PATCH \
+                "${SUPABASE_URL}/rest/v1/sprint_queue?id=eq.${TASK_ID}" \
+                -H "apikey: ${SUPABASE_KEY}" \
+                -H "Authorization: Bearer ${SUPABASE_KEY}" \
+                -H "Content-Type: application/json" \
+                -d '{"status":"failed"}' > /dev/null
+
+              echo "✗ Stopping workflow. Fix the sprint and re-run."
+              exit 1
+            fi
+
+          done
