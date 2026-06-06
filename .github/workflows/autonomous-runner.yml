@@ -6,7 +6,7 @@ on:
 
 jobs:
   check-and-run:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     timeout-minutes: 90
     steps:
       - name: Checkout
