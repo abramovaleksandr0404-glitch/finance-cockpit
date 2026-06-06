@@ -90,6 +90,46 @@ export async function GET(req: Request) {
       }
     }
 
+    // Аванс В ДЕНЬ аванса
+    if (today === advDay && !advReceived) {
+      if (user?.telegram_chat_id) {
+        const advAmount = Number(monthData?.data?.salary_adv_amount ?? Math.round(Number(user?.debit_balance ?? 0) / 2))
+        await sendTelegramWithButtons(user.telegram_chat_id,
+          `💸 Сегодня *день аванса* (${advDay}-е). Ожидается ${advAmount.toLocaleString('ru-RU')}₽ — пришёл?`,
+          [[
+            { text: '✅ Получил аванс', callback_data: 'received_advance' },
+            { text: '⏭ Ещё нет', callback_data: 'skip' },
+          ]]
+        )
+      }
+    }
+
+    // ЗП в последний рабочий день месяца — уведомление
+    const { data: monthRow2 } = await supabase.from('months').select('salary_eom_received,salary_eom_amount,bonus_amount').eq('user_id', USER_ID).eq('month_key', monthKey).maybeSingle()
+    const eomReceived = !!monthRow2?.salary_eom_received
+    if (!eomReceived) {
+      const now2 = new Date()
+      const lastDay = new Date(now2.getFullYear(), now2.getMonth() + 1, 0)
+      while (lastDay.getDay() === 0 || lastDay.getDay() === 6) lastDay.setDate(lastDay.getDate() - 1)
+      if (today === lastDay.getDate()) {
+        const { data: u2 } = await supabase.from('users').select('salary_net').eq('id', USER_ID).single()
+        const net2 = Number(u2?.salary_net ?? 121600)
+        const advAmt2 = Number(monthData?.data?.salary_adv_amount ?? Math.round(net2 / 2))
+        const eomAmt2 = Number(monthRow2?.salary_eom_amount ?? net2 - advAmt2)
+        const bonusAmt2 = Number(monthRow2?.bonus_amount ?? 0)
+        const total2 = eomAmt2 + bonusAmt2
+        if (user?.telegram_chat_id) {
+          await sendTelegramWithButtons(user.telegram_chat_id,
+            `💸 Сегодня последний рабочий день — ожидается *ЗП + бонус* ${total2.toLocaleString('ru-RU')}₽. Пришла?`,
+            [[
+              { text: '✅ Получил ЗП', callback_data: 'received_eom' },
+              { text: '⏭ Ещё нет', callback_data: 'skip' },
+            ]]
+          )
+        }
+      }
+    }
+
     if (!user?.telegram_chat_id) return NextResponse.json({ ok: false, reason: 'no chat_id' })
 
     const isWeekly = new Date().getDay() === 0

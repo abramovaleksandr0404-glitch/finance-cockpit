@@ -850,6 +850,8 @@ export interface BotAction {
   title?: string; priority?: number; adv_amount?: number; eom_amount?: number; bonus_amount?: number
   // Sprint 9
   formula?: string
+  // Sprint 17
+  actual_amount?: number
 }
 
 // ── НАДЁЖНЫЙ ПАРСЕР ACTION ─────────────────────────────────────────────────
@@ -1023,6 +1025,11 @@ export async function executeAction(action: BotAction): Promise<void> {
       await s.from('months').update({salary_adv_received:true,salary_adv_amount:advAmt}).eq('user_id',USER_ID).eq('month_key',monthKey)
       await s.from('users').update({debit_balance:newBal,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
       await recordDebitChange(s, prevBal, newBal, `Аванс`, 'salary')
+      await s.from('salary_actuals').insert({
+        user_id: USER_ID, payment_type: 'advance',
+        expected_amount: advAmt, actual_amount: advAmt,
+        payment_date: new Date().toISOString().split('T')[0], deviation: 0,
+      }).then(() => {})
     }
     if (action.part === 'eom') {
       const advAmt = Number(month?.salary_adv_amount??Math.round(net/2))
@@ -1034,6 +1041,11 @@ export async function executeAction(action: BotAction): Promise<void> {
       await s.from('months').update({salary_eom_received:true,salary_eom_amount:eomSalary}).eq('user_id',USER_ID).eq('month_key',monthKey)
       await s.from('users').update({debit_balance:newBal,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
       await recordDebitChange(s, prevBal, newBal, `ЗП + бонус`, 'salary')
+      await s.from('salary_actuals').insert({
+        user_id: USER_ID, payment_type: 'eom',
+        expected_amount: total, actual_amount: total,
+        payment_date: new Date().toISOString().split('T')[0], deviation: 0,
+      }).then(() => {})
       // Update YTD gross
       const { data: u3 } = await s.from('users').select('salary_gross,ytd_gross').eq('id', USER_ID).single()
       const newYtd = Number(u3?.ytd_gross ?? 0) + Number(u3?.salary_gross ?? 0)
@@ -1073,6 +1085,25 @@ export async function executeAction(action: BotAction): Promise<void> {
       await s.from('months').update({fixed_paid:{...fp,...newFp}}).eq('user_id',USER_ID).eq('month_key',monthKey)
       await s.from('users').update({debit_balance:newBal,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
       await recordDebitChange(s, prevBal, newBal, `Все постоянные`, 'fixed')
+    }
+  }
+
+  if (action.type === 'mark_fixed_paid_with_amount' && action.name) {
+    const { data:u } = await s.from('users').select('debit_balance,fixed_costs').eq('id',USER_ID).single()
+    const { data:month } = await s.from('months').select('fixed_paid').eq('user_id',USER_ID).eq('month_key',monthKey).maybeSingle()
+    const fc = (u?.fixed_costs as {name:string;amount:number}[]) ?? []
+    const idx = fc.findIndex(f => f.name.toLowerCase().includes((action.name??'').toLowerCase()))
+    if (idx >= 0) {
+      const fp = (month?.fixed_paid as Record<string,number|boolean>) ?? {}
+      if (!fp[String(idx)]) {
+        const plannedAmount = fc[idx].amount
+        const actualAmount = action.actual_amount ?? plannedAmount
+        const prevBal = Number(u?.debit_balance??0)
+        const newBal = Math.round((prevBal - actualAmount)*100)/100
+        await s.from('months').update({fixed_paid:{...fp,[String(idx)]:actualAmount}}).eq('user_id',USER_ID).eq('month_key',monthKey)
+        await s.from('users').update({debit_balance:newBal,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
+        await recordDebitChange(s, prevBal, newBal, `Постоянная: ${fc[idx].name} (план ${plannedAmount}₽, факт ${actualAmount}₽)`, 'fixed')
+      }
     }
   }
 
@@ -1399,6 +1430,8 @@ export const TOOLS = [
     input_schema:{type:'object',properties:{name:{type:'string'},amount:{type:'number'}},required:['name']} },
   { name:'mark_fixed_paid', description:'Отметить оплату ВСЕХ неоплаченных постоянных трат разом.',
     input_schema:{type:'object',properties:{}} },
+  { name:'mark_fixed_paid_with_amount', description:'Отметить оплату постоянной траты с указанием ФАКТИЧЕСКОЙ суммы (если отличается от плановой). Используй вместо mark_single_fixed когда пользователь говорит "заплатил X за Y" и X ≠ плановой сумме.',
+    input_schema:{type:'object',properties:{name:{type:'string'},actual_amount:{type:'number',description:'Фактически уплаченная сумма'}},required:['name','actual_amount']} },
   { name:'mark_loan_paid', description:'Отметить оплату ежемесячного платежа по кредиту (по названию).',
     input_schema:{type:'object',properties:{name:{type:'string'}},required:['name']} },
   { name:'early_repay', description:'Досрочное погашение кредита: уменьшить тело на сумму, пересчитать платёж.',
@@ -1551,6 +1584,9 @@ export const TOOLS = [
   { name: 'days_until_advance',
     description: 'Рассчитать сколько дней осталось до ближайшего аванса (15 числа). Вызывай на: "когда аванс", "сколько дней до аванса", "дней до 15", "когда придут деньги", "успею до аванса".',
     input_schema: { type: 'object', properties: {} } },
+  { name: 'check_salary_pattern',
+    description: 'Показать историю реальных выплат (аванс/ЗП) и средние суммы. Вызывай на: "когда обычно приходит ЗП", "сколько в среднем аванс", "история выплат", "паттерн зарплаты".',
+    input_schema: { type: 'object', properties: {} } },
 ]
 
 interface ContentBlock { type:string; text?:string; id?:string; name?:string; input?:Record<string,unknown> }
@@ -1657,6 +1693,20 @@ async function handleTool(name: string, input: Record<string,unknown>): Promise<
     const { data: items } = await q
     return JSON.stringify(items ?? [])
   }
+  if (name === 'check_salary_pattern') {
+    const { data } = await db().from('salary_actuals')
+      .select('payment_type,expected_amount,actual_amount,payment_date,deviation,notes')
+      .eq('user_id', USER_ID)
+      .order('payment_date', { ascending: false })
+      .limit(12)
+    if (!data?.length) return JSON.stringify({ message: 'Нет данных об историии выплат' })
+    const advances = data.filter(r => r.payment_type === 'advance')
+    const eoms = data.filter(r => r.payment_type === 'eom')
+    const avgAdv = advances.length ? Math.round(advances.reduce((s,r)=>s+Number(r.actual_amount),0)/advances.length) : null
+    const avgEom = eoms.length ? Math.round(eoms.reduce((s,r)=>s+Number(r.actual_amount),0)/eoms.length) : null
+    return JSON.stringify({ records: data, avgAdvance: avgAdv, avgEom, count: data.length })
+  }
+
   if (name === 'days_until_advance') {
     const now = new Date()
     const today = now.getDate()
@@ -1802,7 +1852,7 @@ export async function generateMorningBriefing(isWeekly = false): Promise<string>
   const today = new Date()
   const dateFmt = today.toLocaleDateString('ru-RU',{weekday:'long',day:'numeric',month:'long'})
   const prompt = isWeekly
-    ? `Еженедельный отчёт (воскресенье, ${dateFmt}). Структура: итоги недели, баланс + дневной бюджет, ближайшие платежи следующей недели, прогноз бонуса, что улучшить. КРАТКО, не более 1500 символов, вертикальные списки.`
+    ? `Воскресный недельный дайджест (${dateFmt}). Составь отчёт из СТРОГО 5 секций:\n1. НЕДЕЛЯ — сколько потрачено за последние 7 дней (возьми из трат), топ-1 самая крупная трата\n2. БЮДЖЕТ — сколько осталось от переменных, дневной лимит до конца месяца\n3. ВРЕДНЫЕ — сумма по вредным категориям с % от лимита (только если есть)\n4. ПЛАТЕЖИ — ближайшие кредиты/постоянные на следующей неделе\n5. 💡 СОВЕТ — одна конкретная рекомендация и мотивационная строка\nОТВЕЧАЙ кратко, вертикальными списками, без таблиц, не более 1200 символов.`
     : `Утренний дайджест (${dateFmt}). Баланс, дневной бюджет, ближайшие платежи, прогресс переменных. 8-10 строк, без таблиц.`
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method:'POST',

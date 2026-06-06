@@ -512,6 +512,36 @@ console.log('\n=== AI-КАТ + DARK MODE + СКРИНШОТ: SPRINT 15 ===')
   check('html2canvas в package.json', existsSync(join(process.cwd(), 'node_modules/html2canvas')), true)
 }
 
+console.log('\n=== ДАЙДЖЕСТ + mark_fixed_amount + SALARY_ACTUALS + ALERTS: SPRINT 17 ===')
+{
+  const bot = readFileSync(join(process.cwd(), 'lib/bot.ts'), 'utf-8')
+  const morning = readFileSync(join(process.cwd(), 'app/api/cron/morning/route.ts'), 'utf-8')
+  const evening = readFileSync(join(process.cwd(), 'app/api/cron/evening/route.ts'), 'utf-8')
+  // Задача 1: Sunday weekly digest
+  check('Воскресный дайджест — топ трата', bot.includes('топ-1 самая крупная трата'), true)
+  check('Воскресный дайджест — секция ВРЕДНЫЕ', bot.includes('ВРЕДНЫЕ'), true)
+  check('Воскресный дайджест — секция СОВЕТ', bot.includes('💡 СОВЕТ'), true)
+  check('Воскресный дайджест — 5 секций', bot.includes('СТРОГО 5 секций'), true)
+  // Задача 2: mark_fixed_paid_with_amount
+  check('mark_fixed_paid_with_amount в TOOLS', TOOLS.some(t => t.name === 'mark_fixed_paid_with_amount'), true)
+  check('mark_fixed_paid_with_amount в executeAction', bot.includes("action.type === 'mark_fixed_paid_with_amount'"), true)
+  check('actual_amount в BotAction', bot.includes('actual_amount?: number'), true)
+  check('plan/fact в recordDebitChange', bot.includes('план') && bot.includes('факт'), true)
+  // Задача 3: утреннее уведомление в день аванса
+  check('уведомление В день аванса', morning.includes('день аванса'), true)
+  check('уведомление В день ЗП', morning.includes('последний рабочий день'), true)
+  check('received_eom callback', morning.includes('received_eom'), true)
+  // Задача 4: salary_actuals
+  check('salary_actuals insert в mark_salary advance', bot.includes("payment_type: 'advance'"), true)
+  check('salary_actuals insert в mark_salary eom', bot.includes("payment_type: 'eom'"), true)
+  check('check_salary_pattern в TOOLS', TOOLS.some(t => t.name === 'check_salary_pattern'), true)
+  check('check_salary_pattern handleTool', bot.includes("name === 'check_salary_pattern'"), true)
+  // Задача 5: rate limiting вечерних алертов
+  check('last_evening_alert_date в evening cron', evening.includes('last_evening_alert_date'), true)
+  check('rate_limited 3 дня в evening cron', evening.includes('daysSince < 3'), true)
+  check('upsert last_evening_alert_date после отправки', evening.includes("key: 'last_evening_alert_date'"), true)
+}
+
 console.log(`\n${'='.repeat(40)}`)
 console.log(`ИТОГО: ${passed} прошло, ${failed} провалено`)
 console.log('='.repeat(40))
