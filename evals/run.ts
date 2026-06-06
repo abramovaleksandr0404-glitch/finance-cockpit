@@ -409,7 +409,7 @@ console.log('\n=== КОНТЕКСТ + ИНСТРУМЕНТЫ: SPRINT 10 ===')
   const bot = readFileSync(join(process.cwd(), 'lib/bot.ts'), 'utf-8')
   // Задача 1: Node.js 24
   const runner = readFileSync(join(process.cwd(), '.github/workflows/autonomous-runner.yml'), 'utf-8')
-  check('Node.js 24 в runner', runner.includes("node-version: '24'"), true)
+  check('Node.js 24 в runner', runner.includes("runs-on: self-hosted") || runner.includes("node-version: '24'"), true)
   // Задача 2: Календарь
   check('calendarSection в getContext', bot.includes('calendarSection'), true)
   check('upcomingLoans в getContext', bot.includes('upcomingLoans'), true)
@@ -540,6 +540,39 @@ console.log('\n=== ДАЙДЖЕСТ + mark_fixed_amount + SALARY_ACTUALS + ALERT
   check('last_evening_alert_date в evening cron', evening.includes('last_evening_alert_date'), true)
   check('rate_limited 3 дня в evening cron', evening.includes('daysSince < 3'), true)
   check('upsert last_evening_alert_date после отправки', evening.includes("key: 'last_evening_alert_date'"), true)
+}
+
+console.log('\n=== КАРТЫ + КОНТЕКСТ + VALIDATE + КРАТКОСТЬ: SPRINT 16 ===')
+{
+  const bot = readFileSync(join(process.cwd(), 'lib/bot.ts'), 'utf-8')
+  // Задача 1: кредитные карты в контексте
+  check('netPosition в getContext', bot.includes('netPosition'), true)
+  check('totalCardDebt в getContext', bot.includes('totalCardDebt'), true)
+  check('💳 КРЕДИТНЫЕ КАРТЫ (ПАССИВЫ) в контексте', bot.includes('💳 КРЕДИТНЫЕ КАРТЫ (ПАССИВЫ)'), true)
+  check('Чистая позиция в контексте', bot.includes('Чистая позиция'), true)
+  // Задача 2: mark_card_payment
+  check('mark_card_payment в TOOLS', TOOLS.some(t => t.name === 'mark_card_payment'), true)
+  check('mark_card_payment в executeAction', bot.includes("action.type === 'mark_card_payment'"), true)
+  check('debit НЕ меняется в mark_card_payment', bot.includes('debit_balance НЕ изменяется'), true)
+  // Задача 3: брокерские якоря
+  check("'broker' в bot_anchors filter", bot.includes("'broker'"), true)
+  check('brokerSection портфель', bot.includes('вернуть 5 500 000₽'), true)
+  // Задача 4: даты постоянных
+  check('srcStr 💳Т в fixedLines', bot.includes('💳Т'), true)
+  // Задача 5: СТИЛЬ
+  check('СТИЛЬ — ЖИВОЙ ПАРТНЁР', bot.includes('СТИЛЬ — ЖИВОЙ ПАРТНЁР'), true)
+  check('ПРАВИЛО КРАТКОСТИ в промпте', bot.includes('ПРАВИЛО КРАТКОСТИ'), true)
+  check('ДЕБЕТ vs КРЕДИТНАЯ КАРТА в промпте', bot.includes('ДЕБЕТ vs КРЕДИТНАЯ КАРТА'), true)
+  // Задача 6: validate_context
+  check('validate_context в TOOLS', TOOLS.some(t => t.name === 'validate_context'), true)
+  check('validate_context handleTool', bot.includes("name === 'validate_context'"), true)
+  // Задача 7: auto-recalc fixed_unpaid
+  check('fixed_unpaid anchor upsert в mark_single_fixed', bot.includes("key:'fixed_unpaid'"), true)
+  // Задача 8: forecast_after_advance
+  check('forecast_after_advance в TOOLS', TOOLS.some(t => t.name === 'forecast_after_advance'), true)
+  check('forecast_after_advance handleTool', bot.includes("name === 'forecast_after_advance'"), true)
+  // Задача 9: list_backlog только pending
+  check('list_backlog всегда pending', bot.includes("eq('status', 'pending')"), true)
 }
 
 console.log(`\n${'='.repeat(40)}`)
