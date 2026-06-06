@@ -28,43 +28,28 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          set -e
-
           while true; do
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             echo "Checking for pending sprints..."
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-            RESULT=$(curl -sf \
-              "${SUPABASE_URL}/rest/v1/sprint_queue?status=eq.pending&order=priority.asc,sprint_number.asc&limit=1" \
+            RESULT=$(curl -sf "${SUPABASE_URL}/rest/v1/sprint_queue?status=eq.pending&order=priority.asc,sprint_number.asc&limit=1" \
               -H "apikey: ${SUPABASE_KEY}" \
               -H "Authorization: Bearer ${SUPABASE_KEY}" 2>/dev/null) || RESULT="[]"
 
-            COUNT=$(echo "$RESULT" | python3 -c "import json,sys; data=json.load(sys.stdin); print(len(data))" 2>/dev/null || echo "0")
+            COUNT=$(echo "$RESULT" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
 
             if [ "$COUNT" -eq "0" ]; then
-              echo "✓ No pending sprints. Done."
+              echo "No pending sprints. Done."
               break
             fi
 
-            TASK_ID=$(echo "$RESULT"     | python3 -c "import json,sys; print(json.load(sys.stdin)[0]['id'])")
-            TASK_TITLE=$(echo "$RESULT"  | python3 -c "import json,sys; print(json.load(sys.stdin)[0]['title'])")
+            TASK_ID=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin)[0]['id'])")
+            TASK_TITLE=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin)[0]['title'])")
             TASK_SPRINT=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin)[0]['sprint_number'])")
 
-            echo "→ Sprint #${TASK_SPRINT}: ${TASK_TITLE}"
-            echo "→ Task ID: ${TASK_ID}"
+            echo "Sprint #${TASK_SPRINT}: ${TASK_TITLE}"
 
-            # Пишем промпт в файл (безопаснее чем через env)
-            echo "$RESULT" | python3 -c "
-import json, sys
-data = json.load(sys.stdin)[0]
-with open('/tmp/task_prompt.txt', 'w') as f:
-    f.write(data['prompt'])
-with open('/tmp/task_id.txt', 'w') as f:
-    f.write(data['id'])
-"
+            echo "$RESULT" | python3 -c "import json,sys; d=json.load(sys.stdin)[0]; open('/tmp/task_prompt.txt','w').write(d['prompt']); open('/tmp/task_id.txt','w').write(d['id'])"
 
-            # Отмечаем in_progress
             curl -sf -X PATCH \
               "${SUPABASE_URL}/rest/v1/sprint_queue?id=eq.${TASK_ID}" \
               -H "apikey: ${SUPABASE_KEY}" \
@@ -72,23 +57,16 @@ with open('/tmp/task_id.txt', 'w') as f:
               -H "Content-Type: application/json" \
               -d '{"status":"in_progress"}' > /dev/null
 
-            echo "→ Marked in_progress. Running Claude Code..."
+            echo "Running Claude Code for Sprint #${TASK_SPRINT}..."
 
-            # Запускаем Claude Code
             if claude --dangerously-skip-permissions --max-turns 80 < /tmp/task_prompt.txt; then
-              echo "✓ Claude Code finished"
-
-              # Пушим в main
               BRANCH=$(git branch --show-current)
               if [ "$BRANCH" != "main" ]; then
-                echo "→ Merging ${BRANCH} into main..."
-                git checkout main
-                git pull origin main
+                git checkout main && git pull origin main
                 git merge "$BRANCH" --no-ff -m "Auto-merge: Sprint ${TASK_SPRINT}"
               fi
               git push origin main || true
 
-              # Отмечаем done
               curl -sf -X PATCH \
                 "${SUPABASE_URL}/rest/v1/sprint_queue?id=eq.${TASK_ID}" \
                 -H "apikey: ${SUPABASE_KEY}" \
@@ -96,18 +74,12 @@ with open('/tmp/task_id.txt', 'w') as f:
                 -H "Content-Type: application/json" \
                 -d '{"status":"done"}' > /dev/null
 
-              echo "→ Marked done. Notifying Telegram..."
               sleep 15
               curl -sf "https://finance-cockpit-teal.vercel.app/api/telegram/setup" > /dev/null || true
-
-              echo "✓ Sprint #${TASK_SPRINT} deployed successfully"
-              echo "→ Checking for next sprint in 5 seconds..."
+              echo "Sprint #${TASK_SPRINT} deployed!"
               sleep 5
 
             else
-              echo "✗ Claude Code failed for Sprint #${TASK_SPRINT}"
-
-              # Отмечаем failed
               curl -sf -X PATCH \
                 "${SUPABASE_URL}/rest/v1/sprint_queue?id=eq.${TASK_ID}" \
                 -H "apikey: ${SUPABASE_KEY}" \
@@ -115,7 +87,7 @@ with open('/tmp/task_id.txt', 'w') as f:
                 -H "Content-Type: application/json" \
                 -d '{"status":"failed"}' > /dev/null
 
-              echo "✗ Stopping workflow. Fix the sprint and re-run."
+              echo "Sprint #${TASK_SPRINT} failed. Stopping."
               exit 1
             fi
 
