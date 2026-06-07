@@ -62,6 +62,11 @@ export async function GET(req: Request) {
       }
     }
 
+    // Sprint 26: напоминание о постоянных расходах 5-го числа
+    if (today === 5 && user?.telegram_chat_id) {
+      await sendTelegram(user.telegram_chat_id, `📋 Сегодня день оплаты постоянных расходов!\n\nПроверь: ЖКХ, Электричество, Интернет, Зал DDX, Обучение и ИИ.\n\nОтметь оплату через бота командой или кнопкой.`)
+    }
+
     for (const r of recurringIncomes) {
       if (r.day === today && !received.includes(r.name)) {
         // Авто-создаём income_event и зачисляем на дебет
