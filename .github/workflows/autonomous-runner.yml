@@ -29,44 +29,51 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           while true; do
+            echo "========================================="
             echo "Checking for pending sprints..."
-            echo "DEBUG: URL=${SUPABASE_URL}"
-            echo "DEBUG: KEY_LENGTH=${#SUPABASE_KEY}"
-
-            RESULT=$(curl -s --max-time 10 -w "\nHTTP_STATUS:%{http_code}" "${SUPABASE_URL}/rest/v1/sprint_queue?status=eq.pending&order=priority.asc,sprint_number.asc&limit=1" \
+            echo "SUPABASE_URL: ${SUPABASE_URL}"
+            echo "KEY_LENGTH: ${#SUPABASE_KEY}"
+            
+            echo "Testing connectivity to Supabase..."
+            ping -c 1 8.8.8.8 || echo "No internet"
+            
+            RESULT=$(curl -v --max-time 10 "${SUPABASE_URL}/rest/v1/sprint_queue?status=eq.pending&order=priority.asc,sprint_number.asc&limit=1" \
               -H "apikey: ${SUPABASE_KEY}" \
-              -H "Authorization: Bearer ${SUPABASE_KEY}") || RESULT="ERROR"
-
-            echo "DEBUG CURL RESULT: ${RESULT}"
-            HTTP_CODE=$(echo "$RESULT" | grep HTTP_STATUS | cut -d: -f2)
-            RESULT=$(echo "$RESULT" | grep -v HTTP_STATUS)
-            echo "DEBUG HTTP CODE: ${HTTP_CODE}"
-            echo "DEBUG DATA: ${RESULT}"
-
+              -H "Authorization: Bearer ${SUPABASE_KEY}" 2>&1)
+            
+            CURL_EXIT=$?
+            echo "CURL exit code: ${CURL_EXIT}"
+            echo "CURL response: ${RESULT}"
+            
+            if [ "${CURL_EXIT}" -ne 0 ]; then
+              echo "ERROR: curl failed with code ${CURL_EXIT}"
+              break
+            fi
+            
             COUNT=$(echo "$RESULT" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
-
+            
             if [ "$COUNT" -eq "0" ]; then
               echo "No pending sprints. Done."
               break
             fi
-
+            
             TASK_ID=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin)[0]['id'])")
             TASK_TITLE=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin)[0]['title'])")
             TASK_SPRINT=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin)[0]['sprint_number'])")
-
+            
             echo "Sprint #${TASK_SPRINT}: ${TASK_TITLE}"
-
+            
             echo "$RESULT" | python3 -c "import json,sys; d=json.load(sys.stdin)[0]; open('/tmp/task_prompt.txt','w').write(d['prompt']); open('/tmp/task_id.txt','w').write(d['id'])"
-
+            
             curl -sf -X PATCH \
               "${SUPABASE_URL}/rest/v1/sprint_queue?id=eq.${TASK_ID}" \
               -H "apikey: ${SUPABASE_KEY}" \
               -H "Authorization: Bearer ${SUPABASE_KEY}" \
               -H "Content-Type: application/json" \
               -d '{"status":"in_progress"}' > /dev/null
-
+            
             echo "Running Claude Code for Sprint #${TASK_SPRINT}..."
-
+            
             if claude --dangerously-skip-permissions --max-turns 80 < /tmp/task_prompt.txt; then
               BRANCH=$(git branch --show-current)
               if [ "$BRANCH" != "main" ]; then
@@ -74,19 +81,18 @@ jobs:
                 git merge "$BRANCH" --no-ff -m "Auto-merge: Sprint ${TASK_SPRINT}"
               fi
               git push origin main || true
-
+              
               curl -sf -X PATCH \
                 "${SUPABASE_URL}/rest/v1/sprint_queue?id=eq.${TASK_ID}" \
                 -H "apikey: ${SUPABASE_KEY}" \
                 -H "Authorization: Bearer ${SUPABASE_KEY}" \
                 -H "Content-Type: application/json" \
                 -d '{"status":"done"}' > /dev/null
-
+              
               sleep 15
               curl -sf "https://finance-cockpit-teal.vercel.app/api/telegram/setup" > /dev/null || true
               echo "Sprint #${TASK_SPRINT} deployed!"
               sleep 5
-
             else
               curl -sf -X PATCH \
                 "${SUPABASE_URL}/rest/v1/sprint_queue?id=eq.${TASK_ID}" \
@@ -94,9 +100,8 @@ jobs:
                 -H "Authorization: Bearer ${SUPABASE_KEY}" \
                 -H "Content-Type: application/json" \
                 -d '{"status":"failed"}' > /dev/null
-
+              
               echo "Sprint #${TASK_SPRINT} failed. Stopping."
               exit 1
             fi
-
           done
