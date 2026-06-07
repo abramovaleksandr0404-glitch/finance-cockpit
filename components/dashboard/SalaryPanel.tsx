@@ -18,6 +18,9 @@ export default function SalaryPanel({ data, monthKey }: { data: DashboardData; m
   const month = data.allMonths.find((m) => m.month_key === monthKey) ?? null
   const advReceived = month?.salary_adv_received ?? false
   const eomReceived = month?.salary_eom_received ?? false
+  // Sprint 26: recurring incomes (стипендия и др.)
+  type RecurringIncome = { name: string; amount: number; day: number }
+  const recurringIncomes: RecurringIncome[] = ((data.user as any).recurring_incomes as RecurringIncome[] | null) ?? []
 
   return (
     <div className="card p-5 flex flex-col gap-3">
@@ -34,6 +37,16 @@ export default function SalaryPanel({ data, monthKey }: { data: DashboardData; m
           {rub(Number(data.user.salary_net ?? 121600))}
         </span>
       </div>
+
+      {/* Sprint 26: recurring incomes (стипендия и т.п.) */}
+      {recurringIncomes.map((r) => (
+        <div key={r.name} className="flex items-center justify-between">
+          <span className="label">{r.name} · {r.day} числа</span>
+          <span className="text-sm font-bold" style={{ color: 'var(--accent-green)', fontFamily: 'JetBrains Mono, monospace', whiteSpace: 'nowrap' }}>
+            {rub(r.amount)}
+          </span>
+        </div>
+      ))}
 
       <SalaryLine
         label={`Аванс · ${inc.advDay} числа`}
