@@ -18,12 +18,25 @@
   --accent-violet: #8b5cf6;
   --accent-pink: #ec4899;
   --tx-primary: #e2e8f0;
+  --tx-main: #e2e8f0;
   --tx-muted: #64748b;
   --tx-dim: #334155;
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
   --header-h: 52px;
   --nav-h: 62px;
+}
+
+[data-theme="light"] {
+  --bg-base: #f8fafc;
+  --bg-card: #ffffff;
+  --bg-hover: #f1f5f9;
+  --border: #e2e8f0;
+  --border-bright: #cbd5e1;
+  --tx-primary: #0f172a;
+  --tx-main: #0f172a;
+  --tx-muted: #475569;
+  --tx-dim: #94a3b8;
 }
 
 * { box-sizing: border-box; padding: 0; margin: 0; }

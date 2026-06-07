@@ -27,6 +27,14 @@ export default function SalaryPanel({ data, monthKey }: { data: DashboardData; m
         <span className="label">{inc.totalWorkdays} раб. дней</span>
       </div>
 
+      {/* Net salary (на руки, не gross) */}
+      <div className="flex items-center justify-between">
+        <span className="label">Зарплата на руки</span>
+        <span className="text-sm font-bold" style={{ color: 'var(--accent-green)', fontFamily: 'JetBrains Mono, monospace', whiteSpace: 'nowrap' }}>
+          {rub(Number(data.user.salary_net ?? 121600))}
+        </span>
+      </div>
+
       <SalaryLine
         label={`Аванс · ${inc.advDay} числа`}
         amount={inc.advance}

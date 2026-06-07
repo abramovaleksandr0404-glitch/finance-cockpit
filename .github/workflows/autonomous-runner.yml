@@ -1,106 +1,113 @@
 name: Autonomous Sprint Runner
+
 on:
   schedule:
     - cron: '0 */4 * * *'
   workflow_dispatch:
 
 jobs:
-  check-and-run:
+  run-sprint:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    permissions:
+      contents: write
+      actions: write
+
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-
-      - name: Check sprint_queue and write prompt to file
-        id: queue
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-        run: |
-          RESULT=$(curl -sf \
-            "${SUPABASE_URL}/rest/v1/sprint_queue?status=eq.pending&order=priority.asc,sprint_number.asc&limit=1&select=id,title,prompt" \
-            -H "apikey: ${SUPABASE_KEY}" \
-            -H "Authorization: Bearer ${SUPABASE_KEY}" \
-            -H "Accept: application/json" 2>/dev/null) || RESULT="[]"
-          COUNT=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(len(d))" "$RESULT" 2>/dev/null || echo "0")
-          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
-          if [ "$COUNT" -gt "0" ]; then
-            python3 -c "
-import json, sys
-d = json.loads(sys.argv[1])
-with open('/tmp/task_id.txt','w') as f: f.write(d[0]['id'])
-with open('/tmp/task_title.txt','w') as f: f.write(d[0]['title'])
-with open('/tmp/task_prompt.txt','w') as f: f.write(d[0]['prompt'])
-" "$RESULT"
-            echo "task_id=$(cat /tmp/task_id.txt)" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: No tasks
-        if: steps.queue.outputs.count == '0'
-        run: echo "No pending sprint tasks. System idle."
-
-      - name: Mark in_progress
-        if: steps.queue.outputs.count != '0'
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-        run: |
-          curl -sf -X PATCH \
-            "${SUPABASE_URL}/rest/v1/sprint_queue?id=eq.$(cat /tmp/task_id.txt)" \
-            -H "apikey: ${SUPABASE_KEY}" \
-            -H "Authorization: Bearer ${SUPABASE_KEY}" \
-            -H "Content-Type: application/json" \
-            -d '{"status":"in_progress"}'
-
-      - name: Install Claude Code
-        if: steps.queue.outputs.count != '0'
-        run: npm install -g @anthropic-ai/claude-code
-
       - name: Configure git
-        if: steps.queue.outputs.count != '0'
         run: |
           git config user.name "Claude Runner"
           git config user.email "runner@anthropic.com"
 
+      - name: Get next sprint
+        id: sprint
+        env:
+          RUNNER_SECRET: ${{ secrets.RUNNER_SECRET }}
+        run: |
+          RESULT=$(curl -sf --max-time 30 "https://finance-cockpit-teal.vercel.app/api/sprint/next" \
+            -H "x-runner-secret: ${RUNNER_SECRET}") || RESULT="[]"
+          COUNT=$(echo "$RESULT" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          if [ "$COUNT" -gt "0" ]; then
+            TASK_ID=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin)[0]['id'])")
+            SPRINT_NUM=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin)[0]['sprint_number'])")
+            TITLE=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin)[0]['title'])")
+            echo "task_id=${TASK_ID}" >> "$GITHUB_OUTPUT"
+            echo "sprint_number=${SPRINT_NUM}" >> "$GITHUB_OUTPUT"
+            echo "title=${TITLE}" >> "$GITHUB_OUTPUT"
+            echo "$RESULT" | python3 -c "import json,sys; d=json.load(sys.stdin)[0]; open('/tmp/task_prompt.txt','w').write(d['prompt'])"
+            echo "Sprint #${SPRINT_NUM}: ${TITLE}"
+          else
+            echo "No pending sprints."
+          fi
+
+      - name: Mark in_progress
+        if: steps.sprint.outputs.count != '0'
+        env:
+          RUNNER_SECRET: ${{ secrets.RUNNER_SECRET }}
+        run: |
+          curl -sf --max-time 30 -X POST "https://finance-cockpit-teal.vercel.app/api/sprint/status" \
+            -H "x-runner-secret: ${RUNNER_SECRET}" \
+            -H "Content-Type: application/json" \
+            -d "{\"id\":\"${{ steps.sprint.outputs.task_id }}\",\"status\":\"in_progress\"}" > /dev/null
+
+      - name: Install Claude Code
+        if: steps.sprint.outputs.count != '0'
+        run: npm install -g @anthropic-ai/claude-code
+
       - name: Run Claude Code
-        if: steps.queue.outputs.count != '0'
+        if: steps.sprint.outputs.count != '0'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: |
-          echo "Task: $(cat /tmp/task_title.txt)"
-          claude --dangerously-skip-permissions --max-turns 80 < /tmp/task_prompt.txt
+        run: claude --dangerously-skip-permissions --max-turns 80 < /tmp/task_prompt.txt
 
-      - name: Mark done
-        if: steps.queue.outputs.count != '0' && success()
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      - name: Push to main
+        if: steps.sprint.outputs.count != '0'
         run: |
-          curl -sf -X PATCH \
-            "${SUPABASE_URL}/rest/v1/sprint_queue?id=eq.$(cat /tmp/task_id.txt)" \
-            -H "apikey: ${SUPABASE_KEY}" \
-            -H "Authorization: Bearer ${SUPABASE_KEY}" \
+          BRANCH=$(git branch --show-current)
+          if [ "$BRANCH" != "main" ]; then
+            git checkout main && git pull origin main
+            git merge "$BRANCH" --no-ff -m "Auto-merge: Sprint ${{ steps.sprint.outputs.sprint_number }}"
+          fi
+          git push origin main || true
+
+      - name: Mark done and notify
+        if: steps.sprint.outputs.count != '0' && success()
+        env:
+          RUNNER_SECRET: ${{ secrets.RUNNER_SECRET }}
+        run: |
+          curl -sf --max-time 30 -X POST "https://finance-cockpit-teal.vercel.app/api/sprint/status" \
+            -H "x-runner-secret: ${RUNNER_SECRET}" \
             -H "Content-Type: application/json" \
-            -d '{"status":"done"}'
+            -d "{\"id\":\"${{ steps.sprint.outputs.task_id }}\",\"status\":\"done\"}" > /dev/null
+          sleep 15
+          curl -sf "https://finance-cockpit-teal.vercel.app/api/telegram/setup" > /dev/null || true
+          echo "Sprint #${{ steps.sprint.outputs.sprint_number }} deployed!"
 
       - name: Mark failed
-        if: steps.queue.outputs.count != '0' && failure()
+        if: steps.sprint.outputs.count != '0' && failure()
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          RUNNER_SECRET: ${{ secrets.RUNNER_SECRET }}
         run: |
-          curl -sf -X PATCH \
-            "${SUPABASE_URL}/rest/v1/sprint_queue?id=eq.$(cat /tmp/task_id.txt)" \
-            -H "apikey: ${SUPABASE_KEY}" \
-            -H "Authorization: Bearer ${SUPABASE_KEY}" \
+          curl -sf --max-time 30 -X POST "https://finance-cockpit-teal.vercel.app/api/sprint/status" \
+            -H "x-runner-secret: ${RUNNER_SECRET}" \
             -H "Content-Type: application/json" \
-            -d '{"status":"failed"}'
+            -d "{\"id\":\"${{ steps.sprint.outputs.task_id }}\",\"status\":\"failed\"}" > /dev/null
+
+      - name: Trigger next sprint
+        if: steps.sprint.outputs.count != '0' && success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          sleep 10
+          curl -sf -X POST \
+            -H "Authorization: token ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/abramovaleksandr0404-glitch/finance-cockpit/actions/workflows/autonomous-runner.yml/dispatches" \
+            -d '{"ref":"main"}' || true

@@ -110,8 +110,24 @@ export async function GET(req: Request) {
 
     if (alerts.length === 0) return NextResponse.json({ ok: true, reason: 'no alerts' })
 
+    // Rate limit: не чаще раза в 3 дня
+    const { data: alertAnchor } = await supabase.from('bot_anchors')
+      .select('value').eq('user_id', USER_ID).eq('month_key', 'global').eq('key', 'last_evening_alert_date').maybeSingle()
+    if (alertAnchor?.value) {
+      const lastDate = new Date(alertAnchor.value as string)
+      const daysSince = Math.floor((Date.now() - lastDate.getTime()) / 86400000)
+      if (daysSince < 3) return NextResponse.json({ ok: true, reason: `rate_limited (${daysSince}d ago)` })
+    }
+
     const msg = `🔔 *Вечерний дайджест*\n\n${alerts.join('\n\n')}\n\n_Дебет: ${rub(Number(user.debit_balance??0))}_`
     await sendTelegram(user.telegram_chat_id, msg)
+
+    // Обновляем дату последнего алерта
+    await supabase.from('bot_anchors').upsert({
+      user_id: USER_ID, month_key: 'global', key: 'last_evening_alert_date',
+      value: new Date().toISOString().split('T')[0], updated_at: new Date().toISOString(),
+    }, { onConflict: 'user_id,month_key,key' })
+
     return NextResponse.json({ ok: true, alerts: alerts.length })
   } catch (err) {
     console.error('[Cron evening]', err)

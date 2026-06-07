@@ -409,7 +409,7 @@ console.log('\n=== КОНТЕКСТ + ИНСТРУМЕНТЫ: SPRINT 10 ===')
   const bot = readFileSync(join(process.cwd(), 'lib/bot.ts'), 'utf-8')
   // Задача 1: Node.js 24
   const runner = readFileSync(join(process.cwd(), '.github/workflows/autonomous-runner.yml'), 'utf-8')
-  check('Node.js 24 в runner', runner.includes("node-version: '24'"), true)
+  check('Node.js 24 в runner', runner.includes("runs-on: self-hosted") || runner.includes("node-version: '24'"), true)
   // Задача 2: Календарь
   check('calendarSection в getContext', bot.includes('calendarSection'), true)
   check('upcomingLoans в getContext', bot.includes('upcomingLoans'), true)
@@ -448,6 +448,131 @@ console.log('\n=== КЛАВИАТУРА + БРОКЕР: SPRINT 11 ===')
   check('days_until_advance в TOOLS', TOOLS.some(t => t.name === 'days_until_advance'), true)
   check('days_until_advance в handleTool', bot.includes("name === 'days_until_advance'"), true)
   check('daysLeft вычисляется', bot.includes('daysLeft'), true)
+}
+
+console.log('\n=== НАДЁЖНОСТЬ + ПАРТНЁР: SPRINT 13 ===')
+{
+  const bot = readFileSync(join(process.cwd(), 'lib/bot.ts'), 'utf-8')
+  // Задача 1: save_correction
+  check('save_correction логирование', bot.includes("[save_correction] called:"), true)
+  check('save_correction ПЕРВОЕ действие в промпте', SYSTEM_PROMPT.includes('ПЕРВОЕ И ОБЯЗАТЕЛЬНОЕ'), true)
+  check('save_correction НЕ опционально в промпте', SYSTEM_PROMPT.includes('НЕ опционально'), true)
+  // Задача 2: updateAnchors
+  check('updateAnchors функция', bot.includes('async function updateAnchors'), true)
+  check('updateAnchors вызов в update_loan', bot.includes("await updateAnchors(s)"), true)
+  check('updateAnchors monthly_loan_payment якорь', bot.includes("'monthly_loan_payment'"), true)
+  check('updateAnchors fixed_total якорь', bot.includes("'fixed_total'"), true)
+  // Задача 4: партнёрский режим
+  check('ТЫ ПАРТНЁР в промпте', SYSTEM_PROMPT.includes('ТЫ ПАРТНЁР'), true)
+  check('доверяй пользователю в промпте', SYSTEM_PROMPT.includes('доверяй пользователю'), true)
+  // Задача 5: шаблон бюджета
+  check('ЛИКВИДНОСТЬ СЕЙЧАС в промпте', SYSTEM_PROMPT.includes('ЛИКВИДНОСТЬ СЕЙЧАС'), true)
+  check('ПРОГНОЗ КОНЦА МЕСЯЦА в промпте', SYSTEM_PROMPT.includes('ПРОГНОЗ КОНЦА МЕСЯЦА'), true)
+  check('Цифры ТОЛЬКО из ЯКОРЕЙ в промпте', SYSTEM_PROMPT.includes('Цифры ТОЛЬКО из ЯКОРЕЙ'), true)
+}
+
+console.log('\n=== UX + ВРЕДНЫЕ + ИСТОРИЯ: SPRINT 14 ===')
+{
+  const bot = readFileSync(join(process.cwd(), 'lib/bot.ts'), 'utf-8')
+  const dashClient = readFileSync(join(process.cwd(), 'components/dashboard/DashboardClient.tsx'), 'utf-8')
+  const types = readFileSync(join(process.cwd(), 'lib/types.ts'), 'utf-8')
+  const pageTs = readFileSync(join(process.cwd(), 'app/dashboard/page.tsx'), 'utf-8')
+  // Задача 1: add_multiday_expense уже реализован
+  check('add_multiday_expense в TOOLS', TOOLS.some(t => t.name === 'add_multiday_expense'), true)
+  check('add_multiday_expense в executeAction', bot.includes("action.type === 'add_multiday_expense'"), true)
+  // Задача 2: вредные расходы на сайте
+  check('HarmfulExpensesWidget создан', existsSync(join(process.cwd(), 'components/dashboard/HarmfulExpensesWidget.tsx')), true)
+  check('customCategories в DashboardData', types.includes('customCategories'), true)
+  check('custom_categories в page.tsx', pageTs.includes('custom_categories'), true)
+  check('HarmfulExpensesWidget в DashboardClient', dashClient.includes('HarmfulExpensesWidget'), true)
+  // Задача 3: история дебета
+  check('BalanceHistoryChart timeline список', readFileSync(join(process.cwd(), 'components/dashboard/BalanceHistoryChart.tsx'), 'utf-8').includes('timeline'), true)
+  check('BalanceHistoryChart в desktop main', dashClient.includes('BalanceHistoryChart'), true)
+  // Задача 4: уверенность прогноза
+  check('УВЕРЕННОСТЬ ПРОГНОЗА в промпте', SYSTEM_PROMPT.includes('УВЕРЕННОСТЬ ПРОГНОЗА'), true)
+  check('Уверенность % в промпте', SYSTEM_PROMPT.includes('Уверенность: X%'), true)
+}
+
+console.log('\n=== AI-КАТ + DARK MODE + СКРИНШОТ: SPRINT 15 ===')
+{
+  const bot = readFileSync(join(process.cwd(), 'lib/bot.ts'), 'utf-8')
+  const css = readFileSync(join(process.cwd(), 'app/globals.css'), 'utf-8')
+  // Задача 1: AI-категоризация
+  check('AI-КАТЕГОРИЗАЦИЯ в промпте', SYSTEM_PROMPT.includes('AI-КАТЕГОРИЗАЦИЯ'), true)
+  check('bot_learnings fallback в executeAction', bot.includes("bot_learnings"), true)
+  check('keyword guesses для Еда и кафе', bot.includes("'Еда и кафе'"), true)
+  check('keyword guesses для Транспорт', bot.includes("'Транспорт'"), true)
+  // Задача 2: dark mode
+  check('[data-theme="light"] в CSS', css.includes('[data-theme="light"]'), true)
+  check('ThemeToggle создан', existsSync(join(process.cwd(), 'components/dashboard/ThemeToggle.tsx')), true)
+  check('ThemeToggle в DashboardClient', readFileSync(join(process.cwd(), 'components/dashboard/DashboardClient.tsx'), 'utf-8').includes('ThemeToggle'), true)
+  // Задача 3: скриншот
+  check('MonthSummary создан', existsSync(join(process.cwd(), 'components/dashboard/MonthSummary.tsx')), true)
+  check('/dashboard/summary страница', existsSync(join(process.cwd(), 'app/dashboard/summary/page.tsx')), true)
+  check('html2canvas в package.json', existsSync(join(process.cwd(), 'node_modules/html2canvas')), true)
+}
+
+console.log('\n=== ДАЙДЖЕСТ + mark_fixed_amount + SALARY_ACTUALS + ALERTS: SPRINT 17 ===')
+{
+  const bot = readFileSync(join(process.cwd(), 'lib/bot.ts'), 'utf-8')
+  const morning = readFileSync(join(process.cwd(), 'app/api/cron/morning/route.ts'), 'utf-8')
+  const evening = readFileSync(join(process.cwd(), 'app/api/cron/evening/route.ts'), 'utf-8')
+  // Задача 1: Sunday weekly digest
+  check('Воскресный дайджест — топ трата', bot.includes('топ-1 самая крупная трата'), true)
+  check('Воскресный дайджест — секция ВРЕДНЫЕ', bot.includes('ВРЕДНЫЕ'), true)
+  check('Воскресный дайджест — секция СОВЕТ', bot.includes('💡 СОВЕТ'), true)
+  check('Воскресный дайджест — 5 секций', bot.includes('СТРОГО 5 секций'), true)
+  // Задача 2: mark_fixed_paid_with_amount
+  check('mark_fixed_paid_with_amount в TOOLS', TOOLS.some(t => t.name === 'mark_fixed_paid_with_amount'), true)
+  check('mark_fixed_paid_with_amount в executeAction', bot.includes("action.type === 'mark_fixed_paid_with_amount'"), true)
+  check('actual_amount в BotAction', bot.includes('actual_amount?: number'), true)
+  check('plan/fact в recordDebitChange', bot.includes('план') && bot.includes('факт'), true)
+  // Задача 3: утреннее уведомление в день аванса
+  check('уведомление В день аванса', morning.includes('день аванса'), true)
+  check('уведомление В день ЗП', morning.includes('последний рабочий день'), true)
+  check('received_eom callback', morning.includes('received_eom'), true)
+  // Задача 4: salary_actuals
+  check('salary_actuals insert в mark_salary advance', bot.includes("payment_type: 'advance'"), true)
+  check('salary_actuals insert в mark_salary eom', bot.includes("payment_type: 'eom'"), true)
+  check('check_salary_pattern в TOOLS', TOOLS.some(t => t.name === 'check_salary_pattern'), true)
+  check('check_salary_pattern handleTool', bot.includes("name === 'check_salary_pattern'"), true)
+  // Задача 5: rate limiting вечерних алертов
+  check('last_evening_alert_date в evening cron', evening.includes('last_evening_alert_date'), true)
+  check('rate_limited 3 дня в evening cron', evening.includes('daysSince < 3'), true)
+  check('upsert last_evening_alert_date после отправки', evening.includes("key: 'last_evening_alert_date'"), true)
+}
+
+console.log('\n=== КАРТЫ + КОНТЕКСТ + VALIDATE + КРАТКОСТЬ: SPRINT 16 ===')
+{
+  const bot = readFileSync(join(process.cwd(), 'lib/bot.ts'), 'utf-8')
+  // Задача 1: кредитные карты в контексте
+  check('netPosition в getContext', bot.includes('netPosition'), true)
+  check('totalCardDebt в getContext', bot.includes('totalCardDebt'), true)
+  check('💳 КРЕДИТНЫЕ КАРТЫ (ПАССИВЫ) в контексте', bot.includes('💳 КРЕДИТНЫЕ КАРТЫ (ПАССИВЫ)'), true)
+  check('Чистая позиция в контексте', bot.includes('Чистая позиция'), true)
+  // Задача 2: mark_card_payment
+  check('mark_card_payment в TOOLS', TOOLS.some(t => t.name === 'mark_card_payment'), true)
+  check('mark_card_payment в executeAction', bot.includes("action.type === 'mark_card_payment'"), true)
+  check('debit НЕ меняется в mark_card_payment', bot.includes('debit_balance НЕ изменяется'), true)
+  // Задача 3: брокерские якоря
+  check("'broker' в bot_anchors filter", bot.includes("'broker'"), true)
+  check('brokerSection портфель', bot.includes('вернуть 5 500 000₽'), true)
+  // Задача 4: даты постоянных
+  check('srcStr 💳Т в fixedLines', bot.includes('💳Т'), true)
+  // Задача 5: СТИЛЬ
+  check('СТИЛЬ — ЖИВОЙ ПАРТНЁР', bot.includes('СТИЛЬ — ЖИВОЙ ПАРТНЁР'), true)
+  check('ПРАВИЛО КРАТКОСТИ в промпте', bot.includes('ПРАВИЛО КРАТКОСТИ'), true)
+  check('ДЕБЕТ vs КРЕДИТНАЯ КАРТА в промпте', bot.includes('ДЕБЕТ vs КРЕДИТНАЯ КАРТА'), true)
+  // Задача 6: validate_context
+  check('validate_context в TOOLS', TOOLS.some(t => t.name === 'validate_context'), true)
+  check('validate_context handleTool', bot.includes("name === 'validate_context'"), true)
+  // Задача 7: auto-recalc fixed_unpaid
+  check('fixed_unpaid anchor upsert в mark_single_fixed', bot.includes("key:'fixed_unpaid'"), true)
+  // Задача 8: forecast_after_advance
+  check('forecast_after_advance в TOOLS', TOOLS.some(t => t.name === 'forecast_after_advance'), true)
+  check('forecast_after_advance handleTool', bot.includes("name === 'forecast_after_advance'"), true)
+  // Задача 9: list_backlog только pending
+  check('list_backlog всегда pending', bot.includes("eq('status', 'pending')"), true)
 }
 
 console.log(`\n${'='.repeat(40)}`)

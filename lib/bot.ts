@@ -40,6 +40,36 @@ export async function storeChatId(chatId: number) {
   await db().from('users').update({ telegram_chat_id: chatId }).eq('id', USER_ID)
 }
 
+async function updateAnchors(s: SupabaseClient): Promise<void> {
+  const now = new Date()
+  const year = now.getFullYear()
+  const month = now.getMonth() + 1
+  const monthK = `${year}-${String(month).padStart(2, '0')}`
+  const [{ data: u }, { data: loans }, { data: holidays }] = await Promise.all([
+    s.from('users').select('salary_net,fixed_costs').eq('id', USER_ID).single(),
+    s.from('loans').select('min_payment,principal').eq('user_id', USER_ID),
+    s.from('ru_holidays').select('holiday_date')
+      .gte('holiday_date', `${year}-${String(month).padStart(2, '0')}-01`)
+      .lte('holiday_date', `${year}-${String(month).padStart(2, '0')}-31`),
+  ])
+  const wd = computeWorkingDays(year, month, (holidays ?? []).map((h: { holiday_date: string }) => String(h.holiday_date).slice(0, 10)))
+  const dailyRate = Math.round(Number(u?.salary_net ?? 0) / wd)
+  const totalLoans = (loans ?? []).reduce((acc, l) => acc + Number(l.min_payment), 0)
+  const totalFixed = (u?.fixed_costs as Array<{ amount: number }> ?? []).reduce((acc, f) => acc + f.amount, 0)
+  const anchorRows = [
+    { key: 'working_days', value: String(wd), formula: 'рабочих дней с праздниками' },
+    { key: 'daily_rate', value: String(dailyRate), formula: `${u?.salary_net}/${wd}` },
+    { key: 'monthly_loan_payment', value: String(Math.round(totalLoans)), formula: 'сумма min_payment' },
+    { key: 'fixed_total', value: String(totalFixed), formula: 'сумма fixed_costs' },
+  ]
+  for (const a of anchorRows) {
+    await s.from('bot_anchors').upsert(
+      { user_id: USER_ID, month_key: monthK, ...a, updated_at: new Date().toISOString() },
+      { onConflict: 'user_id,month_key,key' }
+    )
+  }
+}
+
 async function snap(label: string) {
   const s = db()
   const [us,mo,lo,ca,go,ex,ie] = await Promise.all([
@@ -87,7 +117,7 @@ export async function getContext(): Promise<string> {
     supabase.from('bot_corrections').select('correction,category,created_at').eq('user_id',USER_ID).order('created_at',{ascending:false}).limit(10),
     supabase.from('ru_holidays').select('holiday_date').gte('holiday_date',`${now.getFullYear()}-${String(curMonth).padStart(2,'0')}-01`).lte('holiday_date',`${now.getFullYear()}-${String(curMonth).padStart(2,'0')}-31`),
     supabase.from('expenses').select('amount,category').eq('user_id', USER_ID).eq('month_key', prevMK),
-    supabase.from('bot_anchors').select('month_key,key,value,formula').eq('user_id',USER_ID).in('month_key',[monthKey,nextMonthKey,'global']).order('month_key'),
+    supabase.from('bot_anchors').select('month_key,key,value,formula').eq('user_id',USER_ID).in('month_key',[monthKey,nextMonthKey,'global','broker']).order('month_key'),
   ])
   if (!user) return 'Данные не загружены'
 
@@ -127,15 +157,25 @@ export async function getContext(): Promise<string> {
   }
   const anchorSection = buildAnchorSection()
 
-  // Брокерский портфель из якорей (broker_* ключи глобальные)
-  const brokerAnchorRows = Object.values(anchorMap['global'] ?? {}).filter(a => a.key.startsWith('broker_'))
+  // Брокерский портфель из якорей (month_key='broker') или глобальных broker_*
+  const brokerRows = Object.values(anchorMap['broker'] ?? {})
+  const brokerAnchorRows = brokerRows.length
+    ? brokerRows
+    : Object.values(anchorMap['global'] ?? {}).filter(a => a.key.startsWith('broker_'))
   const brokerSection = brokerAnchorRows.length
-    ? `\n📈 БРОКЕРСКИЙ ПОРТФЕЛЬ:\n${brokerAnchorRows.map(a => `  ${a.key}: ${a.value}${a.formula ? ` (${a.formula})` : ''}`).join('\n')}\n`
+    ? (() => {
+        const portfolio = brokerRows.find(a => a.key === 'portfolio_value')?.value
+          ?? brokerAnchorRows.find(a => a.key.includes('portfolio'))?.value
+          ?? '5 302 682'
+        return `\n🏦 БРОКЕР: портфель ${portfolio}₽ | вернуть 5 500 000₽ к 01.10.2026 | 31 июля → 177 000₽ флоатеры\n`
+      })()
     : ''
 
   const debitSber = Number(user.debit_balance ?? 0)
   const debitTbank = Number(user.tbank_debit ?? 0)
   const liquid = debitSber + debitTbank
+  const totalCardDebt = (cards ?? []).reduce((s, c) => s + Number(c.current_debt), 0)
+  const netPosition = liquid - totalCardDebt
 
   const salaryNet = Number(user.salary_net ?? 121600)
   const advAmount = Number(month?.salary_adv_amount ?? Math.round(salaryNet/2))
@@ -257,7 +297,12 @@ export async function getContext(): Promise<string> {
   const nextProjEnd = Math.round(projEnd + nextIncoming - totalMonthlyPayment - fixedTotal - varBudget)
 
   const recentLines = (recentExp ?? []).map(e => `  • ${e.expense_date} ${e.category}: ${rub(Number(e.amount))}${e.description?' — '+e.description:''}`).join('\n') || '  (нет)'
-  const fixedLines = fixedCosts.map((f,i) => `  • ${f.name}${f.day?` (${f.day} числа)`:''}: ${rub(f.amount)} ${fixedPaid[String(i)] ? '✅ оплачено' : '⏳'}`).join('\n')
+  const fixedLines = (fixedCosts as {name:string;amount:number;day?:number;source?:string}[]).map((f,i) => {
+    const paid = fixedPaid[String(i)] !== undefined
+    const dayStr = f.day ? ` (${f.day}-го)` : ''
+    const srcStr = f.source === 'credit_tbank' ? ' 💳Т' : ' 🏦'
+    return `  ${paid?'✅':'⏳'} ${f.name}${dayStr}${srcStr}: ${rub(f.amount)}`
+  }).join('\n')
   const goalLines = (goals ?? []).map(g => `  • ${g.name}: ${rub(Number(g.amount))} ${g.month_key ? '('+g.month_key+')' : '(накопление)'}`).join('\n') || '  (нет)'
   const loanLines = (loans ?? []).map(l => {
     const total = Number(l.principal) + Number(l.accrued_int)
@@ -337,9 +382,11 @@ export async function getContext(): Promise<string> {
   Дебет Сбер: ${rub(debitSber)}
   Т-Банк дебет: ${rub(debitTbank)}
   ЛИКВИДНОСТЬ ИТОГО: ${rub(liquid)}
+  Чистая позиция: ${rub(liquid)} − ${rub(totalCardDebt)} долг по картам = ${rub(netPosition)}
 
-КРЕДИТНЫЕ КАРТЫ:
+💳 КРЕДИТНЫЕ КАРТЫ (ПАССИВЫ):
 ${cardLines}
+  ⚠️ Кредитные карты ≠ дебет. Расходы с карты = долг (пассив).
 
 ПЕРЕМЕННЫЕ ТРАТЫ:
   Лимит: ${rub(varBudget)} (выставлен пользователем вручную)
@@ -634,15 +681,38 @@ Netflix, Spotify, Apple Music → постоянная "Подписки"
 
 Категории трат: Еда и кафе, Транспорт, Здоровье, Развлечения, Одежда, Инвестиции, Обучение и ИИ, Прочее
 
+AI-КАТЕГОРИЗАЦИЯ ТРАТ:
+При добавлении траты без явной категории — используй словарь ключевых слов:
+• Еда и кафе: кафе, ресторан, суши, пицца, бургер, кофе, завтрак, обед, ужин, продукты
+• Транспорт: такси, метро, автобус, uber, каршеринг, электричка
+• Развлечения: кино, театр, концерт, клуб, билет, игры
+• Здоровье: аптека, лекарства, врач, клиника, витамины
+• Одежда: одежда, куртка, кроссовки, футболка, штаны
+Если слово из словаря в описании → применяй без вопроса (высокая уверенность).
+Если похожее слово → уточни: "Отнести к [категория]?"
+Если не нашёл → 'Прочее' + вызови learn_mapping для записи.
+
 ОТВЕТ НА "ПОЛНЫЙ БЮДЖЕТ" — ОБЯЗАТЕЛЬНАЯ СТРУКТУРА:
-Когда спрашивают полный бюджет/все цифры — ВСЕГДА включай ВСЕ разделы:
-1. 💰 Ликвидность (дебет Сбер + Т-Банк)
-2. 💳 Кредитные карты (лимиты и долги) — НЕ ЗАБЫВАЙ
-3. 📥 Входы с точными датами (стипендия 11-го, аванс, зп+бонус)
-4. 📤 Выходы (кредиты, постоянные, переменные)
-5. 🎯 Плановые покупки месяца — НЕ ЗАБЫВАЙ (из раздела ПЛАНОВЫЕ ПОКУПКИ)
-6. 🏁 Прогноз остатка + остаток ПОСЛЕ плановых покупок
-7. Формула расчёта одной строкой
+На запросы 'полный бюджет', 'бюджет месяца', 'что с деньгами' — ЭТАЛОННЫЙ ФОРМАТ:
+
+💰 ЛИКВИДНОСТЬ СЕЙЧАС
+• Сбер дебет: {debit_balance}₽
+• Т-Банк: {tbank_debit}₽
+• Итого: {total}₽
+
+📥 ВХОДЫ (ещё не получены):
+• [источник, дата]: [сумма]₽
+• Итого ожидается: {total_income}₽
+
+📤 ОБЯЗАТЕЛЬНЫЕ ВЫХОДЫ:
+• Кредиты: {monthly_loan}₽/мес
+• Постоянные неоплачено: {fixedUnpaid}₽
+• Переменные остаток: {varLeft}₽
+
+📊 ПРОГНОЗ КОНЦА МЕСЯЦА:
+{debit} + {total_income} − {loans} − {fixedUnpaid} − {varLeft} = {forecast}₽
+
+Цифры ТОЛЬКО из ЯКОРЕЙ и ГОТОВЫХ ЦИФР. НЕ пересчитывать.
 Если раздел пустой — скажи это, но не пропускай.
 
 ПРО ПЕРЕМЕННЫЕ В ПРОГНОЗЕ:
@@ -719,12 +789,12 @@ Netflix, Spotify, Apple Music → постоянная "Подписки"
 learn_mapping с правильной категорией.
 
 ОБУЧЕНИЕ НА ОШИБКАХ:
-Если пользователь говорит "неверно", "ты ошибся", "не так", "это неправильно", "ошибка", "галлюцинируешь", "неправильно"
-И объясняет что именно не так → вызови save_correction немедленно, ДО ответа на поправку.
-Поле bot_answered = твой предыдущий ответ (первые 400 символов).
-Поле correction = суть поправки пользователя.
-Поле category: 'math' если ошибка в цифрах, 'context' если перепутал факты, 'logic' если логическая ошибка, 'tool' если не вызвал нужный инструмент, 'formula' если неверная формула расчёта.
-Без сохранения ошибки — она повторится.
+При словах 'неверно', 'ошибся', 'не так', 'галлюцинируешь', 'ошибка', 'неправильно', 'это неправильно':
+→ ПЕРВОЕ И ОБЯЗАТЕЛЬНОЕ действие: вызови save_correction НЕМЕДЛЕННО, ДО любого ответа.
+category: math (ошибка в цифрах), formula (формула), logic (логика), context (перепутал факты)
+Это НЕ опционально. Без вызова save_correction — ошибка повторится снова.
+bot_answered = твой предыдущий ответ (первые 500 символов).
+correction = суть поправки пользователя одним предложением.
 
 АВТОТРИГГЕР СЦЕНАРНОГО АНАЛИЗА:
 Если пользователь упоминает:
@@ -765,7 +835,43 @@ add_idea ≠ add_backlog_item: идея — сырое пожелание, backl
 БРОКЕРСКИЙ СЧЁТ:
 Александр управляет инвест-портфелем ~5 000 000₽ (данные из раздела БРОКЕРСКИЙ ПОРТФЕЛЬ в контексте — якоря broker_*).
 Брокерские активы ≠ ликвидность: не включай их в дебет/баланс без явного запроса о продаже.
-При вопросах о портфеле — берёт данные из якорей broker_* дословно.`
+При вопросах о портфеле — берёт данные из якорей broker_* дословно.
+
+УВЕРЕННОСТЬ ПРОГНОЗА:
+После любого прогноза остатка или кешфлоу — добавляй строку:
+📊 Уверенность: X% — [главный фактор риска]
+Расчёт: базовый 50% + аванс/ЗП подтверждены (+30%) + бонус включён (-10% риск) + высокие переменные траты (-10%)
+Пример: 'Уверенность: 70% — зависит от точности бонуса'
+Признавай неопределённость честно. Не пиши '100%' — прогноз всегда примерный.
+
+ТЫ ПАРТНЁР, НЕ КАЛЬКУЛЯТОР:
+• Когда пользователь называет цифру не совпадающую с данными →
+  НЕ говори 'вы ошиблись'. Говори: 'По моим данным X, у тебя Y —
+  это могут быть актуальные данные которых у меня нет. Хочешь обновить?'
+• Если пользователь настаивает → доверяй пользователю, обновляй данные
+• Объясняй расчёты когда спрашивают, но не навязывай формулы
+• На вопрос 'почему такая цифра' → показывай пошаговый расчёт
+• Признавай неопределённость: 'Прогноз примерный, зависит от...'
+
+СТИЛЬ — ЖИВОЙ ПАРТНЁР, НЕ РОБОТ:
+• 'Ок, записал 👍' вместо 'Операция выполнена успешно'
+• Краткость прежде всего. Одна строка где возможно.
+• Признавай неопределённость: '~Xk, могу ошибиться'
+
+ПРАВИЛО КРАТКОСТИ:
+• Трата → 1 строка: ✅ [что] [сумма] | [счёт]: [до]→[после]
+• Баланс → только цифры
+• Кредиты → только кредиты
+• Брокер → только если спрашивают про брокер/АТОН/портфель
+• ПОЛНЫЙ ОТВЕТ только при: 'полный бюджет' / 'полная картина' / 'покажи всё' / 'детально'
+
+ДЕБЕТ vs КРЕДИТНАЯ КАРТА:
+• Дебет Сбер = свои деньги → используй add_expense (не трогает кредитки)
+• Кредитная карта = займ у банка → mark_card_payment
+  - Расходы с кредитки НЕ уменьшают dебет
+  - Долг по карте = пассив, растёт при каждой трате
+• Если пользователь не уточнил источник → спроси: 'С дебета или кредитки?'
+• ЖКХ и Общежитие → всегда с Т-Банк кредитной`
 
 export interface BotAction {
   type: string
@@ -781,6 +887,8 @@ export interface BotAction {
   title?: string; priority?: number; adv_amount?: number; eom_amount?: number; bonus_amount?: number
   // Sprint 9
   formula?: string
+  // Sprint 17
+  actual_amount?: number
 }
 
 // ── НАДЁЖНЫЙ ПАРСЕР ACTION ─────────────────────────────────────────────────
@@ -863,6 +971,27 @@ export async function executeAction(action: BotAction): Promise<void> {
   if (action.type === 'add_expense') {
     action.description = sanitizeStr(action.description)
     if (action.category && !VALID_CATEGORIES.includes(action.category)) action.category = 'Прочее'
+    // AI-категоризация: fallback если категория не указана или Прочее
+    if ((!action.category || action.category === 'Прочее') && action.description) {
+      const desc = action.description.toLowerCase()
+      // Check bot_learnings first
+      const { data: mapping } = await s.from('bot_learnings').select('category').eq('user_id', USER_ID).limit(50)
+      const matched = (mapping ?? []).find(m => desc.includes(String(m.category ?? '').toLowerCase()) || desc.includes((m as {trigger?:string}).trigger?.toLowerCase() ?? '~~~~'))
+      if (matched?.category && VALID_CATEGORIES.includes(String(matched.category))) {
+        action.category = String(matched.category)
+      } else {
+        const guesses: [string, string[]][] = [
+          ['Еда и кафе', ['кафе','ресторан','еда','суши','пицца','бургер','кофе','чай','завтрак','обед','ужин','продукт','магазин','перекус']],
+          ['Транспорт', ['такси','метро','автобус','uber','каршеринг','электричк','маршрутк']],
+          ['Развлечения', ['кино','театр','концерт','клуб','билет','игр','кино']],
+          ['Здоровье', ['аптек','лекарств','врач','клиник','витамин','медицин']],
+          ['Одежда', ['одежда','штан','рубашк','куртк','обувь','кроссовк','футболк']],
+        ]
+        for (const [cat, kws] of guesses) {
+          if (kws.some(kw => desc.includes(kw))) { action.category = cat; break }
+        }
+      }
+    }
   }
   if (action.type === 'add_client' && action.grade && !VALID_GRADES.includes(action.grade)) return
   if (action.type === 'update_settings') {
@@ -933,6 +1062,11 @@ export async function executeAction(action: BotAction): Promise<void> {
       await s.from('months').update({salary_adv_received:true,salary_adv_amount:advAmt}).eq('user_id',USER_ID).eq('month_key',monthKey)
       await s.from('users').update({debit_balance:newBal,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
       await recordDebitChange(s, prevBal, newBal, `Аванс`, 'salary')
+      await s.from('salary_actuals').insert({
+        user_id: USER_ID, payment_type: 'advance',
+        expected_amount: advAmt, actual_amount: advAmt,
+        payment_date: new Date().toISOString().split('T')[0], deviation: 0,
+      }).then(() => {})
     }
     if (action.part === 'eom') {
       const advAmt = Number(month?.salary_adv_amount??Math.round(net/2))
@@ -944,6 +1078,11 @@ export async function executeAction(action: BotAction): Promise<void> {
       await s.from('months').update({salary_eom_received:true,salary_eom_amount:eomSalary}).eq('user_id',USER_ID).eq('month_key',monthKey)
       await s.from('users').update({debit_balance:newBal,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
       await recordDebitChange(s, prevBal, newBal, `ЗП + бонус`, 'salary')
+      await s.from('salary_actuals').insert({
+        user_id: USER_ID, payment_type: 'eom',
+        expected_amount: total, actual_amount: total,
+        payment_date: new Date().toISOString().split('T')[0], deviation: 0,
+      }).then(() => {})
       // Update YTD gross
       const { data: u3 } = await s.from('users').select('salary_gross,ytd_gross').eq('id', USER_ID).single()
       const newYtd = Number(u3?.ytd_gross ?? 0) + Number(u3?.salary_gross ?? 0)
@@ -962,9 +1101,13 @@ export async function executeAction(action: BotAction): Promise<void> {
         const amount = action.amount ?? fc[idx].amount
         const prevBal = Number(u?.debit_balance??0)
         const newBal = Math.round((prevBal - amount)*100)/100
-        await s.from('months').update({fixed_paid:{...fp,[String(idx)]:amount}}).eq('user_id',USER_ID).eq('month_key',monthKey)
+        const newFp = {...fp,[String(idx)]:amount}
+        await s.from('months').update({fixed_paid:newFp}).eq('user_id',USER_ID).eq('month_key',monthKey)
         await s.from('users').update({debit_balance:newBal,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
         await recordDebitChange(s, prevBal, newBal, `Постоянная: ${fc[idx].name}`, 'fixed')
+        const totalFixed = fc.reduce((sum,f)=>sum+Number(f.amount),0)
+        const paidBudget = Object.keys(newFp).reduce((sum,i)=>sum+(fc[Number(i)]?Number(fc[Number(i)].amount):0),0)
+        await s.from('bot_anchors').upsert({user_id:USER_ID,month_key:monthKey,key:'fixed_unpaid',value:String(totalFixed-paidBudget),formula:`${totalFixed}-${paidBudget}`,updated_at:new Date().toISOString()},{onConflict:'user_id,month_key,key'})
       }
     }
   }
@@ -983,6 +1126,29 @@ export async function executeAction(action: BotAction): Promise<void> {
       await s.from('months').update({fixed_paid:{...fp,...newFp}}).eq('user_id',USER_ID).eq('month_key',monthKey)
       await s.from('users').update({debit_balance:newBal,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
       await recordDebitChange(s, prevBal, newBal, `Все постоянные`, 'fixed')
+    }
+  }
+
+  if (action.type === 'mark_fixed_paid_with_amount' && action.name) {
+    const { data:u } = await s.from('users').select('debit_balance,fixed_costs').eq('id',USER_ID).single()
+    const { data:month } = await s.from('months').select('fixed_paid').eq('user_id',USER_ID).eq('month_key',monthKey).maybeSingle()
+    const fc = (u?.fixed_costs as {name:string;amount:number}[]) ?? []
+    const idx = fc.findIndex(f => f.name.toLowerCase().includes((action.name??'').toLowerCase()))
+    if (idx >= 0) {
+      const fp = (month?.fixed_paid as Record<string,number|boolean>) ?? {}
+      if (!fp[String(idx)]) {
+        const plannedAmount = fc[idx].amount
+        const actualAmount = action.actual_amount ?? plannedAmount
+        const prevBal = Number(u?.debit_balance??0)
+        const newBal = Math.round((prevBal - actualAmount)*100)/100
+        const newFp2 = {...fp,[String(idx)]:actualAmount}
+        await s.from('months').update({fixed_paid:newFp2}).eq('user_id',USER_ID).eq('month_key',monthKey)
+        await s.from('users').update({debit_balance:newBal,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
+        await recordDebitChange(s, prevBal, newBal, `Постоянная: ${fc[idx].name} (план ${plannedAmount}₽, факт ${actualAmount}₽)`, 'fixed')
+        const totalFixed2 = fc.reduce((sum,f)=>sum+Number(f.amount),0)
+        const paidBudget2 = Object.keys(newFp2).reduce((sum,i)=>sum+(fc[Number(i)]?Number(fc[Number(i)].amount):0),0)
+        await s.from('bot_anchors').upsert({user_id:USER_ID,month_key:monthKey,key:'fixed_unpaid',value:String(totalFixed2-paidBudget2),formula:`${totalFixed2}-${paidBudget2}`,updated_at:new Date().toISOString()},{onConflict:'user_id,month_key,key'})
+      }
     }
   }
 
@@ -1014,6 +1180,22 @@ export async function executeAction(action: BotAction): Promise<void> {
       await s.from('users').update({debit_balance:newBal,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
       await recordDebitChange(s, prevBal, newBal, `Досрочное: ${loan.name}`, 'loan')
     }
+  }
+
+  if (action.type === 'mark_card_payment' && action.name && action.amount) {
+    const { data: card } = await s.from('cards').select('id,current_debt').eq('user_id', USER_ID).ilike('name', `%${action.name}%`).maybeSingle()
+    if (card) {
+      await s.from('cards').update({ current_debt: Number(card.current_debt ?? 0) + action.amount }).eq('id', card.id)
+    }
+    await s.from('expenses').insert({
+      user_id: USER_ID, month_key: monthKey,
+      expense_date: new Date().toISOString().split('T')[0],
+      category: action.category ?? 'Прочее',
+      description: action.description ?? `Кредитная карта: ${action.name}`,
+      amount: Math.round(action.amount),
+      source_type: 'card',
+    })
+    // debit_balance НЕ изменяется — карта это пассив
   }
 
   if (action.type === 'add_income_event' && action.amount) {
@@ -1068,6 +1250,7 @@ export async function executeAction(action: BotAction): Promise<void> {
     const fc = (u?.fixed_costs as {name:string;amount:number}[]) ?? []
     fc.push({name:action.name, amount:Math.round(action.amount)})
     await s.from('users').update({fixed_costs:fc}).eq('id',USER_ID)
+    await updateAnchors(s)
   }
 
   if (action.type === 'remove_fixed_cost' && action.name) {
@@ -1075,6 +1258,7 @@ export async function executeAction(action: BotAction): Promise<void> {
     const fc = (u?.fixed_costs as {name:string;amount:number}[]) ?? []
     const filtered = fc.filter(f => !f.name.toLowerCase().includes((action.name??'').toLowerCase()))
     await s.from('users').update({fixed_costs:filtered}).eq('id',USER_ID)
+    await updateAnchors(s)
   }
 
   if (action.type === 'edit_fixed_cost' && action.name) {
@@ -1085,6 +1269,7 @@ export async function executeAction(action: BotAction): Promise<void> {
       if (action.new_name) fc[idx].name = action.new_name
       if (action.amount) fc[idx].amount = Math.round(action.amount)
       await s.from('users').update({fixed_costs:fc}).eq('id',USER_ID)
+      await updateAnchors(s)
     }
   }
 
@@ -1096,7 +1281,10 @@ export async function executeAction(action: BotAction): Promise<void> {
       if (action.rate != null) upd.rate = action.rate
       if (action.min_payment != null) upd.min_payment = Math.round(action.min_payment)
       if (action.end_date) upd.end_date = action.end_date
-      if (Object.keys(upd).length) await s.from('loans').update(upd).eq('id', loan.id)
+      if (Object.keys(upd).length) {
+        await s.from('loans').update(upd).eq('id', loan.id)
+        await updateAnchors(s)
+      }
     }
   }
 
@@ -1194,7 +1382,7 @@ export async function executeAction(action: BotAction): Promise<void> {
   }
 
   if (action.type === 'save_correction' && action.correction) {
-    // Читаем последние сообщения из истории чата для контекста
+    console.log('[save_correction] called:', action.correction?.slice(0, 50))
     const { data: recentMsgs } = await s.from('bot_messages').select('role,content,created_at').eq('user_id', USER_ID).order('created_at', {ascending: false}).limit(4)
     const msgs = (recentMsgs ?? []).reverse()
     const lastUser = msgs.filter(m => m.role === 'user').pop()
@@ -1303,6 +1491,8 @@ export const TOOLS = [
     input_schema:{type:'object',properties:{name:{type:'string'},amount:{type:'number'}},required:['name']} },
   { name:'mark_fixed_paid', description:'Отметить оплату ВСЕХ неоплаченных постоянных трат разом.',
     input_schema:{type:'object',properties:{}} },
+  { name:'mark_fixed_paid_with_amount', description:'Отметить оплату постоянной траты с указанием ФАКТИЧЕСКОЙ суммы (если отличается от плановой). Используй вместо mark_single_fixed когда пользователь говорит "заплатил X за Y" и X ≠ плановой сумме.',
+    input_schema:{type:'object',properties:{name:{type:'string'},actual_amount:{type:'number',description:'Фактически уплаченная сумма'}},required:['name','actual_amount']} },
   { name:'mark_loan_paid', description:'Отметить оплату ежемесячного платежа по кредиту (по названию).',
     input_schema:{type:'object',properties:{name:{type:'string'}},required:['name']} },
   { name:'early_repay', description:'Досрочное погашение кредита: уменьшить тело на сумму, пересчитать платёж.',
@@ -1455,6 +1645,23 @@ export const TOOLS = [
   { name: 'days_until_advance',
     description: 'Рассчитать сколько дней осталось до ближайшего аванса (15 числа). Вызывай на: "когда аванс", "сколько дней до аванса", "дней до 15", "когда придут деньги", "успею до аванса".',
     input_schema: { type: 'object', properties: {} } },
+  { name: 'check_salary_pattern',
+    description: 'Показать историю реальных выплат (аванс/ЗП) и средние суммы. Вызывай на: "когда обычно приходит ЗП", "сколько в среднем аванс", "история выплат", "паттерн зарплаты".',
+    input_schema: { type: 'object', properties: {} } },
+  { name: 'mark_card_payment',
+    description: 'Записать оплату с кредитной карты (Т-Банк кредитная, Сбер кредитка, Яндекс Сплит). Вызывай когда пользователь говорит "оплатил с кредитки", "с карты Т-Банк", "Яндекс Сплитом". НЕ уменьшает debit_balance.',
+    input_schema: { type: 'object', properties: {
+      name: { type: 'string', description: 'Т-Банк кредитная | Сбер кредитка | Яндекс Сплит' },
+      amount: { type: 'number' },
+      category: { type: 'string' },
+      description: { type: 'string' },
+    }, required: ['name', 'amount'] } },
+  { name: 'validate_context',
+    description: 'Проверить актуальность данных. Вызывай при: "всё верно?", "проверь данные", "расхождение в цифрах".',
+    input_schema: { type: 'object', properties: {} } },
+  { name: 'forecast_after_advance',
+    description: 'Прогноз после получения аванса 15-го и оплаты всех постоянных. Вызывай при: "сколько останется после аванса", "что будет с деньгами после 15-го", "прогноз до зарплаты".',
+    input_schema: { type: 'object', properties: {} } },
 ]
 
 interface ContentBlock { type:string; text?:string; id?:string; name?:string; input?:Record<string,unknown> }
@@ -1555,12 +1762,69 @@ async function handleTool(name: string, input: Record<string,unknown>): Promise<
     return JSON.stringify({ current: { monthKey: curMK, byCategory: group(cur) }, previous: { monthKey: prevMK, byCategory: group(prev) } })
   }
   if (name === 'list_backlog') {
-    const status = String(input.status ?? 'pending')
-    let q = db().from('bot_backlog').select('title,description,priority,status,created_at').eq('user_id', USER_ID).order('priority', { ascending: true }).limit(20)
-    if (status !== 'all') q = q.eq('status', status)
-    const { data: items } = await q
+    const { data: items } = await db().from('bot_backlog').select('title,description,priority,status,created_at').eq('user_id', USER_ID).eq('status', 'pending').order('priority', { ascending: true }).limit(20)
     return JSON.stringify(items ?? [])
   }
+  if (name === 'validate_context') {
+    const s = db()
+    const mk2 = mk()
+    const [{ data: u }, { data: m }, { data: anchors2 }] = await Promise.all([
+      s.from('users').select('fixed_costs,salary_net').eq('id', USER_ID).single(),
+      s.from('months').select('fixed_paid').eq('user_id', USER_ID).eq('month_key', mk2).maybeSingle(),
+      s.from('bot_anchors').select('key,value').eq('user_id', USER_ID).eq('month_key', mk2).in('key', ['fixed_total', 'fixed_unpaid', 'working_days']),
+    ])
+    const fc = (u?.fixed_costs as {name:string;amount:number}[]) ?? []
+    const fp = (m?.fixed_paid as Record<string,number|boolean>) ?? {}
+    const realFixedTotal = fc.reduce((s,f) => s+Number(f.amount), 0)
+    const realPaid = Object.keys(fp).reduce((s,i) => s+(fc[Number(i)]?Number(fc[Number(i)].amount):0), 0)
+    const realUnpaid = realFixedTotal - realPaid
+    const anchorMap2 = Object.fromEntries((anchors2 ?? []).map(a => [a.key, a.value]))
+    const issues: string[] = []
+    if (anchorMap2['fixed_total'] && Math.abs(Number(anchorMap2['fixed_total']) - realFixedTotal) > 10)
+      issues.push(`fixed_total: якорь ${anchorMap2['fixed_total']}₽ ≠ факт ${realFixedTotal}₽`)
+    if (anchorMap2['fixed_unpaid'] && Math.abs(Number(anchorMap2['fixed_unpaid']) - realUnpaid) > 10)
+      issues.push(`fixed_unpaid: якорь ${anchorMap2['fixed_unpaid']}₽ ≠ факт ${realUnpaid}₽`)
+    return issues.length ? `⚠️ Расхождения:\n${issues.join('\n')}` : '✅ Все данные актуальны'
+  }
+
+  if (name === 'forecast_after_advance') {
+    const s = db()
+    const mk2 = mk()
+    const [{ data: u }, { data: m }, { data: anchors2 }, { data: exps }] = await Promise.all([
+      s.from('users').select('debit_balance,tbank_debit,salary_net,var_budget').eq('id', USER_ID).single(),
+      s.from('months').select('salary_adv_amount,fixed_paid').eq('user_id', USER_ID).eq('month_key', mk2).maybeSingle(),
+      s.from('bot_anchors').select('key,value').eq('user_id', USER_ID).eq('month_key', mk2).eq('key', 'fixed_unpaid'),
+      s.from('expenses').select('amount').eq('user_id', USER_ID).eq('month_key', mk2),
+    ])
+    const debit = Number(u?.debit_balance ?? 0) + Number(u?.tbank_debit ?? 0)
+    const net = Number(u?.salary_net ?? 121600)
+    const advance = Number(m?.salary_adv_amount ?? Math.round(net / 2))
+    const anchorUnpaid = anchors2?.find(a => a.key === 'fixed_unpaid')?.value
+    const fc = [] as {amount:number}[]
+    const fp = (m?.fixed_paid as Record<string,number|boolean>) ?? {}
+    const realUnpaid = anchorUnpaid ? Number(anchorUnpaid) : 0
+    const varSpent = (exps ?? []).reduce((s,e) => s+Number(e.amount), 0)
+    const varLeft = Math.max(0, Number(u?.var_budget ?? 40000) - varSpent)
+    const afterAdvance = debit + advance
+    const afterFixed = afterAdvance - realUnpaid
+    const rub2 = (n: number) => Math.round(n).toLocaleString('ru-RU') + '₽'
+    return `⏳ После аванса ${rub2(advance)} (15-го):\nДебет: ${rub2(debit)} → ${rub2(afterAdvance)}\nМинус постоянные неопл.: −${rub2(realUnpaid)} → ${rub2(afterFixed)}\nПеременные ещё доступно: ${rub2(varLeft)}`
+  }
+
+  if (name === 'check_salary_pattern') {
+    const { data } = await db().from('salary_actuals')
+      .select('payment_type,expected_amount,actual_amount,payment_date,deviation,notes')
+      .eq('user_id', USER_ID)
+      .order('payment_date', { ascending: false })
+      .limit(12)
+    if (!data?.length) return JSON.stringify({ message: 'Нет данных об историии выплат' })
+    const advances = data.filter(r => r.payment_type === 'advance')
+    const eoms = data.filter(r => r.payment_type === 'eom')
+    const avgAdv = advances.length ? Math.round(advances.reduce((s,r)=>s+Number(r.actual_amount),0)/advances.length) : null
+    const avgEom = eoms.length ? Math.round(eoms.reduce((s,r)=>s+Number(r.actual_amount),0)/eoms.length) : null
+    return JSON.stringify({ records: data, avgAdvance: avgAdv, avgEom, count: data.length })
+  }
+
   if (name === 'days_until_advance') {
     const now = new Date()
     const today = now.getDate()
@@ -1706,7 +1970,7 @@ export async function generateMorningBriefing(isWeekly = false): Promise<string>
   const today = new Date()
   const dateFmt = today.toLocaleDateString('ru-RU',{weekday:'long',day:'numeric',month:'long'})
   const prompt = isWeekly
-    ? `Еженедельный отчёт (воскресенье, ${dateFmt}). Структура: итоги недели, баланс + дневной бюджет, ближайшие платежи следующей недели, прогноз бонуса, что улучшить. КРАТКО, не более 1500 символов, вертикальные списки.`
+    ? `Воскресный недельный дайджест (${dateFmt}). Составь отчёт из СТРОГО 5 секций:\n1. НЕДЕЛЯ — сколько потрачено за последние 7 дней (возьми из трат), топ-1 самая крупная трата\n2. БЮДЖЕТ — сколько осталось от переменных, дневной лимит до конца месяца\n3. ВРЕДНЫЕ — сумма по вредным категориям с % от лимита (только если есть)\n4. ПЛАТЕЖИ — ближайшие кредиты/постоянные на следующей неделе\n5. 💡 СОВЕТ — одна конкретная рекомендация и мотивационная строка\nОТВЕЧАЙ кратко, вертикальными списками, без таблиц, не более 1200 символов.`
     : `Утренний дайджест (${dateFmt}). Баланс, дневной бюджет, ближайшие платежи, прогресс переменных. 8-10 строк, без таблиц.`
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method:'POST',

@@ -2,6 +2,19 @@
 
 Этот файл читается ПЕРВЫМ в каждой сессии Claude Code. Он описывает проект, архитектуру и рабочий процесс.
 
+## ПАМЯТЬ (agentmemory)
+Перед началом работы убедись что agentmemory запущен:
+  npx @agentmemory/agentmemory
+
+Если запущен — используй инструменты памяти:
+  - Перед спринтом: memory_smart_search "finance-cockpit sprint history decisions"
+  - После спринта: автоматически сохраняются через хуки
+  - Используй воспоминания о прошлых ошибках чтобы не повторять
+
+Установка (одноразово на Mac):
+  npm install -g @agentmemory/agentmemory
+  agentmemory connect claude-code
+
 ## Что это за проект
 
 **Finance Cockpit** — персональная финансовая система Александра (продажи в АТОН, инвест-продукты).

@@ -11,6 +11,11 @@ export default function LoanRow({ loan }: { loan: Loan }) {
   const total = Number(loan.principal) + Number(loan.accrued_int)
   const payoffPct = Math.round(((Number(loan.original_amt) - Number(loan.principal)) / Number(loan.original_amt)) * 100)
 
+  // Annuity payment split — rate годовая, делим на 12 для месячной (иначе % > платежа → тело уходит в минус)
+  const monthlyRate = Number(loan.rate) / 12
+  const interestPart = Math.round(Number(loan.principal) * monthlyRate)
+  const principalPart = Math.max(0, Number(loan.min_payment) - interestPart) // для аннуитета всегда > 0
+
   // Months remaining and payoff date from end_date
   const monthsLeft = (() => {
     if (!loan.end_date) return null
@@ -63,6 +68,9 @@ export default function LoanRow({ loan }: { loan: Loan }) {
         <div className="text-right flex-shrink-0">
           <div className="text-xs font-semibold" style={{ fontFamily: 'JetBrains Mono, monospace', whiteSpace: 'nowrap' }}>{rub(total)}</div>
           <div className="label" style={{ whiteSpace: 'nowrap' }}>платёж {rub(Number(loan.min_payment))}</div>
+          {Number(loan.principal) > 0 && (
+            <div className="label" style={{ whiteSpace: 'nowrap' }}>тело {rub(principalPart)} · % {rub(interestPart)}</div>
+          )}
         </div>
       </div>
 
