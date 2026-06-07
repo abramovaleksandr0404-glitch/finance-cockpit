@@ -22,6 +22,62 @@ jobs:
           git config user.name "Claude Runner"
           git config user.email "runner@anthropic.com"
 
+      - name: Write Supabase helper
+        run: |
+          cat > /tmp/supabase_helper.py << 'PYEOF'
+import urllib.request, urllib.error, json, sys, os
+
+SUPABASE_URL = os.environ.get('SUPABASE_URL', '')
+SUPABASE_KEY = os.environ.get('SUPABASE_KEY', '')
+
+def sb_get(path):
+    req = urllib.request.Request(SUPABASE_URL + path)
+    req.add_header('apikey', SUPABASE_KEY)
+    req.add_header('Authorization', 'Bearer ' + SUPABASE_KEY)
+    req.add_header('Content-Type', 'application/json')
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.read().decode()
+    except Exception as e:
+        print(f'[supabase_get error] {e}', file=sys.stderr)
+        return '[]'
+
+def sb_patch(path, data):
+    body = json.dumps(data).encode()
+    req = urllib.request.Request(SUPABASE_URL + path, data=body, method='PATCH')
+    req.add_header('apikey', SUPABASE_KEY)
+    req.add_header('Authorization', 'Bearer ' + SUPABASE_KEY)
+    req.add_header('Content-Type', 'application/json')
+    req.add_header('Prefer', 'return=minimal')
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return True
+    except Exception as e:
+        print(f'[supabase_patch error] {e}', file=sys.stderr)
+        return False
+
+cmd = sys.argv[1] if len(sys.argv) > 1 else ''
+
+if cmd == 'get_pending':
+    result = sb_get('/rest/v1/sprint_queue?status=eq.pending&order=priority.asc,sprint_number.asc&limit=1')
+    print(result)
+
+elif cmd == 'mark_inprogress':
+    task_id = sys.argv[2]
+    ok = sb_patch(f'/rest/v1/sprint_queue?id=eq.{task_id}', {'status': 'in_progress'})
+    print('ok' if ok else 'error')
+
+elif cmd == 'mark_done':
+    task_id = sys.argv[2]
+    ok = sb_patch(f'/rest/v1/sprint_queue?id=eq.{task_id}', {'status': 'done'})
+    print('ok' if ok else 'error')
+
+elif cmd == 'mark_failed':
+    task_id = sys.argv[2]
+    ok = sb_patch(f'/rest/v1/sprint_queue?id=eq.{task_id}', {'status': 'failed'})
+    print('ok' if ok else 'error')
+PYEOF
+
       - name: Run sprint loop
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -30,37 +86,29 @@ jobs:
         run: |
           while true; do
             echo "Checking for pending sprints..."
-            
-            RESULT=$(curl -sf --max-time 30 "${SUPABASE_URL}/rest/v1/sprint_queue?status=eq.pending&order=priority.asc,sprint_number.asc&limit=1" \
-              -H "apikey: ${SUPABASE_KEY}" \
-              -H "Authorization: Bearer ${SUPABASE_KEY}") || RESULT="[]"
-            
+
+            RESULT=$(python3 /tmp/supabase_helper.py get_pending)
             echo "Response: ${RESULT}"
-            
+
             COUNT=$(echo "$RESULT" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
-            
+
             if [ "$COUNT" -eq "0" ]; then
               echo "No pending sprints. Done."
               break
             fi
-            
+
             TASK_ID=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin)[0]['id'])")
             TASK_TITLE=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin)[0]['title'])")
             TASK_SPRINT=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin)[0]['sprint_number'])")
-            
+
             echo "Sprint #${TASK_SPRINT}: ${TASK_TITLE}"
-            
+
             echo "$RESULT" | python3 -c "import json,sys; d=json.load(sys.stdin)[0]; open('/tmp/task_prompt.txt','w').write(d['prompt']); open('/tmp/task_id.txt','w').write(d['id'])"
-            
-            curl -sf -X PATCH \
-              "${SUPABASE_URL}/rest/v1/sprint_queue?id=eq.${TASK_ID}" \
-              -H "apikey: ${SUPABASE_KEY}" \
-              -H "Authorization: Bearer ${SUPABASE_KEY}" \
-              -H "Content-Type: application/json" \
-              -d '{"status":"in_progress"}' > /dev/null
-            
+
+            python3 /tmp/supabase_helper.py mark_inprogress "${TASK_ID}"
+
             echo "Running Claude Code for Sprint #${TASK_SPRINT}..."
-            
+
             if claude --dangerously-skip-permissions --max-turns 80 < /tmp/task_prompt.txt; then
               BRANCH=$(git branch --show-current)
               if [ "$BRANCH" != "main" ]; then
@@ -68,27 +116,18 @@ jobs:
                 git merge "$BRANCH" --no-ff -m "Auto-merge: Sprint ${TASK_SPRINT}"
               fi
               git push origin main || true
-              
-              curl -sf -X PATCH \
-                "${SUPABASE_URL}/rest/v1/sprint_queue?id=eq.${TASK_ID}" \
-                -H "apikey: ${SUPABASE_KEY}" \
-                -H "Authorization: Bearer ${SUPABASE_KEY}" \
-                -H "Content-Type: application/json" \
-                -d '{"status":"done"}' > /dev/null
-              
+
+              python3 /tmp/supabase_helper.py mark_done "${TASK_ID}"
+
               sleep 15
               curl -sf "https://finance-cockpit-teal.vercel.app/api/telegram/setup" > /dev/null || true
               echo "Sprint #${TASK_SPRINT} deployed!"
               sleep 5
+
             else
-              curl -sf -X PATCH \
-                "${SUPABASE_URL}/rest/v1/sprint_queue?id=eq.${TASK_ID}" \
-                -H "apikey: ${SUPABASE_KEY}" \
-                -H "Authorization: Bearer ${SUPABASE_KEY}" \
-                -H "Content-Type: application/json" \
-                -d '{"status":"failed"}' > /dev/null
-              
+              python3 /tmp/supabase_helper.py mark_failed "${TASK_ID}"
               echo "Sprint #${TASK_SPRINT} failed. Stopping."
               exit 1
             fi
+
           done
