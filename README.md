@@ -75,3 +75,11 @@ npm run dev
 ```
 
 Open http://localhost:3000
+
+## Автономный деплой
+
+Система работает автоматически:
+- Спринты хранятся в Supabase (таблица sprint_queue)
+- GitHub Actions проверяет очередь каждые 4 часа
+- Claude Code выполняет задачи на ubuntu-latest
+- После деплоя приходит уведомление в Telegram
