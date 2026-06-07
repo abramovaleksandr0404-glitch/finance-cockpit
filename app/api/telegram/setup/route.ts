@@ -1,20 +1,4 @@
 import { NextResponse } from 'next/server'
-import { createClient } from '@supabase/supabase-js'
-import fs from 'fs'
-import path from 'path'
-
-const USER_ID = '5ebdb411-6021-4dfc-9d0d-caa8e0107502'
-const KEYBOARD_VERSION = '1.0'
-
-function getChangelogBlock(): string {
-  try {
-    const changelog = fs.readFileSync(path.join(process.cwd(), 'CHANGELOG.md'), 'utf8')
-    const blocks = changelog.match(/## \[Sprint \d+\][\s\S]*?(?=## \[Sprint \d+\]|$)/)
-    return blocks ? blocks[0].slice(0, 800) : ''
-  } catch {
-    return ''
-  }
-}
 
 export async function GET(req: Request) {
   const token = process.env.TELEGRAM_BOT_TOKEN
@@ -39,12 +23,30 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: 'setWebhook failed', detail: webhookData.description }, { status: 400 })
   }
 
-  // Экранируем спецсимволы Telegram Markdown (underscore в именах полей ломает парсер)
-  const escapeMd = (s: string) => s.replace(/[_*`[]/g, '\\$&')
-  const changelogBlock = getChangelogBlock()
-  const notifText = changelogBlock
-    ? `🚀 *Система обновлена*\n\n${escapeMd(changelogBlock)}`
-    : `🚀 *Система обновлена*\n\nБот готов к работе.`
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || ''
+  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY || ''
+  let sprintInfo = ''
+
+  try {
+    const res = await fetch(
+      `${supabaseUrl}/rest/v1/sprint_queue?status=eq.done&order=sprint_number.desc&limit=1&select=sprint_number,title`,
+      { headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` } }
+    )
+    const data = await res.json()
+    if (data?.[0]) {
+      sprintInfo = `Sprint ${data[0].sprint_number}: ${data[0].title}`
+    }
+  } catch {}
+
+  const notifText = sprintInfo
+    ? `Система обновлена
+
+Последний деплой: ${sprintInfo}
+
+Бот готов к работе.`
+    : `Система обновлена
+
+Бот готов к работе.`
 
   let notified = false
   let notifyError = ''
@@ -53,59 +55,37 @@ export async function GET(req: Request) {
     const msgRes = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, text: notifText, parse_mode: 'Markdown' }),
+      body: JSON.stringify({ chat_id: chatId, text: notifText }),
     })
     const msgData = await msgRes.json()
     if (msgData.ok) {
       notified = true
     } else {
       notifyError = msgData.description ?? 'Unknown error'
-      console.error('[setup] sendMessage failed:', msgData)
     }
   } catch (e) {
     notifyError = String(e)
-    console.error('[setup] exception:', e)
   }
 
   try {
-    const supabase = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.SUPABASE_SERVICE_ROLE_KEY!
-    )
-    const { data: versionRow } = await supabase
-      .from('bot_anchors')
-      .select('value')
-      .eq('user_id', USER_ID)
-      .eq('month_key', 'system')
-      .eq('key', 'keyboard_version')
-      .maybeSingle()
-
-    if (versionRow?.value !== KEYBOARD_VERSION) {
-      await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: chatId,
-          text: 'Кнопки обновлены',
-          reply_markup: {
-            keyboard: [
-              [{ text: '💰 Аванс' }, { text: '💵 Зарплата' }, { text: '🎯 Бонус' }],
-              [{ text: '📊 Бюджет месяца' }, { text: '💳 Кредиты' }, { text: '📉 Вредные' }],
-              [{ text: '💸 До аванса' }, { text: '⚡ Баланс' }, { text: '📋 Бэклог' }],
-            ],
-            resize_keyboard: true,
-            persistent: true,
-          },
-        }),
-      })
-      await supabase.from('bot_anchors').upsert({
-        user_id: USER_ID, month_key: 'system', key: 'keyboard_version',
-        value: KEYBOARD_VERSION, updated_at: new Date().toISOString(),
-      }, { onConflict: 'user_id,month_key,key' })
-    }
-  } catch (e) {
-    console.error('[setup] Keyboard setup failed:', e)
-  }
+    await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: 'Быстрые кнопки активированы',
+        reply_markup: {
+          keyboard: [
+            [{ text: '💰 Аванс' }, { text: '💵 Зарплата' }, { text: '🎯 Бонус' }],
+            [{ text: '📊 Бюджет месяца' }, { text: '💳 Кредиты' }, { text: '📉 Вредные' }],
+            [{ text: '💸 До аванса' }, { text: '⚡ Баланс' }, { text: '📋 Бэклог' }],
+          ],
+          resize_keyboard: true,
+          persistent: true,
+        },
+      }),
+    })
+  } catch {}
 
   return NextResponse.json({
     success: true,
