@@ -114,7 +114,7 @@ export async function getContext(): Promise<string> {
     supabase.from('cards').select('name,card_limit,current_debt').eq('user_id',USER_ID).order('sort_order'),
     supabase.from('income_events').select('event_date,description,amount').eq('user_id',USER_ID).eq('month_key',monthKey),
     supabase.from('custom_categories').select('id,name,monthly_limit,alert_at_percent').eq('user_id',USER_ID),
-    supabase.from('bot_corrections').select('correction,category,created_at').eq('user_id',USER_ID).order('created_at',{ascending:false}).limit(10),
+    supabase.from('bot_corrections').select('correction,category,created_at').eq('user_id',USER_ID).in('category', ['formula','fact']).order('created_at',{ascending:false}).limit(3),
     supabase.from('ru_holidays').select('holiday_date').gte('holiday_date',`${now.getFullYear()}-${String(curMonth).padStart(2,'0')}-01`).lte('holiday_date',`${now.getFullYear()}-${String(curMonth).padStart(2,'0')}-31`),
     supabase.from('expenses').select('amount,category').eq('user_id', USER_ID).eq('month_key', prevMK),
     supabase.from('bot_anchors').select('month_key,key,value,formula').eq('user_id',USER_ID).in('month_key',[monthKey,nextMonthKey,'global','broker']).order('month_key'),
@@ -150,7 +150,13 @@ export async function getContext(): Promise<string> {
       if (!rows.length) continue
       const label = mk === 'global' ? '📌 ГЛОБАЛЬНЫЕ' : `📌 ${mk}`
       lines.push(`\n${label}:`)
+      const DYNAMIC_KEYS = new Set([
+        'var_spent', 'var_left',
+        'forecast_end', 'forecast_after_advance',
+        'last_evening_alert_date', 'today_context',
+      ])
       for (const r of rows) {
+        if (DYNAMIC_KEYS.has(r.key)) continue
         lines.push(`  ${r.key}: ${r.value}${r.formula ? ` (${r.formula})` : ''}`)
       }
     }
