@@ -17,6 +17,17 @@ export async function GET(req: Request) {
     const monthKey = mk()
     const today = new Date().getDate()
 
+    // Напоминания о платежах
+    const { data: reminderUser } = await supabase.from('users').select('telegram_chat_id').eq('id', USER_ID).single()
+    if (reminderUser?.telegram_chat_id) {
+      if (today === 5) {
+        await sendTelegram(reminderUser.telegram_chat_id, '📋 День постоянных платежей!\nЖКХ, Электричество, Интернет, Зал DDX, Обучение и ИИ — проверь что всё оплачено.')
+      }
+      if (today === 12) {
+        await sendTelegram(reminderUser.telegram_chat_id, '📋 Сегодня оплата Общежития — 1680₽ с дебета Сбер.')
+      }
+    }
+
     // Авто-инициализация нового месяца: первый рабочий день
     const now = new Date()
     const firstDow = new Date(now.getFullYear(), now.getMonth(), 1).getDay()

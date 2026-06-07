@@ -353,10 +353,15 @@ export async function getContext(): Promise<string> {
   const calendarSection = `\n📅 БЛИЖАЙШИЕ 7 ДНЕЙ:\n${calendarLines.length ? calendarLines.join('\n') : '  Платежей нет'}\n`
 
   // Все траты месяца — по категориям + последние 7 дней
+  const customCatById: Record<string, string> = {}
+  for (const cc of customCats ?? []) { customCatById[cc.id] = cc.name }
   const expensesByCategory: Record<string, number> = {}
   for (const e of expenses ?? []) {
-    const cat = e.category ?? 'Прочее'
-    expensesByCategory[cat] = (expensesByCategory[cat] ?? 0) + Number(e.amount)
+    const customCatId = (e as Record<string, unknown>).custom_category_id as string | null
+    const effectiveCat = customCatId
+      ? (customCatById[customCatId] ?? e.category ?? 'Прочее')
+      : (e.category ?? 'Прочее')
+    expensesByCategory[effectiveCat] = (expensesByCategory[effectiveCat] ?? 0) + Number(e.amount)
   }
   const catLines = Object.entries(expensesByCategory)
     .sort(([,a],[,b]) => b - a)
@@ -1012,6 +1017,16 @@ export async function executeAction(action: BotAction): Promise<void> {
     const newBal = Math.round((prevBal - action.amount) * 100) / 100
     await s.from('users').update({debit_balance:newBal,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
     await recordDebitChange(s, prevBal, newBal, `Трата: ${action.description ?? action.category}`, 'expense')
+    // Sync var_spent / var_left anchors
+    const { data: allExp } = await s.from('expenses').select('amount').eq('user_id', USER_ID).eq('month_key', monthKey).neq('source_type', 'card')
+    const { data: mAnchor } = await s.from('bot_anchors').select('value').eq('user_id', USER_ID).eq('month_key', monthKey).eq('key', 'var_budget').maybeSingle()
+    const varSpentNow = Math.round((allExp ?? []).reduce((acc, e) => acc + Number(e.amount), 0))
+    const varBudgetNow = Number(mAnchor?.value ?? 30000)
+    const varLeftNow = varBudgetNow - varSpentNow
+    await s.from('bot_anchors').upsert([
+      { user_id: USER_ID, month_key: monthKey, key: 'var_spent', value: String(varSpentNow) },
+      { user_id: USER_ID, month_key: monthKey, key: 'var_left', value: String(varLeftNow) },
+    ], { onConflict: 'user_id,month_key,key' })
   }
 
   if (action.type === 'delete_expense') {
@@ -1200,6 +1215,17 @@ export async function executeAction(action: BotAction): Promise<void> {
       source_type: 'card',
     })
     // debit_balance НЕ изменяется — карта это пассив
+    // Sync cards_summary / net_position anchors
+    const { data: allCards } = await s.from('cards').select('name,current_debt').eq('user_id', USER_ID)
+    const { data: uBal } = await s.from('users').select('debit_balance,tbank_debit').eq('id', USER_ID).single()
+    const totalCardDebtNow = (allCards ?? []).reduce((acc, c) => acc + Number(c.current_debt ?? 0), 0)
+    const totalDebitNow = Number(uBal?.debit_balance ?? 0) + Number(uBal?.tbank_debit ?? 0)
+    const netPositionNow = Math.round(totalDebitNow - totalCardDebtNow)
+    const cardsSummaryNow = (allCards ?? []).map(c => `${c.name}: ${Math.round(Number(c.current_debt ?? 0)).toLocaleString('ru-RU')}₽`).join(', ')
+    await s.from('bot_anchors').upsert([
+      { user_id: USER_ID, month_key: 'global', key: 'cards_summary', value: cardsSummaryNow },
+      { user_id: USER_ID, month_key: 'global', key: 'net_position', value: String(netPositionNow) },
+    ], { onConflict: 'user_id,month_key,key' })
   }
 
   if (action.type === 'add_income_event' && action.amount) {
