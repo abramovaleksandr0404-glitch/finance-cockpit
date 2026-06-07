@@ -24,13 +24,13 @@ jobs:
 
       - name: Run sprint loop
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          RUNNER_SECRET: ${{ secrets.RUNNER_SECRET }}
         run: |
+          VERCEL="https://finance-cockpit-teal.vercel.app"
           while true; do
             echo "Checking for pending sprints..."
-            RESULT=$(python3 scripts/supabase_helper.py get_pending)
+            RESULT=$(curl -sf --max-time 30 "${VERCEL}/api/sprint/next" -H "x-runner-secret: ${RUNNER_SECRET}")
             echo "Response: ${RESULT}"
             COUNT=$(echo "$RESULT" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
             if [ "$COUNT" -eq "0" ]; then
@@ -42,7 +42,7 @@ jobs:
             TASK_SPRINT=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin)[0]['sprint_number'])")
             echo "Sprint #${TASK_SPRINT}: ${TASK_TITLE}"
             echo "$RESULT" | python3 -c "import json,sys; d=json.load(sys.stdin)[0]; open('/tmp/task_prompt.txt','w').write(d['prompt']); open('/tmp/task_id.txt','w').write(d['id'])"
-            python3 scripts/supabase_helper.py mark_inprogress "${TASK_ID}"
+            curl -sf --max-time 30 -X POST "${VERCEL}/api/sprint/status" -H "x-runner-secret: ${RUNNER_SECRET}" -H "Content-Type: application/json" -d "{\"id\":\"${TASK_ID}\",\"status\":\"in_progress\"}" > /dev/null
             echo "Running Claude Code for Sprint #${TASK_SPRINT}..."
             if claude --dangerously-skip-permissions --max-turns 80 < /tmp/task_prompt.txt; then
               BRANCH=$(git branch --show-current)
@@ -51,13 +51,13 @@ jobs:
                 git merge "$BRANCH" --no-ff -m "Auto-merge: Sprint ${TASK_SPRINT}"
               fi
               git push origin main || true
-              python3 scripts/supabase_helper.py mark_done "${TASK_ID}"
+              curl -sf --max-time 30 -X POST "${VERCEL}/api/sprint/status" -H "x-runner-secret: ${RUNNER_SECRET}" -H "Content-Type: application/json" -d "{\"id\":\"${TASK_ID}\",\"status\":\"done\"}" > /dev/null
               sleep 15
-              curl -sf "https://finance-cockpit-teal.vercel.app/api/telegram/setup" > /dev/null || true
+              curl -sf "${VERCEL}/api/telegram/setup" > /dev/null || true
               echo "Sprint #${TASK_SPRINT} deployed!"
               sleep 5
             else
-              python3 scripts/supabase_helper.py mark_failed "${TASK_ID}"
+              curl -sf --max-time 30 -X POST "${VERCEL}/api/sprint/status" -H "x-runner-secret: ${RUNNER_SECRET}" -H "Content-Type: application/json" -d "{\"id\":\"${TASK_ID}\",\"status\":\"failed\"}" > /dev/null
               echo "Sprint #${TASK_SPRINT} failed. Stopping."
               exit 1
             fi
