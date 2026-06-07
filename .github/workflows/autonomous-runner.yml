@@ -28,7 +28,7 @@ jobs:
           RUNNER_SECRET: ${{ secrets.RUNNER_SECRET }}
         run: |
           VERCEL="https://finance-cockpit-teal.vercel.app"
-          CLAUDE="/Users/mac/Library/Application Support/Claude/claude-code-vm/2.1.160/claude"
+          CLAUDE="/Users/mac/Library/Application Support/Claude/claude-code/2.1.161/claude.app/Contents/MacOS/claude"
           while true; do
             echo "Checking for pending sprints..."
             RESULT=$(curl -sf --max-time 30 "${VERCEL}/api/sprint/next" -H "x-runner-secret: ${RUNNER_SECRET}")
