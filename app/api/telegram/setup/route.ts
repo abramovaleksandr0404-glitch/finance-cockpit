@@ -39,9 +39,11 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: 'setWebhook failed', detail: webhookData.description }, { status: 400 })
   }
 
+  // Экранируем спецсимволы Telegram Markdown (underscore в именах полей ломает парсер)
+  const escapeMd = (s: string) => s.replace(/[_*`[]/g, '\\$&')
   const changelogBlock = getChangelogBlock()
   const notifText = changelogBlock
-    ? `🚀 *Система обновлена*\n\n${changelogBlock}`
+    ? `🚀 *Система обновлена*\n\n${escapeMd(changelogBlock)}`
     : `🚀 *Система обновлена*\n\nБот готов к работе.`
 
   let notified = false
