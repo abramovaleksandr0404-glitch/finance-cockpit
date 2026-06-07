@@ -30,11 +30,18 @@ jobs:
         run: |
           while true; do
             echo "Checking for pending sprints..."
+            echo "DEBUG: URL=${SUPABASE_URL}"
+            echo "DEBUG: KEY_LENGTH=${#SUPABASE_KEY}"
 
-            RESULT=$(curl -sf --max-time 10 "${SUPABASE_URL}/rest/v1/sprint_queue?status=eq.pending&order=priority.asc,sprint_number.asc&limit=1" \
+            RESULT=$(curl -s --max-time 10 -w "\nHTTP_STATUS:%{http_code}" "${SUPABASE_URL}/rest/v1/sprint_queue?status=eq.pending&order=priority.asc,sprint_number.asc&limit=1" \
               -H "apikey: ${SUPABASE_KEY}" \
-              -H "Authorization: Bearer ${SUPABASE_KEY}" 2>/dev/null) || RESULT="[]"
-            echo "DEBUG: RESULT=${RESULT}"
+              -H "Authorization: Bearer ${SUPABASE_KEY}") || RESULT="ERROR"
+
+            echo "DEBUG CURL RESULT: ${RESULT}"
+            HTTP_CODE=$(echo "$RESULT" | grep HTTP_STATUS | cut -d: -f2)
+            RESULT=$(echo "$RESULT" | grep -v HTTP_STATUS)
+            echo "DEBUG HTTP CODE: ${HTTP_CODE}"
+            echo "DEBUG DATA: ${RESULT}"
 
             COUNT=$(echo "$RESULT" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
 
