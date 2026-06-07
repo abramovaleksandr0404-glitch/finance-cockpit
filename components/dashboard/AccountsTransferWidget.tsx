@@ -24,11 +24,15 @@ export default function AccountsTransferWidget({ user, cards }: Props) {
     { id: 'tbank', label: 'Т-Банк дебет', balance: user.tbank_debit ?? 0 },
   ]
   const cardAccounts = cards.map((c) => ({
-    id: c.id, label: c.name + ' (кредит)', balance: c.card_limit - c.current_debt, debt: c.current_debt,
+    id: c.id, label: c.name + ' (кредит)', limit: Number(c.card_limit),
+    balance: Number(c.card_limit) - Number(c.current_debt), debt: Number(c.current_debt),
   }))
 
   const allAccounts = [...debitAccounts, ...cardAccounts]
   const totalLiquid = user.debit_balance + (user.tbank_debit ?? 0)
+  // Net position: дебет (Сбер) минус совокупный долг по кредитным картам
+  const totalDebt = cards.reduce((s, c) => s + Number(c.current_debt), 0)
+  const netPosition = Number(user.debit_balance) - totalDebt
 
   function doTransfer() {
     const amt = parseFloat(amount)
@@ -52,6 +56,11 @@ export default function AccountsTransferWidget({ user, cards }: Props) {
             {rub(totalLiquid)}
           </div>
           <div className="label">ликвидность</div>
+          {totalDebt > 0 && (
+            <div className="label" style={{ marginTop: '2px', whiteSpace: 'nowrap', color: netPosition >= 0 ? 'var(--accent-cyan)' : 'var(--accent-red)' }}>
+              Чистая: {rub(netPosition)} (дебет − долг карты)
+            </div>
+          )}
         </div>
       </div>
 
@@ -76,10 +85,13 @@ export default function AccountsTransferWidget({ user, cards }: Props) {
                   <CreditCard size={11} style={{ color: 'var(--tx-dim)' }} />
                   <span className="text-sm">{cards.find((c) => c.id === a.id)?.name}</span>
                 </div>
-                <div className="text-right">
+                <div className="text-right" style={{ fontFamily: 'JetBrains Mono, monospace', whiteSpace: 'nowrap' }}>
                   {a.debt > 0
-                    ? <span className="text-xs font-semibold" style={{ color: 'var(--accent-red)', fontFamily: 'JetBrains Mono, monospace', whiteSpace: 'nowrap' }}>долг {rub(a.debt, { compact: true })}</span>
-                    : <span className="text-xs" style={{ color: 'var(--accent-cyan)', fontFamily: 'JetBrains Mono, monospace', whiteSpace: 'nowrap' }}>доступно {rub(a.balance, { compact: true })}</span>
+                    ? <>
+                        <span className="text-xs font-semibold" style={{ color: 'var(--accent-red)' }}>долг {rub(a.debt)}</span>
+                        <div className="label">лимит {rub(a.limit, { compact: true })} · доступно {rub(a.balance, { compact: true })}</div>
+                      </>
+                    : <span className="text-xs" style={{ color: 'var(--accent-cyan)' }}>доступно {rub(a.balance, { compact: true })}</span>
                   }
                 </div>
               </div>

@@ -26,8 +26,9 @@ export default function ChartsWidget({ data, monthKey }: { data: DashboardData; 
     return acc
   }, {} as Record<string, number>)
   const catData = Object.entries(byCategory)
-    .sort((a, b) => b[1] - a[1])
     .map(([name, value]) => ({ name, value: Math.round(value), fill: CAT_COLORS[name] ?? '#ef4444' }))
+    .filter((c) => c.value > 0) // только реальные категории, без нулевых
+    .sort((a, b) => b.value - a.value)
 
   // Тренд по дням
   const [year, mon] = monthKey.split('-').map(Number)
