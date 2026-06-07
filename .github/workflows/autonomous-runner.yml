@@ -29,26 +29,13 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           while true; do
-            echo "========================================="
             echo "Checking for pending sprints..."
-            echo "SUPABASE_URL: ${SUPABASE_URL}"
-            echo "KEY_LENGTH: ${#SUPABASE_KEY}"
             
-            echo "Testing connectivity to Supabase..."
-            ping -c 1 8.8.8.8 || echo "No internet"
-            
-            RESULT=$(curl -v --max-time 10 "${SUPABASE_URL}/rest/v1/sprint_queue?status=eq.pending&order=priority.asc,sprint_number.asc&limit=1" \
+            RESULT=$(curl -sf --max-time 30 "${SUPABASE_URL}/rest/v1/sprint_queue?status=eq.pending&order=priority.asc,sprint_number.asc&limit=1" \
               -H "apikey: ${SUPABASE_KEY}" \
-              -H "Authorization: Bearer ${SUPABASE_KEY}" 2>&1)
+              -H "Authorization: Bearer ${SUPABASE_KEY}") || RESULT="[]"
             
-            CURL_EXIT=$?
-            echo "CURL exit code: ${CURL_EXIT}"
-            echo "CURL response: ${RESULT}"
-            
-            if [ "${CURL_EXIT}" -ne 0 ]; then
-              echo "ERROR: curl failed with code ${CURL_EXIT}"
-              break
-            fi
+            echo "Response: ${RESULT}"
             
             COUNT=$(echo "$RESULT" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
             
