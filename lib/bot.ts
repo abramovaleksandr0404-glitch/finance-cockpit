@@ -905,6 +905,8 @@ export interface BotAction {
   actual_amount?: number
   // Sprint 19
   content?: string; importance?: number; query?: string
+  // Sprint 20
+  salary_net?: number; salary_gross?: number
 }
 
 // ── НАДЁЖНЫЙ ПАРСЕР ACTION ─────────────────────────────────────────────────
@@ -973,6 +975,7 @@ export async function executeAction(action: BotAction): Promise<void> {
     learn_mapping:'обучение', save_correction:'коррекция',
     reclassify_expense:'переклассификация', update_cashflow:'кешфлоу',
     add_backlog_item:'бэклог', add_multiday_expense:'мультидневная трата',
+    update_salary:'оклад',
   }
   if (snapLabel[action.type]) await snap(snapLabel[action.type])
 
@@ -1315,6 +1318,13 @@ export async function executeAction(action: BotAction): Promise<void> {
     }
   }
 
+  if (action.type === 'update_salary' && action.salary_net != null) {
+    const upd: Record<string, number> = { salary_net: Math.round(action.salary_net) }
+    if (action.salary_gross != null) upd.salary_gross = Math.round(action.salary_gross)
+    await s.from('users').update(upd).eq('id', USER_ID)
+    await updateAnchors(s)
+  }
+
   if (action.type === 'undo') {
     const { data:sn } = await s.from('undo_snapshots').select('*').eq('user_id',USER_ID).order('created_at',{ascending:false}).limit(1).maybeSingle()
     if (sn) {
@@ -1540,6 +1550,8 @@ export const TOOLS = [
     input_schema:{type:'object',properties:{name:{type:'string',description:'Название кредита (фрагмент для поиска)'},principal:{type:'number',description:'Новое тело долга'},rate:{type:'number',description:'Новая ставка (например 0.34)'},min_payment:{type:'number',description:'Новый ежемесячный платёж'},end_date:{type:'string',description:'Дата окончания YYYY-MM-DD'}},required:['name']} },
   { name:'update_settings', description:'Изменить настройку. field: salary_net/salary_gross/ytd_gross/threshold/moment_share/margin_share/var_budget, или nominal с key=g3..g10.',
     input_schema:{type:'object',properties:{field:{type:'string'},value:{type:'number'},key:{type:'string'}},required:['field','value']} },
+  { name:'update_salary', description:'Обновить оклад если изменился. Вызывай при: "зарплата теперь X", "оклад повысили до X". Пересчитывает дневную ставку и якоря.',
+    input_schema:{type:'object',properties:{salary_net:{type:'number',description:'Чистый оклад (net) в рублях'},salary_gross:{type:'number',description:'Грязный оклад (gross), опционально'}},required:['salary_net']} },
   { name:'scenario_analysis', description:'Рассчитать экономику решения о покупке. Используй когда спрашивают "стоит ли купить X в кредит/рассрочку", "выгодно ли брать кредит", "лучше ли подождать бонуса". Возвращает сравнение: кредит vs наличные vs ожидание, с переплатой и рекомендацией.',
     input_schema:{type:'object',properties:{itemCost:{type:'number',description:'Стоимость покупки в рублях'},loanRate:{type:'number',description:'Годовая ставка кредита (например 0.33 для 33%)'},loanMonths:{type:'number',description:'Срок в месяцах'},expectedBonus:{type:'number',description:'Ожидаемый бонус (если есть)'},weeksUntilBonus:{type:'number',description:'Через сколько недель бонус'}},required:['itemCost','loanRate','loanMonths']} },
   { name:'suggest_early_repayment', description:'Рассчитать выгоду от досрочного погашения кредита при текущей ликвидности. Используй когда спрашивают "куда вложить свободные деньги" или проактивно.',

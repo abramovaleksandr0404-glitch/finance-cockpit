@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { generateMorningBriefing, sendTelegram, sendTelegramWithButtons, executeAction, type BotAction } from '@/lib/bot'
+import { computeWorkingDays } from '@/lib/calc'
 
 export const dynamic = 'force-dynamic'
 
@@ -22,6 +23,44 @@ export async function GET(req: Request) {
     const { data: month } = await supabase.from('months').select('recurring_received').eq('user_id', USER_ID).eq('month_key', monthKey).maybeSingle()
     const received = (month?.recurring_received as string[]) ?? []
     const recurringIncomes = (user?.recurring_incomes as {name:string;amount:number;day:number}[]) ?? []
+
+    // ── Sprint 20: авто-инициализация нового месяца в первый рабочий день ──
+    const nowD = new Date()
+    const isFirstWorkingDay = nowD.getDate() <= 3 && nowD.getDay() !== 0 && nowD.getDay() !== 6
+    if (isFirstWorkingDay) {
+      const newMonthKey = `${nowD.getFullYear()}-${String(nowD.getMonth()+1).padStart(2,'0')}`
+      const { data: existingMonth } = await supabase.from('months').select('id').eq('user_id',USER_ID).eq('month_key',newMonthKey).maybeSingle()
+      if (!existingMonth) {
+        const { data: holidays } = await supabase.from('ru_holidays').select('holiday_date')
+          .gte('holiday_date', newMonthKey+'-01').lte('holiday_date', newMonthKey+'-31')
+        const holidayDates = (holidays ?? []).map((h: { holiday_date: string }) => String(h.holiday_date).slice(0,10))
+        const wd = computeWorkingDays(nowD.getFullYear(), nowD.getMonth()+1, holidayDates)
+        const { data: u } = await supabase.from('users').select('salary_net,fixed_costs').eq('id',USER_ID).single()
+        const dailyRate = Math.round(Number(u?.salary_net ?? 0) / wd)
+        const advWd = Math.round(wd/2)
+        await supabase.from('months').upsert({
+          user_id: USER_ID,
+          month_key: newMonthKey,
+          fixed_paid: {},
+          salary_adv_amount: advWd * dailyRate,
+          salary_eom_amount: (wd - advWd) * dailyRate,
+        }, { onConflict: 'user_id,month_key' })
+        const fixedTotal = ((u?.fixed_costs as { amount: number }[]) ?? []).reduce((sm, f) => sm + Number(f.amount), 0)
+        const anchors = [
+          { key:'working_days', value:String(wd) },
+          { key:'daily_rate', value:String(dailyRate) },
+          { key:'fixed_total', value:String(fixedTotal) },
+          { key:'fixed_unpaid', value:String(fixedTotal) },
+          { key:'var_spent', value:'0' },
+        ]
+        for (const a of anchors) {
+          await supabase.from('bot_anchors').upsert({ user_id:USER_ID, month_key:newMonthKey, ...a, updated_at:new Date().toISOString() }, { onConflict: 'user_id,month_key,key' })
+        }
+        if (user?.telegram_chat_id) {
+          await sendTelegram(user.telegram_chat_id, `📅 *Новый месяц ${newMonthKey}*\n\nДанные обновлены:\n• Рабочих дней: ${wd}\n• Дневная ставка: ${dailyRate.toLocaleString('ru-RU')} ₽\n• Постоянные сброшены — отметь оплаты`)
+        }
+      }
+    }
 
     for (const r of recurringIncomes) {
       if (r.day === today && !received.includes(r.name)) {
