@@ -370,7 +370,21 @@ export async function getContext(): Promise<string> {
   const recentExp7Lines = recentExp7.map(e => `  • ${e.expense_date}: ${e.description ?? e.category} — ${rub(Number(e.amount))}`).join('\n')
   const allExpensesSection = `\n📊 ПЕРЕМЕННЫЕ ТРАТЫ ${monthKey} (все ${expenses?.length ?? 0} шт = ${rub(varSpent)}):\n${catLines || '  (нет трат)'}\n\n  Последние 7 дней:\n${recentExp7Lines || '  (нет трат)'}\n`
 
-  return `${anchorSection}${brokerSection}${calendarSection}
+  // Sprint 19 — топ-5 важных воспоминаний из долгосрочной памяти
+  let memoriesSection = ''
+  const { data: memories } = await supabase.from('bot_memories')
+    .select('content,category')
+    .eq('user_id', USER_ID)
+    .gte('importance', 4)
+    .order('importance', { ascending: false })
+    .order('last_accessed', { ascending: false })
+    .limit(5)
+  if (memories?.length) {
+    memoriesSection = '\n📚 КЛЮЧЕВЫЕ ПАТТЕРНЫ И ФАКТЫ:\n'
+      + memories.map(m => `  • ${m.content}`).join('\n') + '\n'
+  }
+
+  return `${anchorSection}${brokerSection}${calendarSection}${memoriesSection}
 === ФИНАНСОВЫЙ КОНТЕКСТ ===
 ДАТА: ${now.toLocaleDateString('ru-RU',{weekday:'long',day:'numeric',month:'long',year:'numeric'})}
 МЕСЯЦ: ${monthKey} (день ${today} из ${daysInMonth}, осталось ${daysLeft} дней)
@@ -889,6 +903,8 @@ export interface BotAction {
   formula?: string
   // Sprint 17
   actual_amount?: number
+  // Sprint 19
+  content?: string; importance?: number; query?: string
 }
 
 // ── НАДЁЖНЫЙ ПАРСЕР ACTION ─────────────────────────────────────────────────
@@ -1471,6 +1487,15 @@ export async function executeAction(action: BotAction): Promise<void> {
       updated_at: new Date().toISOString(),
     }, { onConflict: 'user_id,month_key,key' })
   }
+
+  if (action.type === 'save_memory' && action.content) {
+    await s.from('bot_memories').insert({
+      user_id: USER_ID,
+      content: sanitizeStr(action.content, 1000),
+      category: action.category ?? 'general',
+      importance: Math.min(5, Math.max(1, Math.round(Number(action.importance ?? 3)))),
+    })
+  }
 }
 
 // ── ИНСТРУМЕНТЫ (tool calling) — надёжная замена парсингу ACTION ──────────
@@ -1662,6 +1687,16 @@ export const TOOLS = [
   { name: 'forecast_after_advance',
     description: 'Прогноз после получения аванса 15-го и оплаты всех постоянных. Вызывай при: "сколько останется после аванса", "что будет с деньгами после 15-го", "прогноз до зарплаты".',
     input_schema: { type: 'object', properties: {} } },
+  { name: 'semantic_search',
+    description: 'Поиск похожих фактов и паттернов из памяти. Вызывай когда пользователь спрашивает что-то похожее на прошлые ошибки или паттерны.',
+    input_schema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } },
+  { name: 'save_memory',
+    description: 'Сохранить важный факт или паттерн в долгосрочную память. Вызывай когда пользователь говорит "запомни", "это важно", или когда выявлен устойчивый паттерн.',
+    input_schema: { type: 'object', properties: {
+      content: { type: 'string' },
+      category: { type: 'string' },
+      importance: { type: 'number', description: '1-5, где 5 критично' },
+    }, required: ['content'] } },
 ]
 
 interface ContentBlock { type:string; text?:string; id?:string; name?:string; input?:Record<string,unknown> }
@@ -1854,6 +1889,16 @@ async function handleTool(name: string, input: Record<string,unknown>): Promise<
     const advAmt = Number(month?.salary_adv_amount ?? Math.round(net / 2))
     const advReceived = !!month?.salary_adv_received
     return JSON.stringify({ daysLeft, advDay: targetAdvDay, targetMonth, advReceived, advAmt })
+  }
+  if (name === 'semantic_search') {
+    // Используем простой текстовый поиск пока нет эмбеддингов
+    const { data } = await db().from('bot_memories')
+      .select('content,category,importance')
+      .eq('user_id', USER_ID)
+      .ilike('content', `%${input.query}%`)
+      .order('importance', { ascending: false })
+      .limit(3)
+    return JSON.stringify(data ?? [])
   }
   // DB-writing tools
   await executeAction({ type: name, ...input } as BotAction)
