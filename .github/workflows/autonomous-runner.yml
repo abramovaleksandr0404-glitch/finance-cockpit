@@ -34,6 +34,7 @@ jobs:
             RESULT=$(curl -sf "${SUPABASE_URL}/rest/v1/sprint_queue?status=eq.pending&order=priority.asc,sprint_number.asc&limit=1" \
               -H "apikey: ${SUPABASE_KEY}" \
               -H "Authorization: Bearer ${SUPABASE_KEY}" 2>/dev/null) || RESULT="[]"
+            echo "DEBUG: RESULT=${RESULT}"
 
             COUNT=$(echo "$RESULT" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
 
