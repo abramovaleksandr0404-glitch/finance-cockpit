@@ -68,6 +68,17 @@ async function updateAnchors(s: SupabaseClient): Promise<void> {
       { onConflict: 'user_id,month_key,key' }
     )
   }
+  // Sprint 26: автосинхронизация cards_summary при любом обновлении якорей
+  const { data: cardsAnchor } = await s.from('cards').select('name,card_limit,current_debt').eq('user_id', USER_ID)
+  const cardsSumAnchor = (cardsAnchor ?? []).map((c: {name:string;card_limit:number;current_debt:number}) =>
+    `${c.name}: долг ${c.current_debt}₽, доступно ${c.card_limit - c.current_debt}₽`).join('. ')
+  const { data: uDebitAnchor } = await s.from('users').select('debit_balance').eq('id', USER_ID).single()
+  const totalDebtAnchor = (cardsAnchor ?? []).reduce((sum: number, c: {current_debt:number}) => sum + Number(c.current_debt ?? 0), 0)
+  const netPosAnchor = Math.round(Number(uDebitAnchor?.debit_balance ?? 0) - totalDebtAnchor)
+  await s.from('bot_anchors').upsert([
+    { user_id: USER_ID, month_key: 'global', key: 'cards_summary', value: cardsSumAnchor, updated_at: new Date().toISOString() },
+    { user_id: USER_ID, month_key: 'global', key: 'net_position', value: String(netPosAnchor), updated_at: new Date().toISOString() },
+  ], { onConflict: 'user_id,month_key,key' })
 }
 
 async function snap(label: string) {
@@ -352,9 +363,13 @@ export async function getContext(): Promise<string> {
   const calendarSection = `\n📅 БЛИЖАЙШИЕ 7 ДНЕЙ:\n${calendarLines.length ? calendarLines.join('\n') : '  Платежей нет'}\n`
 
   // Все траты месяца — по категориям + последние 7 дней
+  // Sprint 25: effective_category — custom_category_id имеет приоритет над category
+  const { data: customCatsCtx } = await supabase.from('custom_categories').select('id,name').eq('user_id', USER_ID)
+  const customCatMapCtx: Record<string, string> = {}
+  for (const c of customCatsCtx ?? []) customCatMapCtx[c.id] = c.name
   const expensesByCategory: Record<string, number> = {}
   for (const e of expenses ?? []) {
-    const cat = e.category ?? 'Прочее'
+    const cat = (e.custom_category_id ? customCatMapCtx[e.custom_category_id] : null) ?? e.category ?? 'Прочее'
     expensesByCategory[cat] = (expensesByCategory[cat] ?? 0) + Number(e.amount)
   }
   const catLines = Object.entries(expensesByCategory)
@@ -1027,6 +1042,15 @@ export async function executeAction(action: BotAction): Promise<void> {
     const newBal = Math.round((prevBal - action.amount) * 100) / 100
     await s.from('users').update({debit_balance:newBal,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
     await recordDebitChange(s, prevBal, newBal, `Трата: ${action.description ?? action.category}`, 'expense')
+    // Sprint 25: синхронизация якорей var_spent/var_left после каждой траты
+    const { data: allExpSync } = await s.from('expenses').select('amount').eq('user_id', USER_ID).eq('month_key', monthKey)
+    const newVarSpent = (allExpSync ?? []).reduce((sum: number, e: {amount: number}) => sum + Number(e.amount), 0)
+    const { data: usrSync } = await s.from('users').select('var_budget').eq('id', USER_ID).single()
+    const newVarLeft = Number(usrSync?.var_budget ?? 45000) - newVarSpent
+    await s.from('bot_anchors').upsert([
+      { user_id: USER_ID, key: 'var_spent', value: String(Math.round(newVarSpent)), month_key: monthKey, updated_at: new Date().toISOString() },
+      { user_id: USER_ID, key: 'var_left', value: String(Math.round(newVarLeft)), month_key: monthKey, updated_at: new Date().toISOString() },
+    ], { onConflict: 'user_id,month_key,key' })
   }
 
   if (action.type === 'delete_expense') {
@@ -1215,6 +1239,17 @@ export async function executeAction(action: BotAction): Promise<void> {
       source_type: 'card',
     })
     // debit_balance НЕ изменяется — карта это пассив
+    // Sprint 25+26: синхронизация якорей cards_summary/net_position
+    const { data: allCardsSync } = await s.from('cards').select('name,card_limit,current_debt').eq('user_id', USER_ID)
+    const cardsSummarySync = (allCardsSync ?? []).map((c: {name:string;card_limit:number;current_debt:number}) =>
+      `${c.name}: долг ${c.current_debt}₽, доступно ${c.card_limit - c.current_debt}₽`).join('. ')
+    const totalCardDebtSync = (allCardsSync ?? []).reduce((sum: number, c: {current_debt:number}) => sum + Number(c.current_debt ?? 0), 0)
+    const { data: uDebit } = await s.from('users').select('debit_balance').eq('id', USER_ID).single()
+    const netPosSync = Math.round(Number(uDebit?.debit_balance ?? 0) - totalCardDebtSync)
+    await s.from('bot_anchors').upsert([
+      { user_id: USER_ID, key: 'cards_summary', value: cardsSummarySync, month_key: 'global', updated_at: new Date().toISOString() },
+      { user_id: USER_ID, key: 'net_position', value: String(netPosSync), month_key: 'global', updated_at: new Date().toISOString() },
+    ], { onConflict: 'user_id,month_key,key' })
   }
 
   if (action.type === 'add_income_event' && action.amount) {
