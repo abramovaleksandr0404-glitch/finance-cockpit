@@ -26,6 +26,7 @@ export default function ChartsWidget({ data, monthKey }: { data: DashboardData; 
     return acc
   }, {} as Record<string, number>)
   const catData = Object.entries(byCategory)
+    .filter(([, value]) => value > 0)
     .sort((a, b) => b[1] - a[1])
     .map(([name, value]) => ({ name, value: Math.round(value), fill: CAT_COLORS[name] ?? '#ef4444' }))
 

@@ -4,6 +4,7 @@ import { useState, useTransition } from 'react'
 import { ChevronRight, Zap, Pencil, Loader2, Check, X } from 'lucide-react'
 import { earlyRepayLoan, editLoanPayment } from '@/app/actions'
 import { rub } from '@/lib/finance'
+import { annuityPayment } from '@/lib/calc'
 import type { Loan } from '@/lib/types'
 
 export default function LoanRow({ loan }: { loan: Loan }) {
@@ -27,8 +28,12 @@ export default function LoanRow({ loan }: { loan: Loan }) {
 
   // Preview the new payment after early repayment (annuity, same term)
   const repayNum = parseFloat(repay)
+  const monthlyRate = Number(loan.rate) / 12
+  const newPrincipal = Math.max(0, Number(loan.principal) - repayNum)
   const preview = !isNaN(repayNum) && repayNum > 0 && Number(loan.principal) > 0
-    ? Math.round(Number(loan.min_payment) * Math.max(0, Number(loan.principal) - repayNum) / Number(loan.principal) * 100) / 100
+    ? (monthsLeft && monthsLeft > 0 && monthlyRate > 0
+        ? Math.round(annuityPayment(newPrincipal, monthlyRate, monthsLeft))
+        : Math.round(Number(loan.min_payment) * newPrincipal / Number(loan.principal)))
     : null
 
   function doRepay() {

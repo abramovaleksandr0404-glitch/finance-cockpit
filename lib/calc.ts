@@ -283,7 +283,7 @@ export function computeVacationAdjustment(
   return { dailyRate, deductFromSalary, actualLoss, deductFrom }
 }
 
-function annuityPayment(principal: number, monthlyRate: number, months: number): number {
+export function annuityPayment(principal: number, monthlyRate: number, months: number): number {
   if (monthlyRate === 0) return principal / months
   const k = Math.pow(1 + monthlyRate, months)
   return (principal * monthlyRate * k) / (k - 1)

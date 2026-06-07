@@ -4,6 +4,7 @@ import { revalidatePath } from 'next/cache'
 import { createServerClient } from '@supabase/ssr'
 import { cookies } from 'next/headers'
 import { redirect } from 'next/navigation'
+import { annuityPayment } from '@/lib/calc'
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Sb = any
@@ -368,9 +369,15 @@ export async function earlyRepayLoan(loanId: string, repayAmount: number) {
 
   const oldPrincipal = Number(l.principal)
   const newPrincipal = Math.max(0, oldPrincipal - repay)
-  const ratio = oldPrincipal > 0 ? newPrincipal / oldPrincipal : 0
-  // Annuity with fixed term: payment ∝ principal
-  const newPayment = Math.round(Number(l.min_payment) * ratio * 100) / 100
+  const monthlyRate = Number(l.rate) / 12
+  const endDate = l.end_date ? new Date(l.end_date) : null
+  const now = new Date()
+  const monthsLeft = endDate
+    ? Math.max(1, (endDate.getFullYear() - now.getFullYear()) * 12 + endDate.getMonth() - now.getMonth())
+    : null
+  const newPayment = monthsLeft && monthlyRate > 0
+    ? Math.round(annuityPayment(newPrincipal, monthlyRate, monthsLeft))
+    : Math.round(Number(l.min_payment) * (oldPrincipal > 0 ? newPrincipal / oldPrincipal : 0))
 
   await supabase.from('loans').update({
     principal: newPrincipal,

@@ -7,6 +7,8 @@ export default function CardsWidget({ data }: { data: DashboardData }) {
   const { cards, user } = data
   const totalAvailable = cards.reduce((s, c) => s + Math.max(0, c.card_limit - c.current_debt), 0)
   const totalDebt = cards.reduce((s, c) => s + c.current_debt, 0)
+  const totalDebit = (user.debit_balance ?? 0) + (user.tbank_debit ?? 0)
+  const netPosition = totalDebit - totalDebt
 
   function barColor(debt: number, limit: number) {
     const used = pct(debt, limit)
@@ -36,6 +38,17 @@ export default function CardsWidget({ data }: { data: DashboardData }) {
           <BalanceEditor currentBalance={user.tbank_debit ?? 0} kind="tbank" />
         </div>
       </div>
+
+      {/* Net position */}
+      {totalDebt > 0 && (
+        <div className="flex items-center justify-between py-2 px-3 rounded-md"
+          style={{ background: netPosition < 0 ? 'rgba(239,68,68,0.05)' : 'rgba(34,197,94,0.05)', border: '1px solid var(--border)' }}>
+          <span className="text-sm">Чистая позиция</span>
+          <span className="text-xs font-semibold" style={{ color: netPosition < 0 ? 'var(--accent-red)' : 'var(--accent-green)', fontFamily: 'JetBrains Mono, monospace', whiteSpace: 'nowrap' }}>
+            {netPosition >= 0 ? '+' : ''}{rub(netPosition)}
+          </span>
+        </div>
+      )}
 
       {/* Credit cards */}
       {cards.length > 0 && (
