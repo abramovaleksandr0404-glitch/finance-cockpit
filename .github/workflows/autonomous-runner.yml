@@ -28,6 +28,7 @@ jobs:
           RUNNER_SECRET: ${{ secrets.RUNNER_SECRET }}
         run: |
           VERCEL="https://finance-cockpit-teal.vercel.app"
+          CLAUDE="/Users/mac/Library/Application Support/Claude/claude-code-vm/2.1.160/claude"
           while true; do
             echo "Checking for pending sprints..."
             RESULT=$(curl -sf --max-time 30 "${VERCEL}/api/sprint/next" -H "x-runner-secret: ${RUNNER_SECRET}")
@@ -44,7 +45,7 @@ jobs:
             echo "$RESULT" | python3 -c "import json,sys; d=json.load(sys.stdin)[0]; open('/tmp/task_prompt.txt','w').write(d['prompt']); open('/tmp/task_id.txt','w').write(d['id'])"
             curl -sf --max-time 30 -X POST "${VERCEL}/api/sprint/status" -H "x-runner-secret: ${RUNNER_SECRET}" -H "Content-Type: application/json" -d "{\"id\":\"${TASK_ID}\",\"status\":\"in_progress\"}" > /dev/null
             echo "Running Claude Code for Sprint #${TASK_SPRINT}..."
-            if claude --dangerously-skip-permissions --max-turns 80 < /tmp/task_prompt.txt; then
+            if "$CLAUDE" --dangerously-skip-permissions --max-turns 80 < /tmp/task_prompt.txt; then
               BRANCH=$(git branch --show-current)
               if [ "$BRANCH" != "main" ]; then
                 git checkout main && git pull origin main
