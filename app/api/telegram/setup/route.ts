@@ -1,6 +1,10 @@
 import { NextResponse } from 'next/server'
+import { createClient } from '@supabase/supabase-js'
 import fs from 'fs'
 import path from 'path'
+
+const USER_ID = '5ebdb411-6021-4dfc-9d0d-caa8e0107502'
+const KEYBOARD_VERSION = '1.0'
 
 function getChangelogBlock(): string {
   try {
@@ -46,7 +50,6 @@ export async function GET(req: Request) {
       ? `🔄 *Система обновлена*\n\n${changelogBlock}`
       : `🔄 *Система обновлена*\n\n_Webhook зарегистрирован. Готов к работе._`
 
-    // Notification message
     try {
       await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
         method: 'POST',
@@ -58,25 +61,46 @@ export async function GET(req: Request) {
       console.error('[setup] Telegram notification failed:', e)
     }
 
-    // Persistent keyboard
+    // Persistent keyboard — only send if version changed
     try {
-      await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: chatId,
-          text: '⚡ Быстрые кнопки активированы',
-          reply_markup: {
-            keyboard: [
-              [{ text: '💰 Аванс' }, { text: '💵 Зарплата' }, { text: '🎯 Бонус' }],
-              [{ text: '📊 Бюджет месяца' }, { text: '💳 Кредиты' }, { text: '📉 Вредные' }],
-              [{ text: '💸 До аванса' }, { text: '⚡ Баланс' }, { text: '📋 Бэклог' }],
-            ],
-            resize_keyboard: true,
-            persistent: true,
-          },
-        }),
-      })
+      const supabase = createClient(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.SUPABASE_SERVICE_ROLE_KEY!
+      )
+      const { data: versionRow } = await supabase
+        .from('bot_anchors')
+        .select('value')
+        .eq('user_id', USER_ID)
+        .eq('month_key', 'system')
+        .eq('key', 'keyboard_version')
+        .maybeSingle()
+
+      if (versionRow?.value !== KEYBOARD_VERSION) {
+        await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: chatId,
+            text: '⚡ Кнопки обновлены',
+            reply_markup: {
+              keyboard: [
+                [{ text: '💰 Аванс' }, { text: '💵 Зарплата' }, { text: '🎯 Бонус' }],
+                [{ text: '📊 Бюджет месяца' }, { text: '💳 Кредиты' }, { text: '📉 Вредные' }],
+                [{ text: '💸 До аванса' }, { text: '⚡ Баланс' }, { text: '📋 Бэклог' }],
+              ],
+              resize_keyboard: true,
+              persistent: true,
+            },
+          }),
+        })
+        await supabase.from('bot_anchors').upsert({
+          user_id: USER_ID,
+          month_key: 'system',
+          key: 'keyboard_version',
+          value: KEYBOARD_VERSION,
+          updated_at: new Date().toISOString(),
+        }, { onConflict: 'user_id,month_key,key' })
+      }
     } catch (e) {
       console.error('[setup] Keyboard setup failed:', e)
     }
