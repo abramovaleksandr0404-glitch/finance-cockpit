@@ -575,6 +575,43 @@ console.log('\n=== КАРТЫ + КОНТЕКСТ + VALIDATE + КРАТКОСТЬ
   check('list_backlog всегда pending', bot.includes("eq('status', 'pending')"), true)
 }
 
+console.log('\n=== КЛАВИАТУРА ВЕРСИОНИРОВАНИЕ: SPRINT 18 ===')
+{
+  const setup = readFileSync(join(process.cwd(), 'app/api/telegram/setup/route.ts'), 'utf-8')
+  const claude = readFileSync(join(process.cwd(), 'CLAUDE.md'), 'utf-8')
+  check('keyboard_version в setup route', setup.includes('keyboard_version'), true)
+  check('KEYBOARD_VERSION константа', setup.includes('KEYBOARD_VERSION'), true)
+  check('bot_anchors проверка в setup', setup.includes('bot_anchors'), true)
+  check('agentmemory в CLAUDE.md', claude.includes('agentmemory'), true)
+  check('ПАМЯТЬ секция в CLAUDE.md', claude.includes('## ПАМЯТЬ'), true)
+}
+
+console.log('\n=== СЕМАНТИЧЕСКАЯ ПАМЯТЬ: SPRINT 19 ===')
+{
+  const bot = readFileSync(join(process.cwd(), 'lib/bot.ts'), 'utf-8')
+  check('save_memory в TOOLS', TOOLS.some(t => t.name === 'save_memory'), true)
+  check('semantic_search в TOOLS', TOOLS.some(t => t.name === 'semantic_search'), true)
+  check('bot_memories query в getContext', bot.includes('bot_memories'), true)
+  check('memories в Promise.all деструктуризации', bot.includes('{data:memories}'), true)
+  check('ВОСПОМИНАНИЯ секция в контексте', bot.includes('ВОСПОМИНАНИЯ'), true)
+  check('save_memory handler в handleTool', bot.includes("name === 'save_memory'"), true)
+  check('semantic_search handler в handleTool', bot.includes("name === 'semantic_search'"), true)
+  check('importance ≥ 4 фильтр в getContext', bot.includes('gte(\'importance\''), true)
+}
+
+console.log('\n=== МЕС. АВТО-ИНИТ + UPDATE_SALARY: SPRINT 20 ===')
+{
+  const bot = readFileSync(join(process.cwd(), 'lib/bot.ts'), 'utf-8')
+  const morning = readFileSync(join(process.cwd(), 'app/api/cron/morning/route.ts'), 'utf-8')
+  check('update_salary в TOOLS', TOOLS.some(t => t.name === 'update_salary'), true)
+  check('update_salary handler в handleTool', bot.includes("name === 'update_salary'"), true)
+  check('updateAnchors экспортирована', bot.includes('export async function updateAnchors'), true)
+  check('updateAnchors импортирован в morning cron', morning.includes('updateAnchors'), true)
+  check('firstWorkingDay в morning cron', morning.includes('firstWorkingDay'), true)
+  check('months insert при авто-инит', morning.includes("salary_adv_amount"), true)
+  check('updateAnchors вызов в update_salary handler', bot.includes("await updateAnchors(s)"), true)
+}
+
 console.log(`\n${'='.repeat(40)}`)
 console.log(`ИТОГО: ${passed} прошло, ${failed} провалено`)
 console.log('='.repeat(40))

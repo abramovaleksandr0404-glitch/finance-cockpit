@@ -1,113 +1,17 @@
-name: Autonomous Sprint Runner
-
+name: Sprint Notifier
 on:
   schedule:
     - cron: '0 */4 * * *'
   workflow_dispatch:
-
 jobs:
-  run-sprint:
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    permissions:
-      contents: write
-      actions: write
-
+  notify:
+    runs-on: self-hosted
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          fetch-depth: 0
-
-      - name: Configure git
+      - name: Check and notify
         run: |
-          git config user.name "Claude Runner"
-          git config user.email "runner@anthropic.com"
-
-      - name: Get next sprint
-        id: sprint
-        env:
-          RUNNER_SECRET: ${{ secrets.RUNNER_SECRET }}
-        run: |
-          RESULT=$(curl -sf --max-time 30 "https://finance-cockpit-teal.vercel.app/api/sprint/next" \
-            -H "x-runner-secret: ${RUNNER_SECRET}") || RESULT="[]"
-          COUNT=$(echo "$RESULT" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
-          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
-          if [ "$COUNT" -gt "0" ]; then
-            TASK_ID=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin)[0]['id'])")
-            SPRINT_NUM=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin)[0]['sprint_number'])")
-            TITLE=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin)[0]['title'])")
-            echo "task_id=${TASK_ID}" >> "$GITHUB_OUTPUT"
-            echo "sprint_number=${SPRINT_NUM}" >> "$GITHUB_OUTPUT"
-            echo "title=${TITLE}" >> "$GITHUB_OUTPUT"
-            echo "$RESULT" | python3 -c "import json,sys; d=json.load(sys.stdin)[0]; open('/tmp/task_prompt.txt','w').write(d['prompt'])"
-            echo "Sprint #${SPRINT_NUM}: ${TITLE}"
-          else
-            echo "No pending sprints."
+          R=$(curl -sf "${{ secrets.SUPABASE_URL }}/rest/v1/sprint_queue?status=eq.pending&order=priority.asc&limit=1&select=title,sprint_number" -H "apikey: ${{ secrets.SUPABASE_SERVICE_KEY }}" -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_KEY }}")
+          CNT=$(echo "$R" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")
+          if [ "$CNT" -gt 0 ]; then
+            T=$(echo "$R" | python3 -c "import json,sys; print(json.load(sys.stdin)[0]['title'])")
+            curl -sf "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage?chat_id=${{ secrets.TELEGRAM_CHAT_ID }}&text=🤖 Готов спринт: $T%0AЗапусти Claude Code командой про sprint_queue"
           fi
-
-      - name: Mark in_progress
-        if: steps.sprint.outputs.count != '0'
-        env:
-          RUNNER_SECRET: ${{ secrets.RUNNER_SECRET }}
-        run: |
-          curl -sf --max-time 30 -X POST "https://finance-cockpit-teal.vercel.app/api/sprint/status" \
-            -H "x-runner-secret: ${RUNNER_SECRET}" \
-            -H "Content-Type: application/json" \
-            -d "{\"id\":\"${{ steps.sprint.outputs.task_id }}\",\"status\":\"in_progress\"}" > /dev/null
-
-      - name: Install Claude Code
-        if: steps.sprint.outputs.count != '0'
-        run: npm install -g @anthropic-ai/claude-code
-
-      - name: Run Claude Code
-        if: steps.sprint.outputs.count != '0'
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: claude --dangerously-skip-permissions --max-turns 80 < /tmp/task_prompt.txt
-
-      - name: Push to main
-        if: steps.sprint.outputs.count != '0'
-        run: |
-          BRANCH=$(git branch --show-current)
-          if [ "$BRANCH" != "main" ]; then
-            git checkout main && git pull origin main
-            git merge "$BRANCH" --no-ff -m "Auto-merge: Sprint ${{ steps.sprint.outputs.sprint_number }}"
-          fi
-          git push origin main || true
-
-      - name: Mark done and notify
-        if: steps.sprint.outputs.count != '0' && success()
-        env:
-          RUNNER_SECRET: ${{ secrets.RUNNER_SECRET }}
-        run: |
-          curl -sf --max-time 30 -X POST "https://finance-cockpit-teal.vercel.app/api/sprint/status" \
-            -H "x-runner-secret: ${RUNNER_SECRET}" \
-            -H "Content-Type: application/json" \
-            -d "{\"id\":\"${{ steps.sprint.outputs.task_id }}\",\"status\":\"done\"}" > /dev/null
-          sleep 15
-          curl -sf "https://finance-cockpit-teal.vercel.app/api/telegram/setup" > /dev/null || true
-          echo "Sprint #${{ steps.sprint.outputs.sprint_number }} deployed!"
-
-      - name: Mark failed
-        if: steps.sprint.outputs.count != '0' && failure()
-        env:
-          RUNNER_SECRET: ${{ secrets.RUNNER_SECRET }}
-        run: |
-          curl -sf --max-time 30 -X POST "https://finance-cockpit-teal.vercel.app/api/sprint/status" \
-            -H "x-runner-secret: ${RUNNER_SECRET}" \
-            -H "Content-Type: application/json" \
-            -d "{\"id\":\"${{ steps.sprint.outputs.task_id }}\",\"status\":\"failed\"}" > /dev/null
-
-      - name: Trigger next sprint
-        if: steps.sprint.outputs.count != '0' && success()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          sleep 10
-          curl -sf -X POST \
-            -H "Authorization: token ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/abramovaleksandr0404-glitch/finance-cockpit/actions/workflows/autonomous-runner.yml/dispatches" \
-            -d '{"ref":"main"}' || true

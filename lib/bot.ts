@@ -40,7 +40,7 @@ export async function storeChatId(chatId: number) {
   await db().from('users').update({ telegram_chat_id: chatId }).eq('id', USER_ID)
 }
 
-async function updateAnchors(s: SupabaseClient): Promise<void> {
+export async function updateAnchors(s: SupabaseClient): Promise<void> {
   const now = new Date()
   const year = now.getFullYear()
   const month = now.getMonth() + 1
@@ -103,7 +103,7 @@ export async function getContext(): Promise<string> {
   const nextMonthDate = new Date(now.getFullYear(), now.getMonth() + 1, 1)
   const nextMonthKey = `${nextMonthDate.getFullYear()}-${String(nextMonthDate.getMonth() + 1).padStart(2, '0')}`
 
-  const [{data:user},{data:loans},{data:expenses},{data:month},{data:goals},{data:recentExp},{data:quarterMonths},{data:cards},{data:incomeEvents},{data:customCats},{data:corrections},{data:holidays},{data:prevExpenses},{data:anchors}] = await Promise.all([
+  const [{data:user},{data:loans},{data:expenses},{data:month},{data:goals},{data:recentExp},{data:quarterMonths},{data:cards},{data:incomeEvents},{data:customCats},{data:corrections},{data:holidays},{data:prevExpenses},{data:anchors},{data:memories}] = await Promise.all([
     supabase.from('users').select('*').eq('id',USER_ID).single(),
     supabase.from('loans').select('id,name,principal,accrued_int,min_payment,end_date,rate,paid_month,due_day').eq('user_id',USER_ID).order('sort_order'),
     supabase.from('expenses').select('id,amount,category,description,expense_date,custom_category_id,covers_days').eq('user_id',USER_ID).eq('month_key',monthKey),
@@ -118,6 +118,7 @@ export async function getContext(): Promise<string> {
     supabase.from('ru_holidays').select('holiday_date').gte('holiday_date',`${now.getFullYear()}-${String(curMonth).padStart(2,'0')}-01`).lte('holiday_date',`${now.getFullYear()}-${String(curMonth).padStart(2,'0')}-31`),
     supabase.from('expenses').select('amount,category').eq('user_id', USER_ID).eq('month_key', prevMK),
     supabase.from('bot_anchors').select('month_key,key,value,formula').eq('user_id',USER_ID).in('month_key',[monthKey,nextMonthKey,'global','broker']).order('month_key'),
+    supabase.from('bot_memories').select('content,category,importance,created_at').eq('user_id',USER_ID).gte('importance',4).order('importance',{ascending:false}).order('last_accessed',{ascending:false}).limit(5),
   ])
   if (!user) return 'Данные не загружены'
 
@@ -477,7 +478,10 @@ ${goalLines}
 ${customCatLines || '  (нет кастомных категорий)'}
 
 === МОИ ПРОШЛЫЕ ОШИБКИ (не повторять) ===
-${correctionLines || '  (нет записей)'}`
+${correctionLines || '  (нет записей)'}
+
+=== ВОСПОМИНАНИЯ (важность ≥4) ===
+${(memories ?? []).length ? (memories ?? []).map((m: {content:string;category:string|null;importance:number}) => `  • [${m.category ?? 'general'}] ${m.content}`).join('\n') : '  (нет важных воспоминаний)'}`
 }
 
 // ── Анализ паттернов трат ─────────────────────────────────────────────────
@@ -1662,6 +1666,25 @@ export const TOOLS = [
   { name: 'forecast_after_advance',
     description: 'Прогноз после получения аванса 15-го и оплаты всех постоянных. Вызывай при: "сколько останется после аванса", "что будет с деньгами после 15-го", "прогноз до зарплаты".',
     input_schema: { type: 'object', properties: {} } },
+  { name: 'update_salary',
+    description: 'Обновить плановые суммы аванса и/или ЗП (salary_adv_amount, salary_eom_amount) в текущем месяце. Вызывай когда пользователь говорит "аванс пришёл X", "зп будет Y", "ожидается аванс N".',
+    input_schema: { type: 'object', properties: {
+      adv_amount: { type: 'number', description: 'Новая сумма аванса' },
+      eom_amount: { type: 'number', description: 'Новая сумма ЗП на конец месяца' },
+      bonus_amount: { type: 'number', description: 'Новая сумма бонуса' },
+    } } },
+  { name: 'save_memory',
+    description: 'Сохранить важный факт или наблюдение в долгосрочную память. Вызывай когда пользователь говорит что-то важное о своих финансовых привычках, предпочтениях, паттернах, или когда ты замечаешь важную закономерность. Importance: 1-2 обычное, 3 важное, 4-5 очень важное (будет показано в контексте).',
+    input_schema: { type: 'object', properties: {
+      content: { type: 'string', description: 'Что запомнить (1-3 предложения)' },
+      category: { type: 'string', enum: ['habit', 'preference', 'pattern', 'rule', 'fact'], description: 'Тип воспоминания' },
+      importance: { type: 'number', description: '1-5, где 5 = критически важно' },
+    }, required: ['content'] } },
+  { name: 'semantic_search',
+    description: 'Поиск по воспоминаниям. Вызывай когда нужно найти что-то из прошлых разговоров: "ты помнишь что я говорил про X", "найди в памяти", "я раньше говорил что...".',
+    input_schema: { type: 'object', properties: {
+      query: { type: 'string', description: 'Что искать' },
+    }, required: ['query'] } },
 ]
 
 interface ContentBlock { type:string; text?:string; id?:string; name?:string; input?:Record<string,unknown> }
@@ -1825,6 +1848,49 @@ async function handleTool(name: string, input: Record<string,unknown>): Promise<
     return JSON.stringify({ records: data, avgAdvance: avgAdv, avgEom, count: data.length })
   }
 
+  if (name === 'update_salary') {
+    const s = db()
+    const monthK = mk()
+    const updates: Record<string, number> = {}
+    if (input.adv_amount != null) updates.salary_adv_amount = Number(input.adv_amount)
+    if (input.eom_amount != null) updates.salary_eom_amount = Number(input.eom_amount)
+    if (input.bonus_amount != null) updates.bonus_amount = Number(input.bonus_amount)
+    if (!Object.keys(updates).length) return JSON.stringify({ error: 'Нет данных для обновления' })
+    const { data: existing } = await s.from('months').select('id').eq('user_id', USER_ID).eq('month_key', monthK).maybeSingle()
+    if (existing) {
+      await s.from('months').update(updates).eq('user_id', USER_ID).eq('month_key', monthK)
+    } else {
+      await s.from('months').insert({ user_id: USER_ID, month_key: monthK, ...updates })
+    }
+    await updateAnchors(s)
+    return JSON.stringify({ updated: updates, month_key: monthK })
+  }
+  if (name === 'save_memory') {
+    const content = String(input.content ?? '')
+    const category = String(input.category ?? 'fact')
+    const importance = Math.min(5, Math.max(1, Number(input.importance ?? 3)))
+    const { error } = await db().from('bot_memories').insert({
+      user_id: USER_ID,
+      content,
+      category,
+      importance,
+      last_accessed: new Date().toISOString(),
+    })
+    if (error) return JSON.stringify({ error: error.message })
+    return JSON.stringify({ saved: true, importance, content: content.slice(0, 80) })
+  }
+  if (name === 'semantic_search') {
+    const query = String(input.query ?? '').toLowerCase()
+    const words = query.split(/\s+/).filter(w => w.length > 2)
+    let q = db().from('bot_memories').select('content,category,importance,created_at').eq('user_id', USER_ID).order('importance', { ascending: false }).limit(20)
+    if (words.length > 0) q = q.ilike('content', `%${words[0]}%`)
+    const { data: results } = await q
+    if (!results?.length) return JSON.stringify({ found: [], message: 'Ничего не найдено' })
+    const filtered = words.length > 1
+      ? results.filter(r => words.some(w => r.content.toLowerCase().includes(w)))
+      : results
+    return JSON.stringify({ found: filtered.slice(0, 5) })
+  }
   if (name === 'days_until_advance') {
     const now = new Date()
     const today = now.getDate()
@@ -1873,7 +1939,7 @@ async function runToolLoop(modelId: string, systemBlocks: unknown[], initialMess
         if (block.type === 'tool_use' && block.name) {
           try {
             const result = await handleTool(block.name, (block.input ?? {}) as Record<string,unknown>)
-            const readOnlyTools = ['scenario_analysis','suggest_early_repayment','show_balance_history','analyze_credit_burden','calculate_optimal_repayment','compare_months','list_backlog']
+            const readOnlyTools = ['scenario_analysis','suggest_early_repayment','show_balance_history','analyze_credit_burden','calculate_optimal_repayment','compare_months','list_backlog','semantic_search']
             if (!readOnlyTools.includes(block.name)) {
               actionsRun.push(block.name)
             }

@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
-import { generateMorningBriefing, sendTelegram, sendTelegramWithButtons, executeAction, type BotAction } from '@/lib/bot'
+import { generateMorningBriefing, sendTelegram, sendTelegramWithButtons, executeAction, updateAnchors, type BotAction } from '@/lib/bot'
 
 export const dynamic = 'force-dynamic'
 
@@ -16,6 +16,33 @@ export async function GET(req: Request) {
     const supabase = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!)
     const monthKey = mk()
     const today = new Date().getDate()
+
+    // Авто-инициализация нового месяца: первый рабочий день
+    const now = new Date()
+    const firstDow = new Date(now.getFullYear(), now.getMonth(), 1).getDay()
+    const firstWorkingDay = 1 + (firstDow === 0 ? 1 : firstDow === 6 ? 2 : 0)
+    if (today === firstWorkingDay) {
+      const { data: existingMonth } = await supabase.from('months').select('id').eq('user_id', USER_ID).eq('month_key', monthKey).maybeSingle()
+      if (!existingMonth) {
+        const { data: u0 } = await supabase.from('users').select('salary_net').eq('id', USER_ID).single()
+        const net0 = Number(u0?.salary_net ?? 121600)
+        const advAmt0 = Math.round(net0 / 2)
+        await supabase.from('months').insert({
+          user_id: USER_ID,
+          month_key: monthKey,
+          salary_adv_amount: advAmt0,
+          salary_eom_amount: net0 - advAmt0,
+          revenue: 0,
+          clients: {},
+          fixed_paid: {},
+        })
+        await updateAnchors(supabase)
+        const { data: chatUser } = await supabase.from('users').select('telegram_chat_id').eq('id', USER_ID).single()
+        if (chatUser?.telegram_chat_id) {
+          await sendTelegram(chatUser.telegram_chat_id, `🗓 *Новый месяц ${monthKey} инициализирован*\n\nАванс: ${advAmt0.toLocaleString('ru-RU')}₽ · ЗП: ${(net0 - advAmt0).toLocaleString('ru-RU')}₽\nЯкоря обновлены.`)
+        }
+      }
+    }
 
     // Авто-создание income_event для recurring доходов по дате
     const { data: user } = await supabase.from('users').select('telegram_chat_id,recurring_incomes,debit_balance').eq('id', USER_ID).single()

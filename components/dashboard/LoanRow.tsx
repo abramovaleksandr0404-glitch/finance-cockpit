@@ -33,7 +33,6 @@ export default function LoanRow({ loan }: { loan: Loan }) {
 
   // Preview the new payment after early repayment (annuity, same term)
   const repayNum = parseFloat(repay)
-  const monthlyRate = Number(loan.rate) / 12
   const newPrincipal = Math.max(0, Number(loan.principal) - repayNum)
   const preview = !isNaN(repayNum) && repayNum > 0 && Number(loan.principal) > 0
     ? (monthsLeft && monthsLeft > 0 && monthlyRate > 0
