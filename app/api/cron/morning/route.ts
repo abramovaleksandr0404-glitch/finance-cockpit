@@ -153,8 +153,21 @@ export async function GET(req: Request) {
     const eomReceived = !!monthRow2?.salary_eom_received
     if (!eomReceived) {
       const now2 = new Date()
+      const { data: eomHols } = await supabase.from('ru_holidays')
+        .select('holiday_date')
+        .gte('holiday_date', `${monthKey}-01`)
+        .lte('holiday_date', `${monthKey}-31`)
+      const eomHolSet = new Set(
+        (eomHols ?? []).map((h: { holiday_date: string }) => String(h.holiday_date).slice(0, 10))
+      )
       const lastDay = new Date(now2.getFullYear(), now2.getMonth() + 1, 0)
-      while (lastDay.getDay() === 0 || lastDay.getDay() === 6) lastDay.setDate(lastDay.getDate() - 1)
+      while (
+        lastDay.getDay() === 0 ||
+        lastDay.getDay() === 6 ||
+        eomHolSet.has(lastDay.toISOString().split('T')[0])
+      ) {
+        lastDay.setDate(lastDay.getDate() - 1)
+      }
       if (today === lastDay.getDate()) {
         const { data: u2 } = await supabase.from('users').select('salary_net').eq('id', USER_ID).single()
         const net2 = Number(u2?.salary_net ?? 121600)
