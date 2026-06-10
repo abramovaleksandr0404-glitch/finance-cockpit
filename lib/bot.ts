@@ -1389,7 +1389,11 @@ export async function executeAction(action: BotAction): Promise<void> {
     const now = new Date()
     const { data:u } = await s.from('users').select('debit_balance,salary_net').eq('id',USER_ID).single()
     const salaryNet = Number(u?.salary_net ?? 121600)
-    const wdays = computeWorkingDays(now.getFullYear(), now.getMonth()+1)
+    const vacMonthStr = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`
+    const { data: vacHols } = await s.from('ru_holidays').select('holiday_date')
+      .gte('holiday_date', `${vacMonthStr}-01`).lte('holiday_date', `${vacMonthStr}-31`)
+    const wdays = computeWorkingDays(now.getFullYear(), now.getMonth()+1,
+      (vacHols ?? []).map((h: {holiday_date: string}) => String(h.holiday_date).slice(0,10)))
     const adj = computeVacationAdjustment(action.days, action.paid_amount, salaryNet, wdays)
     // Зачислить на дебет
     const prevBalV = Number(u?.debit_balance??0)
@@ -1398,6 +1402,8 @@ export async function executeAction(action: BotAction): Promise<void> {
     await recordDebitChange(s, prevBalV, newBalV, 'Отпускные/больничный', 'income')
     // income_event — vacation_type поле (sick/vacation) передаётся в input инструмента
     const vacationType = action.vacation_type ?? 'vacation'
+    // Если пользователь явно указал откуда вычитать (part='advance'|'eom') — уважаем его слова
+    if (action.part === 'advance' || action.part === 'eom') adj.deductFrom = action.part as 'advance' | 'eom'
     await s.from('income_events').insert({user_id:USER_ID,month_key:monthKey,event_date:new Date().toISOString().split('T')[0],event_type:'vacation',description:`${vacationType==='sick'?'Больничный':'Отпускные'} ${action.days}д`,amount:Math.round(action.paid_amount),to_debit:true})
     // Запись корректировки в months
     const { data:month } = await s.from('months').select('salary_adjustments,salary_adv_amount,salary_eom_amount').eq('user_id',USER_ID).eq('month_key',monthKey).maybeSingle()
@@ -1603,7 +1609,8 @@ export const TOOLS = [
       days:{type:'number',description:'Количество дней'},
       paid_amount:{type:'number',description:'Сумма отпускных/больничных'},
       start_date:{type:'string',description:'Дата начала YYYY-MM-DD'},
-      vacation_type:{type:'string',enum:['vacation','sick'],description:'Тип: отпуск или больничный'}
+      vacation_type:{type:'string',enum:['vacation','sick'],description:'Тип: отпуск или больничный'},
+      part:{type:'string',enum:['advance','eom'],description:'Откуда вычитать дни: advance (аванс) или eom (ЗП конца месяца). Указывай если пользователь сказал явно.'}
     },required:['days','paid_amount']} },
   { name:'create_custom_category',
     description:'Создать кастомную категорию трат с опциональным лимитом и ключевыми словами.',
@@ -1817,7 +1824,11 @@ async function handleTool(name: string, input: Record<string,unknown>): Promise<
     ])
     const salaryNet = Number(u?.salary_net ?? 121600)
     const now = new Date()
-    const workingDays = computeWorkingDays(now.getFullYear(), now.getMonth() + 1)
+    const cbMonthStr = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`
+    const { data: cbHols } = await s.from('ru_holidays').select('holiday_date')
+      .gte('holiday_date', `${cbMonthStr}-01`).lte('holiday_date', `${cbMonthStr}-31`)
+    const workingDays = computeWorkingDays(now.getFullYear(), now.getMonth() + 1,
+      (cbHols ?? []).map((h: {holiday_date: string}) => String(h.holiday_date).slice(0,10)))
     const result = computeCreditBurden(
       (loans ?? []).map(l => ({ name: l.name, min_payment: Number(l.min_payment), principal: Number(l.principal), rate: Number(l.rate) })),
       salaryNet,
