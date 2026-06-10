@@ -150,3 +150,17 @@ ANTHROPIC_API_KEY, GROQ_API_KEY, CRON_SECRET, NEXT_PUBLIC_SUPABASE_URL, NEXT_PUB
 - 2026-06-01: Создан фундамент автономной работы (CLAUDE.md, BACKLOG.md, SPRINTS.md, evals)
 - 2026-06-02: Бот переведён на tool calling (надёжное исполнение действий вместо парсинга ACTID). Добавлен mark_recurring_received для стипендии (без двойного учёта).
 - 2026-06-02: Интеграция Sprint 1 + tool calling. 44 теста. suggestEarlyRepayment, scenario_analysis tool, авто-income cron, расширенные эвалы.
+
+
+## ПРАВИЛО ДЕПЛОЯ (константа проекта, не нарушать)
+- ВСЕГДА коммитить напрямую в ветку main. НИКОГДА не создавать Pull Request и новые ветки.
+- Vercel автоматически деплоит каждый push в main.
+- Спринт считается done ТОЛЬКО после подтверждения деплоя: target=production, state=READY на Vercel.
+- Один спринт = одна правка = один тест = одно подтверждение. Никаких батчей.
+
+## АРХИТЕКТУРНЫЕ КОНСТАНТЫ (выводы post-mortem 07.06.2026)
+- Один источник истины: первичные таблицы (expenses, cards, months, users, loans).
+- Производные значения (var_spent, var_left, forecast) вычислять в коде на лету. НЕ хранить в bot_anchors.
+- bot_anchors — только для медленно меняющихся констант (working_days, daily_rate, брокер).
+- Числа считает КОД, не LLM. Любая арифметика в тексте ответа бота — баг.
+- bot_corrections в контекст бота: только category IN ('formula','fact'), limit 3.
