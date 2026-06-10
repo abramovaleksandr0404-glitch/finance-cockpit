@@ -1966,7 +1966,25 @@ async function handleTool(name: string, input: Record<string,unknown>): Promise<
   }
   // DB-writing tools
   await executeAction({ type: name, ...input } as BotAction)
-  return 'Выполнено успешно.'
+  // Sprint 27: read-after-write — после записи перечитываем ФАКТ из БД.
+  // Бот обязан цитировать эти цифры, а не свою арифметику.
+  try {
+    const sV = db()
+    const mkV = mk()
+    const [{ data: uV }, { data: cardsV }, { data: expV }] = await Promise.all([
+      sV.from('users').select('debit_balance,var_budget').eq('id', USER_ID).single(),
+      sV.from('cards').select('name,current_debt').eq('user_id', USER_ID),
+      sV.from('expenses').select('amount').eq('user_id', USER_ID).eq('month_key', mkV),
+    ])
+    const varSpentV = (expV ?? []).reduce((sum: number, e: {amount: number}) => sum + Number(e.amount), 0)
+    const varBudgetV = Number(uV?.var_budget ?? 45000)
+    const cardsStrV = (cardsV ?? []).map((c: {name: string; current_debt: number}) =>
+      `${c.name}=${Math.round(Number(c.current_debt))}₽`).join(', ')
+    return `Выполнено. ФАКТ ИЗ БД ПОСЛЕ ЗАПИСИ (цитируй ТОЛЬКО эти цифры): дебет=${Math.round(Number(uV?.debit_balance ?? 0))}₽ | потрачено_за_месяц=${Math.round(varSpentV)}₽ | остаток_переменных=${Math.round(varBudgetV - varSpentV)}₽ | долги_карт: ${cardsStrV}`
+  } catch (e) {
+    console.error('[read-after-write]', e)
+    return 'Выполнено, но верификация из БД не удалась — НЕ называй итоговые цифры, предложи пользователю спросить баланс отдельным сообщением.'
+  }
 }
 
 // Цикл tool calling: модель вызывает инструменты → выполняем → возвращаем результат → финальный текст
