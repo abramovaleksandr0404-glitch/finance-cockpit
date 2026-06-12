@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useTransition } from 'react'
+import { useState, useTransition, useEffect } from 'react'
 import { Check, Circle, Loader2, Repeat, Pencil } from 'lucide-react'
 import { setFixedPaid } from '@/app/actions'
 import { rub } from '@/lib/finance'
@@ -73,6 +73,11 @@ function FixedRow({
   const [editing, setEditing] = useState(false)
   const [amount, setAmount] = useState(currentAmount)
   const [paid, setPaid] = useState(isPaid)
+
+  // Sync local state with fresh server props (e.g. after bot marked payment).
+  // Without this, a stale "not paid" button allowed double payment.
+  useEffect(() => { setPaid(isPaid) }, [isPaid])
+  useEffect(() => { if (!editing) setAmount(currentAmount) }, [currentAmount, editing])
 
   function togglePaid() {
     const next = !paid
