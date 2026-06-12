@@ -35,6 +35,7 @@ export default async function DashboardPage({
     { data: goals },
     { data: debitHistory },
     { data: customCategories },
+    { data: holidayRows },
   ] = await Promise.all([
     supabase.from('users').select('*').eq('id', user.id).single(),
     supabase.from('months').select('*').eq('user_id', user.id).order('month_key', { ascending: false }),
@@ -46,6 +47,7 @@ export default async function DashboardPage({
     supabase.from('goals').select('*').eq('user_id', user.id).order('sort_order'),
     supabase.from('debit_history').select('amount,balance_after,description,source_type,created_at').eq('user_id', user.id).order('created_at', { ascending: false }).limit(30),
     supabase.from('custom_categories').select('id,name,monthly_limit,keywords').eq('user_id', user.id),
+    supabase.from('ru_holidays').select('holiday_date'),
   ])
 
   if (!userRow) redirect('/auth')
@@ -65,6 +67,7 @@ export default async function DashboardPage({
     goals: goals ?? [],
     debitHistory: (debitHistory ?? []) as DashboardData['debitHistory'],
     customCategories: (customCategories ?? []) as DashboardData['customCategories'],
+    holidays: (holidayRows ?? []).map((h: { holiday_date: string }) => String(h.holiday_date).slice(0, 10)),
   }
 
   return <DashboardClient data={data} monthKey={mk} initialTab={initialTab} />

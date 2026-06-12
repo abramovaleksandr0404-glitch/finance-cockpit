@@ -72,7 +72,7 @@ export interface IncomeBreakdown {
 export function calcIncome(data: DashboardData, key: string): IncomeBreakdown {
   const { user, allMonths } = data
   const { y, m } = parseMonthKey(key)
-  const split = salarySplit(y, m, user.salary_net)
+  const split = salarySplit(y, m, user.salary_net, data.holidays)
   const thisMonth = findMonth(allMonths, key)
 
   // Use stored/edited amounts if present, else computed defaults

@@ -14,11 +14,12 @@ export function lastDayOf(y: number, m: number): number {
 }
 
 /** Count workdays (Mon–Fri) in [from..to] of month m (1..12). Holidays not auto-excluded. */
-export function workdays(y: number, m: number, from: number, to: number): number {
+export function workdays(y: number, m: number, from: number, to: number, holidays?: Set<string>): number {
   let c = 0
   for (let d = from; d <= to; d++) {
     const w = new Date(y, m - 1, d).getDay()
-    if (w !== 0 && w !== 6) c++
+    const dateStr = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`
+    if (w !== 0 && w !== 6 && !holidays?.has(dateStr)) c++
   }
   return c
 }
@@ -73,10 +74,11 @@ export interface SalarySplit {
   secondDays: number
 }
 
-export function salarySplit(year: number, month: number, salaryNet: number): SalarySplit {
+export function salarySplit(year: number, month: number, salaryNet: number, holidayDates?: string[]): SalarySplit {
   const ld = lastDayOf(year, month)
-  const total = workdays(year, month, 1, ld) || 1
-  const first = workdays(year, month, 1, 15)
+  const hset = holidayDates?.length ? new Set(holidayDates) : undefined
+  const total = workdays(year, month, 1, ld, hset) || 1
+  const first = workdays(year, month, 1, 15, hset)
   const daily = salaryNet / total
   return {
     advance: Math.round(daily * first),

@@ -407,4 +407,5 @@ export interface DashboardData {
   goals: Goal[]
   debitHistory?: DebitHistoryEntry[]
   customCategories?: CustomCategory[]
+  holidays?: string[]  // ru_holidays dates YYYY-MM-DD (for workdays calc)
 }
