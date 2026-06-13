@@ -1070,11 +1070,15 @@ export async function executeAction(action: BotAction): Promise<void> {
 
   if (action.type === 'delete_expense') {
     let exp
+    const isUUID = /^[0-9a-f-]{36}$/i.test(String(action.id ?? ''))
     if (!action.id || action.id === 'last') {
-      const { data } = await s.from('expenses').select('id,amount').eq('user_id',USER_ID).eq('month_key',monthKey).order('created_at',{ascending:false}).limit(1).maybeSingle()
+      const { data } = await s.from('expenses').select('id,amount,description').eq('user_id',USER_ID).eq('month_key',monthKey).order('created_at',{ascending:false}).limit(1).maybeSingle()
+      exp = data
+    } else if (isUUID) {
+      const { data } = await s.from('expenses').select('id,amount,description').eq('user_id',USER_ID).eq('id',action.id).maybeSingle()
       exp = data
     } else {
-      const { data } = await s.from('expenses').select('id,amount').eq('user_id',USER_ID).ilike('id',`%${action.id}%`).maybeSingle()
+      const { data } = await s.from('expenses').select('id,amount,description').eq('user_id',USER_ID).eq('month_key',monthKey).ilike('description',`%${action.id}%`).order('created_at',{ascending:false}).limit(1).maybeSingle()
       exp = data
     }
     if (!exp) return // Запись не найдена — бот сообщит что не нашёл
@@ -1279,6 +1283,7 @@ export async function executeAction(action: BotAction): Promise<void> {
 
   // Получена регулярная выплата (стипендия и т.п.): зачислить + пометить чтобы не дублировать в прогнозе
   if (action.type === 'mark_recurring_received' && action.name) {
+    if (!action.confirmed) return
     const { data:u } = await s.from('users').select('debit_balance,recurring_incomes').eq('id',USER_ID).single()
     const recurring = (u?.recurring_incomes as {name:string;amount:number;day:number}[]) ?? []
     const item = recurring.find(r => r.name.toLowerCase().includes((action.name??'').toLowerCase()))
