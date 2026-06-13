@@ -936,6 +936,7 @@ export interface BotAction {
   salary_net?: number; salary_gross?: number
   // Sprint 29
   confirmed?: boolean  // required for income-recording tools to prevent auto-execution
+  clients?: Record<string, number>  // for update_revenue: {grade: count}
 }
 
 // ── НАДЁЖНЫЙ ПАРСЕР ACTION ─────────────────────────────────────────────────
