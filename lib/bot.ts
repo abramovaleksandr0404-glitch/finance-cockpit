@@ -770,6 +770,11 @@ AI-КАТЕГОРИЗАЦИЯ ТРАТ:
 Стипендия 5900₽ приходит 11 числа каждого месяца. Учитывай в прогнозе если сегодня <= 11.
 Если пользователь говорит "получил стипендию" → вызови инструмент mark_recurring_received с name="Стипендия".
 
+⛔ ЗАПРЕТ АВТОЗАЧИСЛЕНИЯ (критическое правило, не нарушать):
+record_advance, record_eom_salary, mark_recurring_received — вызывать ТОЛЬКО если пользователь явно написал одно из слов: "получил", "пришло", "зачисли", "поступило", "начислили".
+НИКОГДА не вызывать при вопросах: "покажи", "сколько", "какой", "бюджет", "прогноз", "зп", "аванс", "стипендия".
+НИКОГДА не вызывать update_cashflow при вопросах — только при явном "скорректируй", "поправь", "измени сумму".
+
 ПРАВИЛО ДЕЙСТВИЯ ВМЕСТО ВОПРОСА:
 Если из контекста очевиден ответ — отвечай сразу.
 Спрашивай ТОЛЬКО когда:
@@ -1042,6 +1047,10 @@ export async function executeAction(action: BotAction): Promise<void> {
   action.description = sanitizeStr(action.description)
 
   if (action.type === 'add_expense' && action.amount) {
+    // Антидубль: если такая же сумма+описание за последние 5 минут — пропускаем молча
+    const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString()
+    const { data: dupes } = await s.from('expenses').select('id').eq('user_id', USER_ID).eq('amount', Math.round(action.amount)).ilike('description', action.description ?? '').gte('created_at', fiveMinAgo).limit(1)
+    if (dupes && dupes.length > 0) return
     await s.from('expenses').insert({user_id:USER_ID,month_key:monthKey,expense_date:new Date().toISOString().split('T')[0],category:action.category??'Прочее',amount:Math.round(action.amount),description:action.description??null,source_type:'debit'})
     const { data:u } = await s.from('users').select('debit_balance').eq('id',USER_ID).single()
     const prevBal = Number(u?.debit_balance ?? 0)
@@ -1068,6 +1077,7 @@ export async function executeAction(action: BotAction): Promise<void> {
       const { data } = await s.from('expenses').select('id,amount').eq('user_id',USER_ID).ilike('id',`%${action.id}%`).maybeSingle()
       exp = data
     }
+    if (!exp) return // Запись не найдена — бот сообщит что не нашёл
     if (exp) {
       await s.from('expenses').delete().eq('id',exp.id)
       const { data:u } = await s.from('users').select('debit_balance').eq('id',USER_ID).single()
