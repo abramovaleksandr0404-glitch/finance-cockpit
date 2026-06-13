@@ -933,6 +933,8 @@ export interface BotAction {
   content?: string; importance?: number; query?: string
   // Sprint 20
   salary_net?: number; salary_gross?: number
+  // Sprint 29
+  confirmed?: boolean  // required for income-recording tools to prevent auto-execution
 }
 
 // ── НАДЁЖНЫЙ ПАРСЕР ACTION ─────────────────────────────────────────────────
