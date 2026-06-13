@@ -1,7 +1,8 @@
 /**
- * Finance Cockpit Bot — v7
- * Жёсткий мобильный формат + надёжный парсер ACTION + квартальный бонус
+ * Finance Cockpit Bot — v8
+ * Детерминированный расчёт через get_financial_summary. LLM не считает цифры.
  */
+let _lastUserMessage = '' // защита зачисления — реальный текст пользователя
 import { createClient, SupabaseClient } from '@supabase/supabase-js'
 import { analyzeDecision, suggestEarlyRepayment, computeWorkingDays, computeVacationAdjustment, computeCreditBurden, computeOptimalRepayment } from './calc'
 
@@ -582,9 +583,12 @@ export const SYSTEM_PROMPT = `╔═══════════════�
 ║  ПРАВИЛО №0 — АБСОЛЮТНЫЙ ПРИОРИТЕТ  ║
 ╚═══════════════════════════════════════╝
 
-Всё что находится в секции ЯКОРЯ контекста — ЕСТЬ ФИНАЛЬНАЯ ИСТИНА.
+⚡ ЕДИНСТВЕННЫЙ ИСТОЧНИК ЦИФР — инструмент get_financial_summary.
+При любом финансовом вопросе: ПЕРВЫМ вызови get_financial_summary, ПОТОМ отвечай.
+НЕ называй финансовые цифры без вызова get_financial_summary.
 КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО:
-  ✗ Пересчитывать значения из секции ЯКОРЯ
+  ✗ Считать в голове
+  ✗ Брать цифры из якорей или контекста
   ✗ Сомневаться в значениях якорей
   ✗ Давать другое число чем в якоре (даже если считаешь иначе)
   ✗ Писать 'расхождение' или 'не совпадает' для якорных значений
@@ -1119,6 +1123,8 @@ export async function executeAction(action: BotAction): Promise<void> {
   }
 
   if (action.type === 'mark_salary') {
+    const payW = /получил|пришло|зачисли|поступило|начислили|пришла|зачислилась|перечислили/i
+    if (!payW.test(_lastUserMessage)) return
     const { data:u } = await s.from('users').select('debit_balance,salary_net').eq('id',USER_ID).single()
     const { data:month } = await s.from('months').select('*').eq('user_id',USER_ID).eq('month_key',monthKey).maybeSingle()
     const net = Number(u?.salary_net??121600)
@@ -1287,7 +1293,8 @@ export async function executeAction(action: BotAction): Promise<void> {
 
   // Получена регулярная выплата (стипендия и т.п.): зачислить + пометить чтобы не дублировать в прогнозе
   if (action.type === 'mark_recurring_received' && action.name) {
-    if (!action.confirmed) return
+    const payW2 = /получил|пришло|зачисли|поступило|начислили|пришла|зачислилась|перечислили/i
+    if (!payW2.test(_lastUserMessage)) return
     const { data:u } = await s.from('users').select('debit_balance,recurring_incomes').eq('id',USER_ID).single()
     const recurring = (u?.recurring_incomes as {name:string;amount:number;day:number}[]) ?? []
     const item = recurring.find(r => r.name.toLowerCase().includes((action.name??'').toLowerCase()))
@@ -1819,7 +1826,61 @@ async function callClaude(modelId: string, systemBlocks: unknown[], messages: un
 }
 
 // Обработка одного инструмента — возвращает строку-результат для tool_result
+
+// ═══════════════════════════════════════════════════════════════
+// ДЕТЕРМИНИРОВАННЫЙ РАСЧЁТ — единственный источник финансовых цифр
+// ═══════════════════════════════════════════════════════════════
+async function getFinancialSummaryJson(): Promise<string> {
+  const s = db(); const monthKey = mk()
+  const [
+    { data: u }, { data: month }, { data: expenses },
+    { data: cards }, { data: loans },
+  ] = await Promise.all([
+    s.from('users').select('debit_balance,tbank_debit,var_budget,fixed_costs,salary_net,recurring_incomes').eq('id', USER_ID).single(),
+    s.from('months').select('*').eq('user_id', USER_ID).eq('month_key', monthKey).maybeSingle(),
+    s.from('expenses').select('amount').eq('user_id', USER_ID).eq('month_key', monthKey),
+    s.from('cards').select('name,current_debt,card_limit').eq('user_id', USER_ID),
+    s.from('loans').select('name,principal,min_payment,paid_month').eq('user_id', USER_ID),
+  ])
+  const debit = Math.round(Number(u?.debit_balance ?? 0))
+  const tbDebit = Math.round(Number(u?.tbank_debit ?? 0))
+  const liquid = debit + tbDebit
+  const cardDebt = (cards ?? []).reduce((s,c) => s + Math.round(Number(c.current_debt ?? 0)), 0)
+  const netPos = liquid - cardDebt
+  const varSpent = (expenses ?? []).reduce((s,e) => s + Math.round(Number(e.amount ?? 0)), 0)
+  const varBudget = Math.round(Number(u?.var_budget ?? 45000))
+  const varLeft = varBudget - varSpent
+  const fc = (u?.fixed_costs as {name:string,amount:number}[]) ?? []
+  const fp = (month?.fixed_paid ?? {}) as Record<string,number|boolean>
+  const fixedPaid = fc.reduce((s,f,i) => { const v=fp[String(i)]; return (v!=null&&v!==false)?s+Math.round(Number(typeof v==='number'?v:f.amount)):s },0)
+  const fixedTotal = fc.reduce((s,f) => s+Math.round(Number(f.amount)),0)
+  const advRec = !!month?.salary_adv_received; const eomRec = !!month?.salary_eom_received
+  const advAmt = Math.round(Number(month?.salary_adv_amount??0))
+  const eomAmt = Math.round(Number(month?.salary_eom_amount??0))
+  const bonAmt = Math.round(Number(month?.bonus_amount??0))
+  const pendIncome = (advRec?0:advAmt)+(eomRec?0:eomAmt+bonAmt)
+  const pendLoans = (loans??[]).filter(l=>Number(l.principal)>0&&l.paid_month!==monthKey)
+    .reduce((s,l)=>s+Math.min(Math.round(Number(l.min_payment)),Math.round(Number(l.principal))),0)
+  const forecast = netPos + pendIncome - pendLoans - (fixedTotal-fixedPaid) - varLeft
+  const recvd = (month?.recurring_received as string[]) ?? []
+  const ri = (u?.recurring_incomes as {name:string,amount:number,day:number}[]) ?? []
+  return JSON.stringify({
+    source:'LIVE_DB',month_key:monthKey,
+    debit_sber:debit,tbank_debit:tbDebit,total_liquid:liquid,
+    card_debt_total:cardDebt,
+    cards:(cards??[]).map((c:{name:string,current_debt:number,card_limit:number})=>({name:c.name,debt:Math.round(Number(c.current_debt)),available:Math.round(Number(c.card_limit))-Math.round(Number(c.current_debt))})),
+    net_position:netPos,
+    var_spent:varSpent,var_budget:varBudget,var_left:varLeft,
+    fixed_paid:fixedPaid,fixed_total:fixedTotal,fixed_unpaid:fixedTotal-fixedPaid,
+    salary_adv:{amount:advAmt,received:advRec},salary_eom:{amount:eomAmt,received:eomRec},
+    bonus:{amount:bonAmt,received:eomRec},
+    pending_income:pendIncome,pending_loans:pendLoans,forecast_end:forecast,
+    recurring:ri.map(r=>({...r,received:recvd.includes(r.name)})),
+  },null,2)
+}
+
 async function handleTool(name: string, input: Record<string,unknown>): Promise<string> {
+  if (name === 'get_financial_summary') return await getFinancialSummaryJson()
   // Computation tools (read-only, не пишут в БД)
   if (name === 'scenario_analysis') {
     let liqCurrent = Number(input.currentLiquid ?? 0)
@@ -2070,6 +2131,7 @@ async function runToolLoop(modelId: string, systemBlocks: unknown[], initialMess
 }
 
 async function processWithModel(text: string, chatId: number, model: 'haiku'|'sonnet'): Promise<string> {
+  _lastUserMessage = text
   const needAnalysis = /проанализир|анализ трат|паттерн|на что трачу|куда уход|структур.*трат/i.test(text)
   const [context, history, analysis] = await Promise.all([
     getContext(),
