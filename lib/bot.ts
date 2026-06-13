@@ -745,7 +745,8 @@ AI-КАТЕГОРИЗАЦИЯ ТРАТ:
 • Переменные остаток: {varLeft}₽
 
 📊 ПРОГНОЗ КОНЦА МЕСЯЦА:
-{debit} + {total_income} − {loans} − {fixedUnpaid} − {varLeft} = {forecast}₽
+({debit} − {card_debt}) + {total_income} − {loans} − {fixedUnpaid} − {varLeft} = {forecast}₽
+Стартовая точка — ЧИСТАЯ ПОЗИЦИЯ (дебет − долг карт). Если долг карты не погашен до конца месяца — он вычитается из прогноза.
 
 Цифры ТОЛЬКО из ЯКОРЕЙ и ГОТОВЫХ ЦИФР. НЕ пересчитывать.
 Если раздел пустой — скажи это, но не пропускай.
@@ -1001,7 +1002,7 @@ export async function executeAction(action: BotAction): Promise<void> {
     record_vacation_pay:'отпускные', create_custom_category:'новая категория',
     add_keyword:'ключевое слово', remove_custom_category:'удал. категории',
     learn_mapping:'обучение', save_correction:'коррекция',
-    reclassify_expense:'переклассификация', update_cashflow:'кешфлоу',
+    reclassify_expense:'переклассификация', update_cashflow:'кешфлоу', update_revenue:'выручка',
     add_backlog_item:'бэклог', add_multiday_expense:'мультидневная трата',
     update_salary:'оклад',
   }
@@ -1515,6 +1516,27 @@ export async function executeAction(action: BotAction): Promise<void> {
     }
   }
 
+  if (action.type === 'update_revenue') {
+    const targetMk = action.month_key ?? (() => {
+      const now = new Date(); const pm = new Date(now.getFullYear(), now.getMonth(), 1)
+      pm.setMonth(pm.getMonth()-1)
+      return `${pm.getFullYear()}-${String(pm.getMonth()+1).padStart(2,'0')}`
+    })()
+    const upd: Record<string,unknown> = {}
+    if (action.revenue  != null) upd.revenue  = action.revenue
+    if (action.clients  != null) upd.clients  = action.clients
+    if (Object.keys(upd).length) {
+      await s.from('months').upsert({ user_id:USER_ID, month_key:targetMk, ...upd },
+        { onConflict:'user_id,month_key' })
+      // Сбросить hardcoded bonus_amount следующего месяца → пересчитается динамически
+      const [y,m] = targetMk.split('-').map(Number)
+      const nextDate = new Date(y, m, 1)
+      const nextMk = `${nextDate.getFullYear()}-${String(nextDate.getMonth()+1).padStart(2,'0')}`
+      await s.from('months').update({ bonus_amount: null })
+        .eq('user_id',USER_ID).eq('month_key',nextMk)
+    }
+  }
+
   if (action.type === 'add_backlog_item' && action.title) {
     await s.from('bot_backlog').insert({
       user_id: USER_ID,
@@ -1681,6 +1703,13 @@ export const TOOLS = [
         bonus_amount: { type: 'number', description: 'новая сумма бонуса' },
       },
     } },
+  { name: 'update_revenue',
+    description: 'Обновить выручку и/или клиентов за прошлый или текущий месяц. Вызывай когда пользователь говорит "выручка за май была X", "скорректируй выручку", "добавь клиента за прошлый месяц". После обновления бонус следующего месяца пересчитается автоматически.',
+    input_schema: { type: 'object', properties: {
+      month_key: { type: 'string', description: 'YYYY-MM (необязательно, по умолчанию предыдущий месяц)' },
+      revenue: { type: 'number', description: 'новая выручка за месяц' },
+      clients: { type: 'object', description: 'новые клиенты {grade: count}' },
+    } } },
   { name: 'add_backlog_item',
     description: 'Записать задачу/идею/баг в бэклог разработки бота. ОБЯЗАТЕЛЬНО вызывай когда пользователь говорит: "запиши в бэклог", "добавь задачу", "надо сделать", "реализуй в следующем спринте", "не хватает инструмента [X]". НИКОГДА не пиши "Записал" без реального вызова этого инструмента.',
     input_schema: {
