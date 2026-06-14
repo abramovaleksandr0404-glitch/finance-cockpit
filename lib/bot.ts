@@ -2161,17 +2161,31 @@ async function runToolLoop(modelId: string, systemBlocks: unknown[], initialMess
 async function processWithModel(text: string, chatId: number, model: 'haiku'|'sonnet'): Promise<string> {
   _lastUserMessage = text
   const needAnalysis = /проанализир|анализ трат|паттерн|на что трачу|куда уход|структур.*трат/i.test(text)
-  const [context, history, analysis] = await Promise.all([
+  // Принудительный финансовый контекст: данные из БД ВСЕГДА при финансовых вопросах
+  const isFinancial = /дебет|бюджет|бонус|баланс|трат|потрач|осталось|доход|аванс|зп|зарплат|кредит|карт|финанс|остат|переменн|лимит|деньг|прогноз|сколько|ликвидност|сальдо|позиц/i.test(text)
+  const [context, history, analysis, forcedFinData] = await Promise.all([
     getContext(),
     getHistory(chatId),
     needAnalysis ? getSpendingAnalysis() : Promise.resolve(''),
+    isFinancial ? getFinancialSummaryJson().catch(() => '') : Promise.resolve(''),
   ])
   const fullContext = context + (analysis ? '\n\n' + analysis : '')
   const modelId = model === 'sonnet' ? 'claude-sonnet-4-6' : 'claude-haiku-4-5-20251001'
-  const systemBlocks = [
+  const systemBlocks: unknown[] = [
     { type:'text', text:SYSTEM_PROMPT, cache_control:{type:'ephemeral'} },
     { type:'text', text:'\n\nКОНТЕКСТ:\n'+fullContext },
   ]
+  if (forcedFinData) {
+    systemBlocks.push({ type:'text', text:
+      '\n\n╔══ ДАННЫЕ ИЗ БД — ИСПОЛЬЗОВАТЬ ТОЛЬКО ЭТИ ЦИФРЫ ══╗\n' +
+      '⚠️ НЕ считать самостоятельно. НЕ брать из контекста выше.\n' +
+      '• БОНУС В ТЕКУЩЕМ МЕСЯЦЕ = рассчитать из prev_month (прошлый месяц) в данных ниже\n' +
+      '• ПРОГНОЗ = forecast_end из данных ниже дословно\n' +
+      '• ЗП = salary_eom.amount, АВАНС = salary_adv.amount\n' +
+      '╚═══════════════════════════════════════════════════════╝\n' +
+      forcedFinData
+    })
+  }
   const messages = [
     ...history.map(h => ({ role:h.role as 'user'|'assistant', content:h.content })),
     { role:'user', content:text }
