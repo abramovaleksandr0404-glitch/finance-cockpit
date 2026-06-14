@@ -586,6 +586,15 @@ export const SYSTEM_PROMPT = `╔═══════════════�
 ⚡ ЕДИНСТВЕННЫЙ ИСТОЧНИК ЦИФР — инструмент get_financial_summary.
 При любом финансовом вопросе: ПЕРВЫМ вызови get_financial_summary, ПОТОМ отвечай.
 НЕ называй финансовые цифры без вызова get_financial_summary.
+
+⚡ ПРАВИЛА ФОРМАТИРОВАНИЯ ОТВЕТА:
+• ПРОГНОЗ = forecast_end из JSON — брать ДОСЛОВНО, НЕ пересчитывать
+• ЗП = salary_eom.amount из JSON — НЕ пересчитывать самостоятельно
+• АВАНС = salary_adv.amount из JSON — НЕ пересчитывать
+• БОНУС = bonus.amount из JSON — НЕ пересчитывать
+• Перерасход переменных уже ВКЛЮЧЁН в текущие балансы — НЕ вычитать повторно в прогнозе
+• Внеплановые траты (extra_spent) — показывать отдельно, НЕ включать в лимит переменных
+
 КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО:
   ✗ Считать в голове
   ✗ Брать цифры из якорей или контекста
@@ -1838,7 +1847,7 @@ async function getFinancialSummaryJson(): Promise<string> {
   ] = await Promise.all([
     s.from('users').select('debit_balance,tbank_debit,var_budget,fixed_costs,salary_net,recurring_incomes').eq('id', USER_ID).single(),
     s.from('months').select('*').eq('user_id', USER_ID).eq('month_key', monthKey).maybeSingle(),
-    s.from('expenses').select('amount').eq('user_id', USER_ID).eq('month_key', monthKey),
+    s.from('expenses').select('amount,category').eq('user_id', USER_ID).eq('month_key', monthKey),
     s.from('cards').select('name,current_debt,card_limit').eq('user_id', USER_ID),
     s.from('loans').select('name,principal,min_payment,paid_month').eq('user_id', USER_ID),
   ])
@@ -1847,7 +1856,9 @@ async function getFinancialSummaryJson(): Promise<string> {
   const liquid = debit + tbDebit
   const cardDebt = (cards ?? []).reduce((s,c) => s + Math.round(Number(c.current_debt ?? 0)), 0)
   const netPos = liquid - cardDebt
-  const varSpent = (expenses ?? []).reduce((s,e) => s + Math.round(Number(e.amount ?? 0)), 0)
+  // Внеплановые траты (крупные разовые) НЕ входят в переменный лимит
+  const varSpent = (expenses ?? []).filter((e:{category:string}) => e.category !== 'Внеплановые').reduce((s,e) => s + Math.round(Number(e.amount ?? 0)), 0)
+  const extraSpent = (expenses ?? []).filter((e:{category:string}) => e.category === 'Внеплановые').reduce((s,e) => s + Math.round(Number(e.amount ?? 0)), 0)
   const varBudget = Math.round(Number(u?.var_budget ?? 45000))
   const varLeft = varBudget - varSpent
   const fc = (u?.fixed_costs as {name:string,amount:number}[]) ?? []
@@ -1869,6 +1880,9 @@ async function getFinancialSummaryJson(): Promise<string> {
   const totalPendingIncome = pendIncome + pendingRecurring
   // Плановые покупки из goals
   const { data: goals } = await s.from('goals').select('name,amount,purchased,month_key').eq('user_id',USER_ID).eq('month_key',monthKey)
+  // Данные прошлого месяца для расчёта бонуса текущего
+  const prevMk = (() => { const [y,m] = monthKey.split('-').map(Number); const d = new Date(y, m-2, 1); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}` })()
+  const { data: prevMonth } = await s.from('months').select('clients,revenue,bonus_amount').eq('user_id',USER_ID).eq('month_key',prevMk).maybeSingle()
   const planned = (goals ?? []).filter((g:{purchased:boolean}) => !g.purchased)
   const plannedTotal = planned.reduce((s,g:{amount:number}) => s + Math.round(Number(g.amount)), 0)
   // Прогноз с полным pending_income (включая recurring)
@@ -1879,7 +1893,7 @@ async function getFinancialSummaryJson(): Promise<string> {
     card_debt_total:cardDebt,
     cards:(cards??[]).map((c:{name:string,current_debt:number,card_limit:number})=>({name:c.name,debt:Math.round(Number(c.current_debt)),available:Math.round(Number(c.card_limit))-Math.round(Number(c.current_debt))})),
     net_position:netPos,
-    var_spent:varSpent,var_budget:varBudget,var_left:varLeft,
+    var_spent:varSpent,var_budget:varBudget,var_left:varLeft,extra_spent:extraSpent,
     fixed_paid:fixedPaid,fixed_total:fixedTotal,fixed_unpaid:fixedTotal-fixedPaid,
     salary_adv:{amount:advAmt,received:advRec},salary_eom:{amount:eomAmt,received:eomRec},
     bonus:{amount:bonAmt,received:eomRec},
@@ -1889,6 +1903,7 @@ async function getFinancialSummaryJson(): Promise<string> {
     planned_total:plannedTotal,
     forecast_end:forecastFull,
     recurring:ri.map(r=>({...r,received:recvd.includes(r.name)})),
+    prev_month:{ month_key:prevMk, clients:prevMonth?.clients, revenue:prevMonth?.revenue, bonus_received:prevMonth?.bonus_amount },
   },null,2)
 }
 
