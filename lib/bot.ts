@@ -220,7 +220,7 @@ export async function getContext(): Promise<string> {
   const fixedUnpaid = Math.max(0, fixedTotal - fixedPaidSum)
 
   const varBudget = Number(user.var_budget ?? 40000)
-  const varSpent = (expenses ?? []).reduce((s,e) => s+Number(e.amount), 0)
+  const varSpent = (expenses ?? []).filter((e: {category?: string}) => e.category !== 'Внеплановые').reduce((s,e) => s+Number(e.amount), 0)
   const varLeft = Math.max(0, varBudget - varSpent)
 
   const prevVarSpent = (prevExpenses ?? []).reduce((s, e) => s + Number(e.amount), 0)
