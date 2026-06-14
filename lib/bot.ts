@@ -1864,6 +1864,15 @@ async function getFinancialSummaryJson(): Promise<string> {
   const forecast = netPos + pendIncome - pendLoans - (fixedTotal-fixedPaid) - varLeft
   const recvd = (month?.recurring_received as string[]) ?? []
   const ri = (u?.recurring_incomes as {name:string,amount:number,day:number}[]) ?? []
+  // Стипендия в pending_income если ещё не получена
+  const pendingRecurring = ri.filter(r => !recvd.includes(r.name)).reduce((s,r) => s + r.amount, 0)
+  const totalPendingIncome = pendIncome + pendingRecurring
+  // Плановые покупки из goals
+  const { data: goals } = await s.from('goals').select('name,amount,purchased,month_key').eq('user_id',USER_ID).eq('month_key',monthKey)
+  const planned = (goals ?? []).filter((g:{purchased:boolean}) => !g.purchased)
+  const plannedTotal = planned.reduce((s,g:{amount:number}) => s + Math.round(Number(g.amount)), 0)
+  // Прогноз с полным pending_income (включая recurring)
+  const forecastFull = netPos + totalPendingIncome - pendLoans - (fixedTotal-fixedPaid) - Math.max(0, varLeft)
   return JSON.stringify({
     source:'LIVE_DB',month_key:monthKey,
     debit_sber:debit,tbank_debit:tbDebit,total_liquid:liquid,
@@ -1874,7 +1883,11 @@ async function getFinancialSummaryJson(): Promise<string> {
     fixed_paid:fixedPaid,fixed_total:fixedTotal,fixed_unpaid:fixedTotal-fixedPaid,
     salary_adv:{amount:advAmt,received:advRec},salary_eom:{amount:eomAmt,received:eomRec},
     bonus:{amount:bonAmt,received:eomRec},
-    pending_income:pendIncome,pending_loans:pendLoans,forecast_end:forecast,
+    pending_income:totalPendingIncome,pending_salary:pendIncome,pending_recurring:pendingRecurring,
+    pending_loans:pendLoans,
+    planned_purchases:planned.map((g:{name:string,amount:number})=>({name:g.name,amount:Math.round(Number(g.amount))})),
+    planned_total:plannedTotal,
+    forecast_end:forecastFull,
     recurring:ri.map(r=>({...r,received:recvd.includes(r.name)})),
   },null,2)
 }
