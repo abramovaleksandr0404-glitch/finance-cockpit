@@ -1180,7 +1180,7 @@ export async function executeAction(action: BotAction): Promise<void> {
   if (action.type === 'mark_single_fixed' && action.name) {
     const { data:u } = await s.from('users').select('debit_balance,fixed_costs').eq('id',USER_ID).single()
     const { data:month } = await s.from('months').select('fixed_paid').eq('user_id',USER_ID).eq('month_key',monthKey).maybeSingle()
-    const fc = (u?.fixed_costs as {name:string;amount:number}[]) ?? []
+    const fc = (u?.fixed_costs as {name:string;amount:number;source?:string}[]) ?? []
     const idx = fc.findIndex(f => f.name.toLowerCase().includes((action.name??'').toLowerCase()))
     if (idx >= 0) {
       const fp = (month?.fixed_paid as Record<string,number|boolean>) ?? {}
@@ -1202,17 +1202,28 @@ export async function executeAction(action: BotAction): Promise<void> {
   if (action.type === 'mark_fixed_paid') {
     const { data:u } = await s.from('users').select('debit_balance,fixed_costs').eq('id',USER_ID).single()
     const { data:month } = await s.from('months').select('fixed_paid').eq('user_id',USER_ID).eq('month_key',monthKey).maybeSingle()
-    const fc = (u?.fixed_costs as {name:string;amount:number}[]) ?? []
+    const fc = (u?.fixed_costs as {name:string;amount:number;source?:string}[]) ?? []
     const fp = (month?.fixed_paid as Record<string,number|boolean>) ?? {}
     const newFp: Record<string,number> = {}
-    let total = 0
-    fc.forEach((f,i) => { if (!fp[String(i)]) { newFp[String(i)]=f.amount; total+=f.amount } })
-    if (total > 0) {
-      const prevBal = Number(u?.debit_balance??0)
-      const newBal = Math.round((prevBal-total)*100)/100
+    let totalDebit = 0  // с дебета (уменьшает debit_balance)
+    let totalCard = 0   // с кредитки (НЕ уменьшает debit_balance)
+    fc.forEach((f,i) => {
+      if (!fp[String(i)]) {
+        newFp[String(i)] = f.amount
+        const isCard = f.source === 'credit_tbank' || f.source === 'credit_sber' || f.source === 'card'
+        if (isCard) totalCard += f.amount
+        else totalDebit += f.amount
+      }
+    })
+    if (totalDebit + totalCard > 0) {
       await s.from('months').update({fixed_paid:{...fp,...newFp}}).eq('user_id',USER_ID).eq('month_key',monthKey)
-      await s.from('users').update({debit_balance:newBal,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
-      await recordDebitChange(s, prevBal, newBal, `Все постоянные`, 'fixed')
+      if (totalDebit > 0) {
+        // FIX: вычитаем из дебета ТОЛЬКО дебетовые постоянные
+        const prevBal = Number(u?.debit_balance??0)
+        const newBal = Math.round((prevBal-totalDebit)*100)/100
+        await s.from('users').update({debit_balance:newBal,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
+        await recordDebitChange(s, prevBal, newBal, `Постоянные с дебета ${totalDebit}₽${totalCard>0?` | с карты ${totalCard}₽ (дебет не тронут)`:''}`, 'fixed')
+      }
     }
   }
 
