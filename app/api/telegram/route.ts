@@ -31,6 +31,14 @@ export async function POST(req: Request) {
   if (callbackQuery) {
     const cbData = callbackQuery.data as string | undefined
     const cbMsgChatId = ((callbackQuery.message as Record<string, unknown>)?.chat as Record<string, number>)?.id
+    const cbLabel: Record<string,string> = {
+      received_stipend: '🎙 [кнопка] Стипендия получена',
+      received_advance: '🎙 [кнопка] Аванс получен',
+      received_eom: '🎙 [кнопка] ЗП получена',
+      skip: '🎙 [кнопка] Пропустить',
+    }
+    // Логируем нажатие кнопки
+    await import('@/lib/bot').then(b => b.logMessage && b.logMessage(cbMsgChatId ?? 0, 'user', cbLabel[cbData ?? ''] ?? `[кнопка: ${cbData}]`, 'callback'))
     if (cbData === 'received_stipend') {
       await executeAction({ type: 'mark_recurring_received', name: 'Стипендия' })
       await answerCallbackQuery(callbackQuery.id as string, '✅ Стипендия зачислена!')
@@ -59,6 +67,8 @@ export async function POST(req: Request) {
       const transcribed = await transcribeVoice(fileId)
       if (transcribed) {
         await sendTelegram(chatId, `🎙 _«${transcribed}»_`)
+        // Логируем голосовое с типом 'voice' 
+        await import('@/lib/bot').then(b => b.logMessage && b.logMessage(chatId, 'user', `[голос] ${transcribed}`, 'voice'))
         const reply = await processMessage(transcribed, chatId)
         await sendTelegram(chatId, reply)
       } else {
