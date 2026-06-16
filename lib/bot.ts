@@ -1385,12 +1385,17 @@ export async function executeAction(action: BotAction): Promise<void> {
   }
 
   if (action.type === 'update_loan' && action.name) {
-    const { data:loan } = await s.from('loans').select('id').eq('user_id',USER_ID).ilike('name',`%${action.name}%`).maybeSingle()
+    const { data:loan } = await s.from('loans').select('id,principal').eq('user_id',USER_ID).ilike('name',`%${action.name}%`).maybeSingle()
     if (loan) {
       const upd: Record<string,unknown> = {}
-      if (action.principal != null) upd.principal = Math.round(action.principal)
-      if (action.rate != null) upd.rate = action.rate
-      if (action.min_payment != null) upd.min_payment = Math.round(action.min_payment)
+      // ЗАЩИТА: тело кредита 10к–5млн (отсекаем путаницу тело/переплата)
+      if (action.principal != null && action.principal >= 10000 && action.principal <= 5000000) {
+        upd.principal = Math.round(action.principal)
+      }
+      if (action.rate != null) upd.rate = action.rate > 1 ? action.rate / 100 : action.rate
+      if (action.min_payment != null && action.min_payment >= 100 && action.min_payment <= 500000) {
+        upd.min_payment = Math.round(action.min_payment)
+      }
       if (action.end_date) upd.end_date = action.end_date
       if (Object.keys(upd).length) {
         await s.from('loans').update(upd).eq('id', loan.id)
@@ -1855,6 +1860,33 @@ async function callClaude(modelId: string, systemBlocks: unknown[], messages: un
 // ═══════════════════════════════════════════════════════════════
 // ДЕТЕРМИНИРОВАННЫЙ РАСЧЁТ — единственный источник финансовых цифр
 // ═══════════════════════════════════════════════════════════════
+
+// ── ДЕТЕРМИНИРОВАННАЯ СВОДКА КРЕДИТОВ ──
+async function getLoansSummaryJson(): Promise<string> {
+  const s = db()
+  const { data: loans } = await s.from('loans').select('name,principal,rate,min_payment,end_date,paid_month').eq('user_id', USER_ID).order('rate', { ascending: false })
+  const mk2 = mk()
+  const list = (loans ?? []).map((l: {name:string,principal:number,rate:number,min_payment:number,end_date:string,paid_month:string}) => {
+    const principal = Math.round(Number(l.principal))
+    const rate = Number(l.rate)
+    const minPay = Math.round(Number(l.min_payment))
+    const monthlyRate = rate / 12
+    let monthsLeft = 0
+    if (minPay > principal * monthlyRate) {
+      monthsLeft = Math.ceil(-Math.log(1 - (principal * monthlyRate) / minPay) / Math.log(1 + monthlyRate))
+    }
+    const overpay = Math.max(0, minPay * monthsLeft - principal)
+    return { name:l.name, principal, rate_percent:Math.round(rate*10000)/100, min_payment:minPay, end_date:l.end_date, paid_this_month:l.paid_month===mk2, months_left:monthsLeft, overpay_estimate:overpay }
+  })
+  return JSON.stringify({
+    source:'LIVE_DB',
+    loans:list,
+    total_principal:list.reduce((s,l)=>s+l.principal,0),
+    total_min_payment_monthly:list.reduce((s,l)=>s+l.min_payment,0),
+    total_overpay_estimate:list.reduce((s,l)=>s+l.overpay_estimate,0),
+  }, null, 2)
+}
+
 async function getFinancialSummaryJson(): Promise<string> {
   const s = db(); const monthKey = mk()
   const [
@@ -2179,11 +2211,13 @@ async function processWithModel(text: string, chatId: number, model: 'haiku'|'so
   const needAnalysis = /проанализир|анализ трат|паттерн|на что трачу|куда уход|структур.*трат/i.test(text)
   // Принудительный финансовый контекст: данные из БД ВСЕГДА при финансовых вопросах
   const isFinancial = /дебет|бюджет|бонус|баланс|трат|потрач|осталось|доход|аванс|зп|зарплат|кредит|карт|финанс|остат|переменн|лимит|деньг|прогноз|сколько|ликвидност|сальдо|позиц/i.test(text)
-  const [context, history, analysis, forcedFinData] = await Promise.all([
+  const isLoans = /кредит|долг|погаш|рефинанс|досрочн|переплат|займ|ставк/i.test(text)
+  const [context, history, analysis, forcedFinData, forcedLoans] = await Promise.all([
     getContext(),
     getHistory(chatId),
     needAnalysis ? getSpendingAnalysis() : Promise.resolve(''),
     isFinancial ? getFinancialSummaryJson().catch(() => '') : Promise.resolve(''),
+    isLoans ? getLoansSummaryJson().catch(() => '') : Promise.resolve(''),
   ])
   const fullContext = context + (analysis ? '\n\n' + analysis : '')
   const modelId = model === 'sonnet' ? 'claude-sonnet-4-6' : 'claude-haiku-4-5-20251001'
@@ -2191,6 +2225,13 @@ async function processWithModel(text: string, chatId: number, model: 'haiku'|'so
     { type:'text', text:SYSTEM_PROMPT, cache_control:{type:'ephemeral'} },
     { type:'text', text:'\n\nКОНТЕКСТ:\n'+fullContext },
   ]
+  if (forcedLoans) {
+    systemBlocks.push({ type:'text', text:
+      '\n\n╔══ КРЕДИТЫ ИЗ БД — ТОЛЬКО ЭТИ ЦИФРЫ ══╗\n' +
+      '⚠️ Тело, ставку, переплату, остаток месяцев бери ТОЛЬКО отсюда. НЕ пересчитывай переплату сам.\n' +
+      '╚═══════════════════════════════════════╝\n' + forcedLoans
+    })
+  }
   if (forcedFinData) {
     systemBlocks.push({ type:'text', text:
       '\n\n╔══ ДАННЫЕ ИЗ БД — ИСПОЛЬЗОВАТЬ ТОЛЬКО ЭТИ ЦИФРЫ ══╗\n' +
