@@ -34,8 +34,13 @@ export async function getHistory(chatId: number) {
   const { data } = await db().from('bot_messages').select('role,content').eq('chat_id', chatId).order('created_at', { ascending: false }).limit(8)
   return (data ?? []).reverse()
 }
-export async function saveHistory(chatId: number, role: 'user'|'assistant', content: string) {
-  await db().from('bot_messages').insert({ chat_id: chatId, user_id: USER_ID, role, content }).then(()=>{})
+export async function saveHistory(chatId: number, role: 'user'|'assistant', content: string, msgType = 'text') {
+  await db().from('bot_messages').insert({ chat_id: chatId, user_id: USER_ID, role, content, msg_type: msgType }).then(()=>{})
+}
+
+// Публичная функция для логирования из route.ts
+export async function logMessage(chatId: number, role: 'user'|'assistant', content: string, msgType = 'text') {
+  await db().from('bot_messages').insert({ chat_id: chatId, user_id: USER_ID, role, content, msg_type: msgType }).then(()=>{})
 }
 export async function storeChatId(chatId: number) {
   await db().from('users').update({ telegram_chat_id: chatId }).eq('id', USER_ID)
@@ -2192,8 +2197,8 @@ async function processWithModel(text: string, chatId: number, model: 'haiku'|'so
   ]
   const { text: reply } = await runToolLoop(modelId, systemBlocks, messages)
   Promise.all([
-    saveHistory(chatId,'user',text),
-    saveHistory(chatId,'assistant',reply)
+    saveHistory(chatId,'user',text,'text'),
+    saveHistory(chatId,'assistant',reply,'text')
   ]).catch(()=>{})
   return reply
 }
