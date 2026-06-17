@@ -19,8 +19,9 @@ export default function IncomeWidget({ data, monthKey }: { data: DashboardData; 
   const revenue = month?.revenue ?? 0
 
   // ЗАДАЧА 6: регулярные доходы (стипендия и т.п.)
-  const recurringIncomes = (user?.recurring_incomes ?? []) as { day: number; name: string; amount: number }[]
-  const recurringReceived = (month?.recurring_received ?? []) as string[]
+  // user/month — автогенерированные типы из схемы БД; поля recurring_* читаем через безопасный каст
+  const recurringIncomes = (((user as unknown) as Record<string, unknown>)?.recurring_incomes ?? []) as { day: number; name: string; amount: number }[]
+  const recurringReceived = (((month as unknown) as Record<string, unknown>)?.recurring_received ?? []) as string[]
 
   // Bonus this month's revenue will generate (paid next month)
   const bonusNext = computeMonthlyBonus(clients, revenue, user, month?.bonus_override).net
