@@ -18,6 +18,10 @@ export default function IncomeWidget({ data, monthKey }: { data: DashboardData; 
   const clientCount = Object.values(clients).reduce((s, n) => s + (n || 0), 0)
   const revenue = month?.revenue ?? 0
 
+  // ЗАДАЧА 6: регулярные доходы (стипендия и т.п.)
+  const recurringIncomes = (user?.recurring_incomes ?? []) as { day: number; name: string; amount: number }[]
+  const recurringReceived = (month?.recurring_received ?? []) as string[]
+
   // Bonus this month's revenue will generate (paid next month)
   const bonusNext = computeMonthlyBonus(clients, revenue, user, month?.bonus_override).net
 
@@ -116,6 +120,29 @@ export default function IncomeWidget({ data, monthKey }: { data: DashboardData; 
           </span>
         </div>
       </div>
+
+      {/* ЗАДАЧА 6: Регулярные доходы */}
+      {recurringIncomes.length > 0 && (
+        <div style={{ marginTop: '0.75rem', paddingTop: '0.75rem', borderTop: '1px solid var(--border)' }}>
+          <div className="flex items-center gap-1.5 mb-2">
+            <Coins size={12} style={{ color: 'var(--accent-green)' }} />
+            <span className="label">Регулярные доходы</span>
+          </div>
+          {recurringIncomes.map((ri) => {
+            const isReceived = recurringReceived.includes(ri.name)
+            return (
+              <div key={ri.name} className="flex items-center justify-between" style={{ marginBottom: '0.25rem' }}>
+                <span className="label" style={{ fontSize: '0.8rem' }}>
+                  {ri.name} ({ri.day}-го) {isReceived ? '✅' : '⏳'}
+                </span>
+                <span className="text-sm font-semibold" style={{ color: isReceived ? 'var(--accent-green)' : 'var(--text-muted)', fontFamily: 'JetBrains Mono, monospace', whiteSpace: 'nowrap' }}>
+                  {rub(ri.amount)}
+                </span>
+              </div>
+            )
+          })}
+        </div>
+      )}
 
       {/* Entry: add clients + deal revenue */}
       <ClientRevenueEntry monthKey={monthKey} currentClients={clients} currentRevenue={revenue} />
