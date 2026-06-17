@@ -130,10 +130,21 @@ export interface FinancialState {
   // слой 3 — прогнозы
   forecast_eom: number
   planned_total: number; forecast_after_planned: number
+  // отпуска / корректировки ЗП
+  vacations: { date: string; days: number; type: string; deduct: number; deduct_from: string; paid_amount: number }[]
+  salary_loss_total: number  // суммарная потеря из-за отпусков в этом месяце
+  // Внеплановые траты (детально)
+  extra_expenses: { description: string; amount: number }[]
+  // прогноз следующего месяца (пересчитан по ЕГО рабочим дням, БЕЗ отпусков)
+  next_month_key: string
+  next_working_days: number; next_daily_rate: number
+  next_adv: number; next_eom: number
+  next_forecast: number
   // детали для вывода
   cards: { name: string; debt: number; available: number }[]
-  loans_pending: { name: string; amount: number }[]
+  loans_pending: { name: string; amount: number; rate_percent: number; accrued_int: number }[]
   loans_paid: { name: string; amount: number }[]
+  loans_all: { name: string; principal: number; accrued_int: number; rate_percent: number; min_payment: number; due_day: string; paid_this_month: boolean }[]
   incomes: { name: string; amount: number; received: boolean; status: string }[]
 }
 
