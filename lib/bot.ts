@@ -31,8 +31,15 @@ function lastWorkingDayOfMonth(y: number, m: number): number {
 }
 
 export async function getHistory(chatId: number) {
-  const { data } = await db().from('bot_messages').select('role,content').eq('chat_id', chatId).order('created_at', { ascending: false }).limit(8)
-  return (data ?? []).reverse()
+  const { data } = await db().from('bot_messages').select('role,content').eq('chat_id', chatId).order('created_at', { ascending: false }).limit(6)
+  // Обрезаем длинные ответы ассистента до сути: история нужна для контекста беседы,
+  // но НЕ должна служить шаблоном формата (иначе бот копирует структуру прошлого ответа).
+  return (data ?? []).reverse().map((h: {role:string; content:string}) => {
+    if (h.role === 'assistant' && h.content.length > 200) {
+      return { role: h.role, content: h.content.slice(0, 200) + '…[ответ обрезан]' }
+    }
+    return h
+  })
 }
 export async function saveHistory(chatId: number, role: 'user'|'assistant', content: string, msgType = 'text') {
   await db().from('bot_messages').insert({ chat_id: chatId, user_id: USER_ID, role, content, msg_type: msgType }).then(()=>{})
