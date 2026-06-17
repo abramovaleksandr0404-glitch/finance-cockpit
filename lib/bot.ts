@@ -152,15 +152,16 @@ export async function computeFinancialState(): Promise<FinancialState> {
   const s = db(); const monthKey = mk(); const now = new Date()
   const [
     { data: u }, { data: month }, { data: expenses },
-    { data: cards }, { data: loans }, { data: goals }, { data: holidays },
+    { data: cards }, { data: loans }, { data: goals }, { data: holidays }, { data: nextHolidays },
   ] = await Promise.all([
     s.from('users').select('debit_balance,tbank_debit,var_budget,fixed_costs,salary_net,recurring_incomes').eq('id', USER_ID).single(),
     s.from('months').select('*').eq('user_id', USER_ID).eq('month_key', monthKey).maybeSingle(),
-    s.from('expenses').select('amount,category').eq('user_id', USER_ID).eq('month_key', monthKey),
+    s.from('expenses').select('amount,category,description').eq('user_id', USER_ID).eq('month_key', monthKey),
     s.from('cards').select('name,current_debt,card_limit').eq('user_id', USER_ID).order('sort_order'),
-    s.from('loans').select('name,principal,min_payment,paid_month').eq('user_id', USER_ID).order('sort_order'),
+    s.from('loans').select('name,principal,accrued_int,min_payment,rate,paid_month,due_day').eq('user_id', USER_ID).order('sort_order'),
     s.from('goals').select('name,amount,purchased').eq('user_id', USER_ID).eq('purchased', false),
     s.from('ru_holidays').select('holiday_date').gte('holiday_date', `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-01`).lte('holiday_date', `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-31`),
+    s.from('ru_holidays').select('holiday_date').gte('holiday_date', `${new Date(now.getFullYear(), now.getMonth()+1, 1).getFullYear()}-${String(new Date(now.getFullYear(), now.getMonth()+1, 1).getMonth()+1).padStart(2,'0')}-01`).lte('holiday_date', `${new Date(now.getFullYear(), now.getMonth()+1, 1).getFullYear()}-${String(new Date(now.getFullYear(), now.getMonth()+1, 1).getMonth()+1).padStart(2,'0')}-31`),
   ])
 
   // ── СЛОЙ 0 ──
@@ -242,6 +243,49 @@ export async function computeFinancialState(): Promise<FinancialState> {
   const plannedTotal = (goals ?? []).reduce((a,g:{amount:number}) => a + Math.round(Number(g.amount)), 0)
   const forecastAfterPlanned = forecastEom - plannedTotal
 
+  // ── ОТПУСКА / КОРРЕКТИРОВКИ ЗП ──
+  const vacationsRaw = (month?.salary_adjustments as {date:string;days:number;type:string;deduct:number;deduct_from:string;paid_amount:number}[]) ?? []
+  const vacations = vacationsRaw.map(v => ({ date: v.date, days: v.days, type: v.type, deduct: Math.round(Number(v.deduct ?? 0)), deduct_from: v.deduct_from, paid_amount: Math.round(Number(v.paid_amount ?? 0)) }))
+  const salaryLossTotal = vacations.reduce((a,v) => a + Math.max(0, v.deduct - v.paid_amount), 0)
+
+  // ── ВНЕПЛАНОВЫЕ ТРАТЫ (детально) ──
+  const extraExpenses = (expenses ?? []).filter((e:{category:string}) => e.category === 'Внеплановые')
+    .map((e:{description:string;amount:number}) => ({ description: e.description ?? 'без описания', amount: Math.round(Number(e.amount ?? 0)) }))
+
+  // ── КРЕДИТЫ с процентами ──
+  const loansAll = (loans ?? []).map((l:{name:string;principal:number;accrued_int:number;rate:number;min_payment:number;due_day:string;paid_month:string}) => ({
+    name: l.name, principal: Math.round(Number(l.principal ?? 0)), accrued_int: Math.round(Number(l.accrued_int ?? 0)),
+    rate_percent: Math.round(Number(l.rate ?? 0) * 10000) / 100, min_payment: Math.round(Number(l.min_payment ?? 0)),
+    due_day: String(l.due_day ?? ''), paid_this_month: l.paid_month === monthKey,
+  }))
+  const loansPendingRich = (loans ?? []).filter((l:{principal:number;paid_month:string}) => Number(l.principal) > 0 && l.paid_month !== monthKey)
+    .map((l:{name:string;min_payment:number;principal:number;rate:number;accrued_int:number}) => ({
+      name: l.name, amount: Math.min(Math.round(Number(l.min_payment)), Math.round(Number(l.principal))),
+      rate_percent: Math.round(Number(l.rate ?? 0) * 10000) / 100, accrued_int: Math.round(Number(l.accrued_int ?? 0)),
+    }))
+
+  // ── ПРОГНОЗ СЛЕДУЮЩЕГО МЕСЯЦА (по ЕГО рабочим дням, БЕЗ отпусков) ──
+  const nextDate = new Date(now.getFullYear(), now.getMonth()+1, 1)
+  const nextMonthKey = `${nextDate.getFullYear()}-${String(nextDate.getMonth()+1).padStart(2,'0')}`
+  const nextHolidayDates = (nextHolidays ?? []).map((h:{holiday_date:string}) => String(h.holiday_date).slice(0,10))
+  const salaryNet = Math.round(Number(u?.salary_net ?? 121600))
+  const nextWorkingDays = computeWorkingDays(nextDate.getFullYear(), nextDate.getMonth()+1, nextHolidayDates)
+  const nextDailyRate = Math.round(salaryNet / Math.max(1, nextWorkingDays))
+  let nextFirstHalf = 0, nextSecondHalf = 0
+  const nextDim = new Date(nextDate.getFullYear(), nextDate.getMonth()+1, 0).getDate()
+  for (let d = 1; d <= nextDim; d++) {
+    const dt = new Date(nextDate.getFullYear(), nextDate.getMonth(), d)
+    const iso = `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`
+    if (dt.getDay() !== 0 && dt.getDay() !== 6 && !nextHolidayDates.includes(iso)) {
+      if (d <= 15) nextFirstHalf++; else nextSecondHalf++
+    }
+  }
+  const nextAdv = Math.round(nextFirstHalf * nextDailyRate * 0.87)
+  const nextEom = Math.round(nextSecondHalf * nextDailyRate * 0.87)
+  const nextLoansTotal = (loans ?? []).reduce((a,l:{min_payment:number}) => a + Math.round(Number(l.min_payment ?? 0)), 0)
+  const nextRecurringTotal = recurringIncomes.reduce((a,r) => a + Math.round(Number(r.amount)), 0)
+  const nextForecast = forecastEom + nextAdv + nextEom + nextRecurringTotal - nextLoansTotal - fixedTotal - varBudget
+
   return {
     month_key: monthKey, today, days_in_month: daysInMonth, days_left: daysLeft,
     debit_sber: debitSber, tbank_debit: tbankDebit,
@@ -255,7 +299,13 @@ export async function computeFinancialState(): Promise<FinancialState> {
     stipend_needs_confirm: stipendNeedsConfirm,
     forecast_eom: forecastEom,
     planned_total: plannedTotal, forecast_after_planned: forecastAfterPlanned,
-    cards: cardList, loans_pending: loansPending, loans_paid: loansPaid,
+    vacations, salary_loss_total: salaryLossTotal,
+    extra_expenses: extraExpenses,
+    next_month_key: nextMonthKey,
+    next_working_days: nextWorkingDays, next_daily_rate: nextDailyRate,
+    next_adv: nextAdv, next_eom: nextEom, next_forecast: nextForecast,
+    cards: cardList, loans_pending: loansPendingRich, loans_paid: loansPaid,
+    loans_all: loansAll,
     incomes: incomesList,
   }
 }
