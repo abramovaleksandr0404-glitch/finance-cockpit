@@ -67,9 +67,14 @@ export async function POST(req: Request) {
       const transcribed = await transcribeVoice(fileId)
       if (transcribed) {
         await sendTelegram(chatId, `🎙 _«${transcribed}»_`)
-        // Логируем голосовое с типом 'voice' 
+        // Логируем голосовое с типом 'voice'
         await import('@/lib/bot').then(b => b.logMessage && b.logMessage(chatId, 'user', `[голос] ${transcribed}`, 'voice'))
-        const reply = await processMessage(transcribed, chatId)
+        // ЗАДАЧА 3: длинное голосовое (>800 символов) = выгрузка мыслей → в идеи, не команда
+        const LONG_VOICE = 800
+        const voiceText = transcribed.length > LONG_VOICE
+          ? `[ДЛИННОЕ ГОЛОСОВОЕ ${transcribed.length} симв — это выгрузка мыслей/идей. Сохрани суть через add_idea (можно несколько идей отдельными вызовами), затем кратко перечисли что записал. НЕ выполняй как финансовую команду.]\n\n${transcribed}`
+          : transcribed
+        const reply = await processMessage(voiceText, chatId)
         await sendTelegram(chatId, reply)
       } else {
         await sendTelegram(chatId, '🎙 Голос не подключён. Добавь GROQ_API_KEY в Vercel (бесплатно на console.groq.com).')
