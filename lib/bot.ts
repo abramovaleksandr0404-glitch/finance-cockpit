@@ -419,7 +419,22 @@ export async function getContext(): Promise<string> {
   if (anchorForecast && Math.abs(projEndComputed - Number(anchorForecast)) > 100) {
     console.error('[ANCHOR MISMATCH] forecast computed:', projEndComputed, 'anchor:', anchorForecast)
   }
-  const projEnd = anchorForecast ? Number(anchorForecast) : projEndComputed
+  // ЕДИНЫЙ ИСТОЧНИК: синхронизируем ключевые цифры с ядром computeFinancialState().
+  // Это гарантирует что getContext и getFinancialSummaryJson дают идентичные числа.
+  const __core = await computeFinancialState()
+  const projEnd = __core.forecast_eom  // прогноз ТОЛЬКО из ядра, без anchor-расхождений
+  // Переопределяем отображаемые величины значениями ядра (single source of truth)
+  const _netPosition = __core.net_position
+  const _liquid = __core.liquid
+  const _totalCardDebt = __core.card_debt
+  const _varLeft = __core.var_left
+  const _varSpent = __core.var_spent
+  const _fixedUnpaid = __core.fixed_unpaid
+  const _fixedPaidSum = __core.fixed_paid
+  const _pendingLoanPayments = __core.pending_loans
+  const _incomingTotal = __core.pending_income
+  const _dailyBudget = __core.daily_var_budget
+  const _stipendNeedsConfirm = __core.stipend_needs_confirm
   // После плановых покупок
   const projEndAfterPlanned = projEnd - plannedTotal
 
@@ -567,10 +582,10 @@ export async function getContext(): Promise<string> {
 === ГОТОВЫЕ ЦИФРЫ — НЕ ПЕРЕСЧИТЫВАЙ САМ ===
 
 БАЛАНС:
-  Дебет Сбер: ${rub(debitSber)}
-  Т-Банк дебет: ${rub(debitTbank)}
-  ЛИКВИДНОСТЬ ИТОГО: ${rub(liquid)}
-  Чистая позиция: ${rub(liquid)} − ${rub(totalCardDebt)} долг по картам = ${rub(netPosition)}
+  Дебет Сбер: ${rub(__core.debit_sber)}
+  Т-Банк дебет: ${rub(__core.tbank_debit)}
+  ЛИКВИДНОСТЬ ИТОГО: ${rub(_liquid)}
+  Чистая позиция: ${rub(_liquid)} − ${rub(_totalCardDebt)} долг по картам = ${rub(_netPosition)}
 
 💳 КРЕДИТНЫЕ КАРТЫ (ПАССИВЫ):
 ${cardLines}
@@ -578,7 +593,7 @@ ${cardLines}
 
 ПЕРЕМЕННЫЕ ТРАТЫ:
   Лимит: ${rub(varBudget)} (выставлен пользователем вручную)
-  Потрачено: ${rub(varSpent)} (${pct(varSpent,varBudget)}%)
+  Потрачено: ${rub(_varSpent)} (${pct(_varSpent,varBudget)}%)
   Осталось: ${rub(varLeft)}
   Дневной бюджет: ${rub(dailyBudget)}/день  [формула: осталось ÷ дней до конца месяца]
 ${varComparison ? `  Vs прошлый месяц: ${varComparison}\n` : ''}${multidayReserved > 0 ? `  Зарезервировано под мультидневные: ${rub(multidayReserved)} (ещё не "сожжено")\n  Свободно на сегодня: ${rub(Math.max(0, varLeft - multidayReserved))}\n` : ''}
