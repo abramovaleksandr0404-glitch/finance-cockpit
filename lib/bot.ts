@@ -600,9 +600,10 @@ ${varComparison ? `  Vs прошлый месяц: ${varComparison}\n` : ''}${mu
 
 === КЕШФЛОУ ИЮНЯ ===
 ВХОДЫ (всего ожидается ${rub(incomingTotal)}):
-  Стипендия ${recurringReceived.includes('Стипендия') ? '✅ получена' : (recurringIncomes.find(r=>r.name==='Стипендия') ? `⏳ ${rub(recurringIncomes.find(r=>r.name==='Стипендия')!.amount)} ожидается 11-го` : 'нет')}
+${__core.incomes.filter(i=>!['Аванс','ЗП','Бонус'].includes(i.name)).map(i=>`  ${i.name}: ${i.status} (${rub(i.amount)})`).join('\n')}
   Аванс ${advReceived?'✅ получен':`⏳ ${rub(advAmount)} (${advDay}-го)`}
   ЗП ${eomReceived?'✅':`⏳ ${rub(eomAmount)}`} + Бонус ${eomReceived?'✅':`⏳ ${rub(bonusAmount)}`} (${eomDay}-го, посл. раб. день месяца)
+${_stipendNeedsConfirm ? '\n  ⚠️ ВАЖНО: день стипендии наступил, но она не отмечена полученной. СПРОСИ пользователя «Стипендия пришла?» — если да, вызови mark_recurring_received. Сейчас она учтена в будущих потоках.\n' : ''}
 
 ${salaryAdjustments.length > 0 ? `\nКОРРЕКТИРОВКИ ЗП:\n${salaryAdjustments.map((a: SalaryAdjustment) => {
   const adj = computeVacationAdjustment(a.days, a.paid_amount, salaryNet, workingDaysInMonth)
