@@ -551,15 +551,17 @@ export async function getContext(): Promise<string> {
   }).join('\n')
   const goalLines = (goals ?? []).map(g => `  • ${g.name}: ${rub(Number(g.amount))} ${g.month_key ? '('+g.month_key+')' : '(накопление)'}`).join('\n') || '  (нет)'
   const loanLines = (loans ?? []).map(l => {
-    const total = Number(l.principal) + Number(l.accrued_int)
-    const paid = l.paid_month === monthKey ? '✅' : `⏳ (посл. платёж: ${l.paid_month ?? 'нет'})`
+    const principal = Math.round(Number(l.principal))
+    const accrued = Math.round(Number(l.accrued_int ?? 0))
+    const paid = l.paid_month === monthKey ? '✅ оплачен в этом месяце' : `⏳ не оплачен (посл. платёж: ${l.paid_month ?? 'нет'})`
     let suffix = ''
     if (l.end_date) {
       const endD = new Date(l.end_date)
       const mLeft = Math.max(0, (endD.getFullYear() - now.getFullYear()) * 12 + (endD.getMonth() - now.getMonth()))
       suffix = ` / осталось ${mLeft} мес. до ${l.end_date}`
     }
-    return `  • ${l.name} [аннуитет]: ${rub(total)} @ ${(Number(l.rate)*100).toFixed(2)}% — ${rub(Number(l.min_payment))}/мес ${paid}${suffix}`
+    const accruedStr = accrued > 0 ? ` (+ накопл.проценты ${rub(accrued)})` : ''
+    return `  • ${l.name}: тело ${rub(principal)}${accruedStr} @ ${(Number(l.rate)*100).toFixed(2)}% — платёж ${rub(Number(l.min_payment))}/мес — ${paid}${suffix}`
   }).join('\n')
   const cardLines = (cards ?? []).map(c => `  • ${c.name}: лимит ${rub(Number(c.card_limit))}, долг ${rub(Number(c.current_debt))}, доступно ${rub(Number(c.card_limit) - Number(c.current_debt))}`).join('\n') || '  (нет)'
   const recurringLines = recurringIncomes.map(r => `  • ${r.name}: ${rub(r.amount)} (${r.day} числа каждого месяца)`).join('\n') || '  (нет)'
@@ -699,6 +701,12 @@ ${fixedLines}
 
 === РЕГУЛЯРНЫЕ ДОХОДЫ ===
 ${recurringLines}
+
+=== ОТПУСКА / ПРИЧИНА СНИЖЕНИЯ ЗП (${monthKey}) ===
+${__core.vacations.length ? __core.vacations.map(v => `  • ${v.date}: ${v.type==='vacation'?'отпуск':v.type} ${v.days} дн — вычтено из ${v.deduct_from==='advance'?'аванса':'ЗП'}: ${rub(v.deduct)}, выплачено: ${rub(v.paid_amount)}, недополучено: ${rub(Math.max(0,v.deduct-v.paid_amount))}`).join('\n') + `\n  ИТОГО потеря от отпусков: ${rub(__core.salary_loss_total)}` : '  (нет отпусков/корректировок в этом месяце)'}
+
+=== ВНЕПЛАНОВЫЕ ТРАТЫ (вне лимита переменных, но учитываются в расходах) ===
+${__core.extra_expenses.length ? __core.extra_expenses.map(e => `  • ${e.description}: ${rub(e.amount)}`).join('\n') + `\n  ИТОГО внеплановых: ${rub(__core.extra_spent)}` : '  (нет внеплановых трат)'}
 
 === ПЕРЕМЕННЫЕ ТРАТЫ — ДЕТАЛЬНО ===${allExpensesSection}
 === ПОСЛЕДНИЕ 5 ТРАТ ===
