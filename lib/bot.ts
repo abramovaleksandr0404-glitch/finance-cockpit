@@ -267,7 +267,8 @@ export async function getContext(): Promise<string> {
   const totalDebt = (loans ?? []).reduce((s,l) => s+Number(l.principal)+Number(l.accrued_int), 0)
   const totalMonthlyPayment = (loans ?? []).reduce((s,l) => s+Number(l.min_payment), 0)
   // Прогноз остатка = баланс + входы − кредиты − постоянные − переменные до лимита
-  const projEndComputed = liquid + incomingTotal - pendingLoanPayments - fixedUnpaid - varLeft
+  // BUGFIX: прогноз от чистой позиции (дебет − долги по картам), НЕ от ликвидности
+  const projEndComputed = netPosition + incomingTotal - pendingLoanPayments - fixedUnpaid - varLeft
   const anchorForecast = getAnchor(monthKey, 'forecast_end')
   if (anchorForecast && Math.abs(projEndComputed - Number(anchorForecast)) > 100) {
     console.error('[ANCHOR MISMATCH] forecast computed:', projEndComputed, 'anchor:', anchorForecast)
@@ -438,7 +439,7 @@ ${varComparison ? `  Vs прошлый месяц: ${varComparison}\n` : ''}${mu
 
 === КЕШФЛОУ ИЮНЯ ===
 ВХОДЫ (всего ожидается ${rub(incomingTotal)}):
-  Стипендия ${recurringIncomes.find(r=>r.name==='Стипендия') && today<=11 ? `⏳ ${rub(5900)} (11-го)` : '✅/нет'}
+  Стипендия ${recurringReceived.includes('Стипендия') ? '✅ получена' : (recurringIncomes.find(r=>r.name==='Стипендия') ? `⏳ ${rub(recurringIncomes.find(r=>r.name==='Стипендия')!.amount)} ожидается 11-го` : 'нет')}
   Аванс ${advReceived?'✅ получен':`⏳ ${rub(advAmount)} (${advDay}-го)`}
   ЗП ${eomReceived?'✅':`⏳ ${rub(eomAmount)}`} + Бонус ${eomReceived?'✅':`⏳ ${rub(bonusAmount)}`} (${eomDay}-го, посл. раб. день месяца)
 
@@ -455,7 +456,7 @@ ${salaryAdjustments.length > 0 ? `\nКОРРЕКТИРОВКИ ЗП:\n${salaryAd
 ${plannedPurchases.length ? plannedPurchases.map(g=>`  • ${g.name}: ${rub(Number(g.amount))}`).join('\n')+`\n  ИТОГО плановых: ${rub(plannedTotal)}` : '  (нет запланированных покупок)'}
 
 ПРОГНОЗ ОСТАТКА К 30-го ИЮНЯ: ${rub(projEnd)}
-  [формула: ликвидность ${rub(liquid)} + входы ${rub(incomingTotal)} − кредиты ${rub(pendingLoanPayments)} − постоянные ${rub(fixedUnpaid)} − переменные до лимита ${rub(varLeft)}]
+  [формула: чистая позиция ${rub(netPosition)} (деб.${rub(liquid)}−карты${rub(totalCardDebt)}) + входы ${rub(incomingTotal)} − кредиты ${rub(pendingLoanPayments)} − постоянные ${rub(fixedUnpaid)} − переменные до лимита ${rub(varLeft)}]
 ПОСЛЕ ПЛАНОВЫХ ПОКУПОК (−${rub(plannedTotal)}): ${rub(projEndAfterPlanned)}
 
 === ПРОГНОЗ СЛЕДУЮЩЕГО МЕСЯЦА (${nextMK}) ===
