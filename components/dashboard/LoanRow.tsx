@@ -8,7 +8,7 @@ import type { Loan } from '@/lib/types'
 
 export default function LoanRow({ loan }: { loan: Loan }) {
   const total = Number(loan.principal) + Number(loan.accrued_int)
-  const payoffPct = Math.round(((Number(loan.original_amt) - Number(loan.principal)) / Number(loan.original_amt)) * 100)
+  const payoffPct = Math.max(0, Math.min(100, Math.round(((Number(loan.original_amt) - Number(loan.principal)) / Number(loan.original_amt)) * 100)))
 
   // Annuity payment split — rate годовая, делим на 12 для месячной (иначе % > платежа → тело уходит в минус)
   const monthlyRate = Number(loan.rate) / 12
