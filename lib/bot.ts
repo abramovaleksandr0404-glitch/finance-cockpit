@@ -104,6 +104,152 @@ async function snap(label: string) {
   if (all && all.length>15) await s.from('undo_snapshots').delete().in('id',all.slice(15).map((r:{id:string})=>r.id))
 }
 
+
+// ════════════════════════════════════════════════════════════════════════════
+// ЕДИНОЕ ФИНАНСОВОЕ ЯДРО — единственный источник истины для всех расчётов.
+// Граф зависимостей: слой 0 (сырьё из БД) → слой 1 (агрегаты) → слой 2
+// (производные) → слой 3 (прогнозы) → слой 4 (сценарии). Каждая величина
+// считается РОВНО ОДИН РАЗ. getContext, getFinancialSummaryJson, сайт и
+// дайджесты читают готовые поля и НИКОГДА не пересчитывают сами.
+// ════════════════════════════════════════════════════════════════════════════
+export interface FinancialState {
+  // слой 0 — сырьё
+  month_key: string; today: number; days_in_month: number; days_left: number
+  debit_sber: number; tbank_debit: number
+  // слой 1 — базовые агрегаты
+  liquid: number; card_debt: number; net_position: number
+  var_spent: number; extra_spent: number
+  fixed_total: number; fixed_paid: number
+  // слой 2 — производные
+  var_budget: number; var_left: number; daily_var_budget: number
+  fixed_unpaid: number
+  pending_loans: number
+  pending_income: number
+  pending_salary: number; pending_recurring: number
+  stipend_needs_confirm: boolean   // день≥11, не отмечена → бот должен спросить
+  // слой 3 — прогнозы
+  forecast_eom: number
+  planned_total: number; forecast_after_planned: number
+  // детали для вывода
+  cards: { name: string; debt: number; available: number }[]
+  loans_pending: { name: string; amount: number }[]
+  loans_paid: { name: string; amount: number }[]
+  incomes: { name: string; amount: number; received: boolean; status: string }[]
+}
+
+export async function computeFinancialState(): Promise<FinancialState> {
+  const s = db(); const monthKey = mk(); const now = new Date()
+  const [
+    { data: u }, { data: month }, { data: expenses },
+    { data: cards }, { data: loans }, { data: goals }, { data: holidays },
+  ] = await Promise.all([
+    s.from('users').select('debit_balance,tbank_debit,var_budget,fixed_costs,salary_net,recurring_incomes').eq('id', USER_ID).single(),
+    s.from('months').select('*').eq('user_id', USER_ID).eq('month_key', monthKey).maybeSingle(),
+    s.from('expenses').select('amount,category').eq('user_id', USER_ID).eq('month_key', monthKey),
+    s.from('cards').select('name,current_debt,card_limit').eq('user_id', USER_ID).order('sort_order'),
+    s.from('loans').select('name,principal,min_payment,paid_month').eq('user_id', USER_ID).order('sort_order'),
+    s.from('goals').select('name,amount,purchased').eq('user_id', USER_ID).eq('purchased', false),
+    s.from('ru_holidays').select('holiday_date').gte('holiday_date', `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-01`).lte('holiday_date', `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-31`),
+  ])
+
+  // ── СЛОЙ 0 ──
+  const today = now.getDate()
+  const daysInMonth = new Date(now.getFullYear(), now.getMonth()+1, 0).getDate()
+  const daysLeft = daysInMonth - today + 1
+  const debitSber = Math.round(Number(u?.debit_balance ?? 0))
+  const tbankDebit = Math.round(Number(u?.tbank_debit ?? 0))
+
+  // ── СЛОЙ 1 ──
+  const liquid = debitSber + tbankDebit
+  const cardList = (cards ?? []).map((c:{name:string;current_debt:number;card_limit:number}) => ({
+    name: c.name, debt: Math.round(Number(c.current_debt ?? 0)),
+    available: Math.round(Number(c.card_limit ?? 0)) - Math.round(Number(c.current_debt ?? 0)),
+  }))
+  const cardDebt = cardList.reduce((a,c) => a + c.debt, 0)
+  const netPosition = liquid - cardDebt
+  const varSpent = (expenses ?? []).filter((e:{category:string}) => e.category !== 'Внеплановые').reduce((a,e) => a + Math.round(Number(e.amount ?? 0)), 0)
+  const extraSpent = (expenses ?? []).filter((e:{category:string}) => e.category === 'Внеплановые').reduce((a,e) => a + Math.round(Number(e.amount ?? 0)), 0)
+  const fc = (u?.fixed_costs as {name:string;amount:number}[]) ?? []
+  const fp = (month?.fixed_paid ?? {}) as Record<string, number|boolean>
+  const fixedTotal = fc.reduce((a,f) => a + Math.round(Number(f.amount)), 0)
+  const fixedPaid = fc.reduce((a,f,i) => { const v = fp[String(i)]; return (v!=null && v!==false) ? a + Math.round(Number(typeof v==='number'?v:f.amount)) : a }, 0)
+
+  // ── СЛОЙ 2 ──
+  const varBudget = Math.round(Number(u?.var_budget ?? 45000))
+  const varLeft = varBudget - varSpent
+  const dailyVarBudget = Math.round(Math.max(0, varLeft) / Math.max(1, daysLeft))
+  const fixedUnpaid = fixedTotal - fixedPaid
+  const loansPending = (loans ?? []).filter((l:{principal:number;paid_month:string}) => Number(l.principal) > 0 && l.paid_month !== monthKey)
+    .map((l:{name:string;min_payment:number;principal:number}) => ({ name: l.name, amount: Math.min(Math.round(Number(l.min_payment)), Math.round(Number(l.principal))) }))
+  const loansPaid = (loans ?? []).filter((l:{paid_month:string}) => l.paid_month === monthKey)
+    .map((l:{name:string;min_payment:number}) => ({ name: l.name, amount: Math.round(Number(l.min_payment)) }))
+  const pendingLoans = loansPending.reduce((a,l) => a + l.amount, 0)
+
+  // доходы: аванс, зп+бонус, повторяющиеся (стипендия)
+  const advAmt = Math.round(Number(month?.salary_adv_amount ?? 0))
+  const eomAmt = Math.round(Number(month?.salary_eom_amount ?? 0))
+  const bonAmt = Math.round(Number(month?.bonus_amount ?? 0))
+  const advRec = !!month?.salary_adv_received
+  const eomRec = !!month?.salary_eom_received
+  const pendingSalary = (advRec ? 0 : advAmt) + (eomRec ? 0 : eomAmt + bonAmt)
+
+  const recurringIncomes = (u?.recurring_incomes as {name:string;amount:number;day:number}[]) ?? []
+  const recurringReceived = (month?.recurring_received as string[]) ?? []
+  // Логика стипендии: получена→0. Не получена И день наступил(≥day)→в плановые потоки + флаг "спросить".
+  // Не получена И день ещё не наступил→в плановые потоки (ожидается штатно).
+  let pendingRecurring = 0
+  let stipendNeedsConfirm = false
+  const incomesList: { name:string; amount:number; received:boolean; status:string }[] = []
+  for (const ri of recurringIncomes) {
+    const received = recurringReceived.includes(ri.name)
+    const amt = Math.round(Number(ri.amount))
+    if (received) {
+      incomesList.push({ name: ri.name, amount: amt, received: true, status: '✅ получена' })
+    } else {
+      pendingRecurring += amt  // не получена → всегда в будущих потоках
+      if (today >= ri.day) {
+        stipendNeedsConfirm = true
+        incomesList.push({ name: ri.name, amount: amt, received: false, status: `❓ ожидается (${ri.day}-го прошло — подтверди получение)` })
+      } else {
+        incomesList.push({ name: ri.name, amount: amt, received: false, status: `⏳ ожидается ${ri.day}-го` })
+      }
+    }
+  }
+  if (!advRec) incomesList.push({ name: 'Аванс', amount: advAmt, received: false, status: '⏳ ожидается' })
+  else incomesList.push({ name: 'Аванс', amount: advAmt, received: true, status: '✅ получен' })
+  if (!eomRec) {
+    incomesList.push({ name: 'ЗП', amount: eomAmt, received: false, status: '⏳ ожидается (конец месяца)' })
+    incomesList.push({ name: 'Бонус', amount: bonAmt, received: false, status: '⏳ ожидается (конец месяца)' })
+  } else {
+    incomesList.push({ name: 'ЗП', amount: eomAmt, received: true, status: '✅ получена' })
+    incomesList.push({ name: 'Бонус', amount: bonAmt, received: true, status: '✅ получен' })
+  }
+  const pendingIncome = pendingSalary + pendingRecurring
+
+  // ── СЛОЙ 3 ──
+  const forecastEom = netPosition + pendingIncome - pendingLoans - fixedUnpaid - Math.max(0, varLeft)
+  const plannedTotal = (goals ?? []).reduce((a,g:{amount:number}) => a + Math.round(Number(g.amount)), 0)
+  const forecastAfterPlanned = forecastEom - plannedTotal
+
+  return {
+    month_key: monthKey, today, days_in_month: daysInMonth, days_left: daysLeft,
+    debit_sber: debitSber, tbank_debit: tbankDebit,
+    liquid, card_debt: cardDebt, net_position: netPosition,
+    var_spent: varSpent, extra_spent: extraSpent,
+    fixed_total: fixedTotal, fixed_paid: fixedPaid,
+    var_budget: varBudget, var_left: varLeft, daily_var_budget: dailyVarBudget,
+    fixed_unpaid: fixedUnpaid,
+    pending_loans: pendingLoans,
+    pending_income: pendingIncome, pending_salary: pendingSalary, pending_recurring: pendingRecurring,
+    stipend_needs_confirm: stipendNeedsConfirm,
+    forecast_eom: forecastEom,
+    planned_total: plannedTotal, forecast_after_planned: forecastAfterPlanned,
+    cards: cardList, loans_pending: loansPending, loans_paid: loansPaid,
+    incomes: incomesList,
+  }
+}
+
+
 // ── Полный контекст с квартальной аналитикой ─────────────────────────────
 export async function getContext(): Promise<string> {
   const supabase = db()
