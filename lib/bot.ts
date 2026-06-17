@@ -138,6 +138,7 @@ export interface FinancialState {
   // прогноз следующего месяца (пересчитан по ЕГО рабочим дням, БЕЗ отпусков)
   next_month_key: string
   next_working_days: number; next_daily_rate: number
+  next_first_half: number; next_second_half: number  // рабочих дней в 1-й и 2-й половинах
   next_adv: number; next_eom: number
   next_forecast: number
   // детали для вывода
@@ -313,6 +314,7 @@ export async function computeFinancialState(): Promise<FinancialState> {
     extra_expenses: extraExpenses,
     next_month_key: nextMonthKey,
     next_working_days: nextWorkingDays, next_daily_rate: nextDailyRate,
+    next_first_half: nextFirstHalf, next_second_half: nextSecondHalf,
     next_adv: nextAdv, next_eom: nextEom, next_forecast: nextForecast,
     cards: cardList, loans_pending: loansPendingRich, loans_paid: loansPaid,
     loans_all: loansAll,
@@ -696,8 +698,9 @@ ${plannedPurchases.length ? plannedPurchases.map(g=>`  • ${g.name}: ${rub(Numb
 
 === ПРОГНОЗ СЛЕДУЮЩЕГО МЕСЯЦА (${__core.next_month_key}) — пересчитан по рабочим дням ${__core.next_month_key}, БЕЗ отпусков ===
   Старт: ${rub(__core.forecast_eom)} (= прогноз конца ${monthKey})
-  Рабочих дней в ${__core.next_month_key}: ${__core.next_working_days}, дневная ставка ${rub(__core.next_daily_rate)} (оклад ${rub(salaryNet)} ÷ ${__core.next_working_days})
-  Входы: Аванс ⏳ ${rub(__core.next_adv)} (1-я половина) + ЗП ⏳ ${rub(__core.next_eom)} (2-я половина) + Стипендия ${rub(nextRecurringTotal)}
+  Рабочих дней в ${__core.next_month_key}: ${__core.next_working_days} (1-я пол. 1-15: ${__core.next_first_half} дн, 2-я пол. 16-конец: ${__core.next_second_half} дн)
+  Дневная ставка: ${rub(__core.next_daily_rate)} (оклад ${rub(salaryNet)} ÷ ${__core.next_working_days} раб.дней, НДФЛ уже в окладе)
+  Входы: Аванс ⏳ ${rub(__core.next_adv)} (${__core.next_first_half} дн × ${rub(__core.next_daily_rate)}) + ЗП ⏳ ${rub(__core.next_eom)} (${__core.next_second_half} дн × ${rub(__core.next_daily_rate)}) + Стипендия ${rub(nextRecurringTotal)}
   Выходы: Кредиты ${rub(totalMonthlyPayment)} + Постоянные ${rub(fixedTotal)} + Переменные лимит ${rub(varBudget)}
   ПРОГНОЗ БАЗОВЫЙ к концу ${__core.next_month_key}: ${rub(__core.next_forecast)}
   [формула: ${rub(__core.forecast_eom)} + аванс ${rub(__core.next_adv)} + ЗП ${rub(__core.next_eom)} + стип ${rub(nextRecurringTotal)} − кредиты ${rub(totalMonthlyPayment)} − постоянные ${rub(fixedTotal)} − переменные ${rub(varBudget)}]
