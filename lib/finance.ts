@@ -291,9 +291,16 @@ function projectedEndInternal(data: DashboardData, key: string, depth = 0): numb
   p -= fixedRemainingSum(data, key)
 
   // Credit-card debt (conservative: free money after clearing cards).
-  // Logged variable expenses are NOT subtracted again — debit-paid ones already
-  // reduced the debit balance, card-paid ones are inside card debt above.
   p -= cardDebtTotal(data)
+
+  // Remaining variable budget (conservative: assume full limit will be spent).
+  // СОГЛАСОВАНО с ядром бота: forecast = net_position + income − loans − fixed − var_left.
+  // Only for the current month (future months reset their variable budget).
+  const cur = currentMonthKey()
+  if (key === cur) {
+    const varLeft = Math.max(0, data.user.var_budget - variableSpent(data))
+    p -= varLeft
+  }
 
   return Math.round(p)
 }
@@ -313,7 +320,13 @@ export function getPlannedRemainder(data: DashboardData, key: string): number {
 
 /** Variable expenses logged this month. */
 export function variableSpent(data: DashboardData): number {
-  return data.expenses.reduce((s, e) => s + e.amount, 0)
+  // Внеплановые НЕ входят в переменные (как в ядре бота computeFinancialState)
+  return data.expenses.filter((e) => e.category !== 'Внеплановые').reduce((s, e) => s + e.amount, 0)
+}
+
+/** Внеплановые траты (вне лимита переменных). */
+export function extraSpent(data: DashboardData): number {
+  return data.expenses.filter((e) => e.category === 'Внеплановые').reduce((s, e) => s + e.amount, 0)
 }
 
 /** Fixed costs actually paid this month. */
