@@ -682,12 +682,14 @@ ${plannedPurchases.length ? plannedPurchases.map(g=>`  • ${g.name}: ${rub(Numb
   [формула: чистая позиция ${rub(netPosition)} (деб.${rub(liquid)}−карты${rub(totalCardDebt)}) + входы ${rub(incomingTotal)} − кредиты ${rub(pendingLoanPayments)} − постоянные ${rub(fixedUnpaid)} − переменные до лимита ${rub(varLeft)}]
 ПОСЛЕ ПЛАНОВЫХ ПОКУПОК (−${rub(plannedTotal)}): ${rub(projEndAfterPlanned)}
 
-=== ПРОГНОЗ СЛЕДУЮЩЕГО МЕСЯЦА (${nextMK}) ===
-  Стартовая ликвидность: ${rub(projEnd)} (= прогноз конца ${monthKey})
-  Входы: Аванс ⏳ ${rub(advAmount)} (${nextAdvDay}-го) + ЗП ⏳ ${rub(eomAmount)} (${nextEomDay}-го) + Бонус за ${monthKey}: ${rub(bonusJulNet)} + Повтор. ${rub(nextRecurringTotal)}${nextQBonus > 0 ? ` + Квартальный Q: ${rub(nextQBonus)}` : ''}
-  Выходы: Кредиты ${rub(totalMonthlyPayment)} + Постоянные ${rub(fixedTotal)} + Переменные до лимита ${rub(varBudget)}
-  Прогноз остатка к концу ${nextMK}: ${rub(nextProjEnd)}
-  [формула: ${rub(projEnd)} + ${rub(nextIncoming)} − ${rub(totalMonthlyPayment)} − ${rub(fixedTotal)} − ${rub(varBudget)}]
+=== ПРОГНОЗ СЛЕДУЮЩЕГО МЕСЯЦА (${__core.next_month_key}) — пересчитан по рабочим дням ${__core.next_month_key}, БЕЗ отпусков ===
+  Старт: ${rub(__core.forecast_eom)} (= прогноз конца ${monthKey})
+  Рабочих дней в ${__core.next_month_key}: ${__core.next_working_days}, дневная ставка ${rub(__core.next_daily_rate)} (оклад ${rub(salaryNet)} ÷ ${__core.next_working_days})
+  Входы: Аванс ⏳ ${rub(__core.next_adv)} (1-я половина) + ЗП ⏳ ${rub(__core.next_eom)} (2-я половина) + Стипендия ${rub(nextRecurringTotal)}
+  Выходы: Кредиты ${rub(totalMonthlyPayment)} + Постоянные ${rub(fixedTotal)} + Переменные лимит ${rub(varBudget)}
+  ПРОГНОЗ БАЗОВЫЙ к концу ${__core.next_month_key}: ${rub(__core.next_forecast)}
+  [формула: ${rub(__core.forecast_eom)} + аванс ${rub(__core.next_adv)} + ЗП ${rub(__core.next_eom)} + стип ${rub(nextRecurringTotal)} − кредиты ${rub(totalMonthlyPayment)} − постоянные ${rub(fixedTotal)} − переменные ${rub(varBudget)}]
+  ⚠️ Аванс/ЗП июля НЕ равны июньским (в июне был отпуск). Отпускные в июле пока НЕ загружены.${nextQBonus > 0 ? `\n  💰 Квартальный бонус Q (разово, сверх базового): +${rub(nextQBonus)} → с ним прогноз ${rub(__core.next_forecast + nextQBonus)}` : ''}
 
 === КРЕДИТЫ (всего ${rub(totalDebt)}, платёж ${rub(totalMonthlyPayment)}/мес) ===
 ${loanLines}
