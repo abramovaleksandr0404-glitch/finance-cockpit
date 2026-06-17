@@ -2035,71 +2035,41 @@ async function getLoansSummaryJson(): Promise<string> {
 }
 
 async function getFinancialSummaryJson(): Promise<string> {
-  const s = db(); const monthKey = mk()
-  const [
-    { data: u }, { data: month }, { data: expenses },
-    { data: cards }, { data: loans },
-  ] = await Promise.all([
-    s.from('users').select('debit_balance,tbank_debit,var_budget,fixed_costs,salary_net,recurring_incomes').eq('id', USER_ID).single(),
-    s.from('months').select('*').eq('user_id', USER_ID).eq('month_key', monthKey).maybeSingle(),
-    s.from('expenses').select('amount,category').eq('user_id', USER_ID).eq('month_key', monthKey),
-    s.from('cards').select('name,current_debt,card_limit').eq('user_id', USER_ID),
-    s.from('loans').select('name,principal,min_payment,paid_month').eq('user_id', USER_ID),
-  ])
-  const debit = Math.round(Number(u?.debit_balance ?? 0))
-  const tbDebit = Math.round(Number(u?.tbank_debit ?? 0))
-  const liquid = debit + tbDebit
-  const cardDebt = (cards ?? []).reduce((s,c) => s + Math.round(Number(c.current_debt ?? 0)), 0)
-  const netPos = liquid - cardDebt
-  // Внеплановые траты (крупные разовые) НЕ входят в переменный лимит
-  const varSpent = (expenses ?? []).filter((e:{category:string}) => e.category !== 'Внеплановые').reduce((s,e) => s + Math.round(Number(e.amount ?? 0)), 0)
-  const extraSpent = (expenses ?? []).filter((e:{category:string}) => e.category === 'Внеплановые').reduce((s,e) => s + Math.round(Number(e.amount ?? 0)), 0)
-  const varBudget = Math.round(Number(u?.var_budget ?? 45000))
-  const varLeft = varBudget - varSpent
-  const fc = (u?.fixed_costs as {name:string,amount:number}[]) ?? []
-  const fp = (month?.fixed_paid ?? {}) as Record<string,number|boolean>
-  const fixedPaid = fc.reduce((s,f,i) => { const v=fp[String(i)]; return (v!=null&&v!==false)?s+Math.round(Number(typeof v==='number'?v:f.amount)):s },0)
-  const fixedTotal = fc.reduce((s,f) => s+Math.round(Number(f.amount)),0)
-  const advRec = !!month?.salary_adv_received; const eomRec = !!month?.salary_eom_received
-  const advAmt = Math.round(Number(month?.salary_adv_amount??0))
-  const eomAmt = Math.round(Number(month?.salary_eom_amount??0))
-  const bonAmt = Math.round(Number(month?.bonus_amount??0))
-  const pendIncome = (advRec?0:advAmt)+(eomRec?0:eomAmt+bonAmt)
-  const pendLoans = (loans??[]).filter(l=>Number(l.principal)>0&&l.paid_month!==monthKey)
-    .reduce((s,l)=>s+Math.min(Math.round(Number(l.min_payment)),Math.round(Number(l.principal))),0)
-  const forecast = netPos + pendIncome - pendLoans - (fixedTotal-fixedPaid) - varLeft
-  const recvd = (month?.recurring_received as string[]) ?? []
-  const ri = (u?.recurring_incomes as {name:string,amount:number,day:number}[]) ?? []
-  // Стипендия в pending_income если ещё не получена
-  const pendingRecurring = ri.filter(r => !recvd.includes(r.name)).reduce((s,r) => s + r.amount, 0)
-  const totalPendingIncome = pendIncome + pendingRecurring
-  // Плановые покупки из goals
-  const { data: goals } = await s.from('goals').select('name,amount,purchased,month_key').eq('user_id',USER_ID).eq('month_key',monthKey)
-  // Данные прошлого месяца для расчёта бонуса текущего
-  const prevMk = (() => { const [y,m] = monthKey.split('-').map(Number); const d = new Date(y, m-2, 1); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}` })()
+  // ЕДИНЫЙ ИСТОЧНИК: всё из ядра computeFinancialState(). Здесь НЕТ своей математики.
+  const st = await computeFinancialState()
+  const s = db()
+  // Данные прошлого месяца для расчёта бонуса (не финсостояние, отдельный запрос)
+  const prevMk = (() => { const [y,m] = st.month_key.split('-').map(Number); const d = new Date(y, m-2, 1); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}` })()
   const { data: prevMonth } = await s.from('months').select('clients,revenue,bonus_amount').eq('user_id',USER_ID).eq('month_key',prevMk).maybeSingle()
-  const planned = (goals ?? []).filter((g:{purchased:boolean}) => !g.purchased)
-  const plannedTotal = planned.reduce((s,g:{amount:number}) => s + Math.round(Number(g.amount)), 0)
-  // Прогноз с полным pending_income (включая recurring)
-  const forecastFull = netPos + totalPendingIncome - pendLoans - (fixedTotal-fixedPaid) - Math.max(0, varLeft)
+
+  const advInc = st.incomes.find(i => i.name === 'Аванс')
+  const eomInc = st.incomes.find(i => i.name === 'ЗП')
+  const bonInc = st.incomes.find(i => i.name === 'Бонус')
+
   return JSON.stringify({
-    source:'LIVE_DB',month_key:monthKey,
-    debit_sber:debit,tbank_debit:tbDebit,total_liquid:liquid,
-    card_debt_total:cardDebt,
-    cards:(cards??[]).map((c:{name:string,current_debt:number,card_limit:number})=>({name:c.name,debt:Math.round(Number(c.current_debt)),available:Math.round(Number(c.card_limit))-Math.round(Number(c.current_debt))})),
-    net_position:netPos,
-    var_spent:varSpent,var_budget:varBudget,var_left:varLeft,extra_spent:extraSpent,
-    fixed_paid:fixedPaid,fixed_total:fixedTotal,fixed_unpaid:fixedTotal-fixedPaid,
-    salary_adv:{amount:advAmt,received:advRec},salary_eom:{amount:eomAmt,received:eomRec},
-    bonus:{amount:bonAmt,received:eomRec},
-    pending_income:totalPendingIncome,pending_salary:pendIncome,pending_recurring:pendingRecurring,
-    pending_loans:pendLoans,
-    planned_purchases:planned.map((g:{name:string,amount:number})=>({name:g.name,amount:Math.round(Number(g.amount))})),
-    planned_total:plannedTotal,
-    forecast_end:forecastFull,
-    recurring:ri.map(r=>({...r,received:recvd.includes(r.name)})),
-    prev_month:{ month_key:prevMk, clients:prevMonth?.clients, revenue:prevMonth?.revenue, bonus_received:prevMonth?.bonus_amount },
-  },null,2)
+    source: 'LIVE_DB_CORE',
+    month_key: st.month_key,
+    today: st.today, days_left: st.days_left,
+    debit_sber: st.debit_sber, tbank_debit: st.tbank_debit, total_liquid: st.liquid,
+    card_debt_total: st.card_debt,
+    cards: st.cards,
+    net_position: st.net_position,
+    var_spent: st.var_spent, var_budget: st.var_budget, var_left: st.var_left,
+    daily_var_budget: st.daily_var_budget, extra_spent: st.extra_spent,
+    fixed_paid: st.fixed_paid, fixed_total: st.fixed_total, fixed_unpaid: st.fixed_unpaid,
+    salary_adv: { amount: advInc?.amount ?? 0, received: advInc?.received ?? false },
+    salary_eom: { amount: eomInc?.amount ?? 0, received: eomInc?.received ?? false },
+    bonus: { amount: bonInc?.amount ?? 0, received: bonInc?.received ?? false },
+    pending_income: st.pending_income, pending_salary: st.pending_salary, pending_recurring: st.pending_recurring,
+    pending_loans: st.pending_loans,
+    loans_pending: st.loans_pending, loans_paid: st.loans_paid,
+    planned_total: st.planned_total,
+    forecast_end: st.forecast_eom,
+    forecast_after_planned: st.forecast_after_planned,
+    incomes: st.incomes,
+    stipend_needs_confirm: st.stipend_needs_confirm,
+    prev_month: { month_key: prevMk, clients: prevMonth?.clients, revenue: prevMonth?.revenue, bonus_received: prevMonth?.bonus_amount },
+  }, null, 2)
 }
 
 async function handleTool(name: string, input: Record<string,unknown>): Promise<string> {
