@@ -280,8 +280,9 @@ export async function computeFinancialState(): Promise<FinancialState> {
       if (d <= 15) nextFirstHalf++; else nextSecondHalf++
     }
   }
-  const nextAdv = Math.round(nextFirstHalf * nextDailyRate * 0.87)
-  const nextEom = Math.round(nextSecondHalf * nextDailyRate * 0.87)
+  // salary_net уже НА РУКИ (НДФЛ в нём учтён), nextDailyRate тоже на руки — НЕ умножаем на 0.87 повторно
+  const nextAdv = Math.round(nextFirstHalf * nextDailyRate)
+  const nextEom = Math.round(nextSecondHalf * nextDailyRate)
   const nextLoansTotal = (loans ?? []).reduce((a,l:{min_payment:number}) => a + Math.round(Number(l.min_payment ?? 0)), 0)
   const nextRecurringTotal = recurringIncomes.reduce((a,r) => a + Math.round(Number(r.amount)), 0)
   const nextForecast = forecastEom + nextAdv + nextEom + nextRecurringTotal - nextLoansTotal - fixedTotal - varBudget
