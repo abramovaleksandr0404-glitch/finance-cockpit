@@ -26,7 +26,7 @@ export async function GET(req: Request) {
     const [{ data: user }, { data: loans }, { data: expenses }] = await Promise.all([
       supabase.from('users').select('telegram_chat_id,debit_balance,tbank_debit,var_budget').eq('id',USER_ID).single(),
       supabase.from('loans').select('name,min_payment,due_day,paid_month,principal,accrued_int,rate').eq('user_id',USER_ID),
-      supabase.from('expenses').select('amount').eq('user_id',USER_ID).eq('month_key',mk),
+      supabase.from('expenses').select('amount,category').eq('user_id',USER_ID).eq('month_key',mk),
     ])
     if (!user?.telegram_chat_id) return NextResponse.json({ ok: false, reason: 'no chat_id' })
 
@@ -43,7 +43,7 @@ export async function GET(req: Request) {
 
     // Переменные 80%/95%
     const varBudget = Number(user.var_budget ?? 40000)
-    const varSpent = (expenses ?? []).reduce((s,e) => s + Number(e.amount), 0)
+    const varSpent = (expenses ?? []).filter((e:{category:string}) => e.category !== 'Внеплановые').reduce((s,e) => s + Number(e.amount), 0)
     const pctUsed = Math.round(varSpent / varBudget * 100)
     if (pctUsed >= 95) alerts.push(`🔴 Переменные: *${pctUsed}%* (${rub(varSpent)} из ${rub(varBudget)}) — лимит исчерпан`)
     else if (pctUsed >= 80) alerts.push(`🟡 Переменные: *${pctUsed}%* (${rub(varSpent)} из ${rub(varBudget)}) — осталось ${rub(varBudget-varSpent)}`)
