@@ -156,8 +156,28 @@ export interface FinancialState {
   incomes: { name: string; amount: number; received: boolean; status: string }[]
 }
 
+// Ежедневное начисление процентов по кредитам (идемпотентно, как на сайте lib/accrue.ts).
+// Вызывается из ядра → проценты капают при ЛЮБОМ обращении бота, не только при загрузке сайта.
+async function accrueLoansCore(s: SupabaseClient): Promise<void> {
+  const today = new Date().toISOString().split('T')[0]
+  const { data: loans, error } = await s.from('loans').select('id,principal,accrued_int,rate,last_accrual').eq('user_id', USER_ID).gt('principal', 0)
+  if (error || !loans?.length) return
+  const updates: {id:string; accrued_int:number; last_accrual:string}[] = []
+  for (const loan of loans) {
+    const last = (loan.last_accrual as string | null) ?? today
+    if (last >= today) continue
+    const days = Math.max(0, Math.round((new Date(today).getTime() - new Date(last).getTime()) / 86400000))
+    if (days === 0) continue
+    const dailyInterest = Number(loan.principal) * Number(loan.rate) / 365
+    const toAdd = Math.round(dailyInterest * days * 100) / 100
+    updates.push({ id: loan.id, accrued_int: Math.round((Number(loan.accrued_int) + toAdd) * 100) / 100, last_accrual: today })
+  }
+  await Promise.all(updates.map(u => s.from('loans').update({ accrued_int: u.accrued_int, last_accrual: u.last_accrual }).eq('id', u.id).eq('user_id', USER_ID)))
+}
+
 export async function computeFinancialState(): Promise<FinancialState> {
   const s = db(); const monthKey = mk(); const now = new Date()
+  await accrueLoansCore(s)  // начисляем проценты ДО чтения данных кредитов
   const [
     { data: u }, { data: month }, { data: expenses },
     { data: cards }, { data: loans }, { data: goals }, { data: holidays }, { data: nextHolidays },
