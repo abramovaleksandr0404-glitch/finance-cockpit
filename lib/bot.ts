@@ -1029,7 +1029,7 @@ export async function executeAction(action: BotAction): Promise<void> {
 
   // Input validation — защита от некорректных данных
   const VALID_GRADES = ['g3','g4','g56','g78','g9','g10']
-  const VALID_CATEGORIES = ['Еда и кафе','Транспорт','Здоровье','Развлечения','Одежда','Инвестиции','Обучение и ИИ','Прочее']
+  const VALID_CATEGORIES = ['Еда и кафе','Транспорт','Здоровье','Развлечения','Одежда','Инвестиции','Обучение и ИИ','Прочее','Внеплановые','Вредные расходы']
   const VALID_SETTINGS = ['salary_net','salary_gross','ytd_gross','threshold','moment_share','margin_share','var_budget']
   function sanitizeStr(s: string | undefined, maxLen = 500): string | undefined {
     return s ? s.replace(/[<>'"]/g, '').substring(0, maxLen) : s
@@ -1722,7 +1722,7 @@ export const TOOLS = [
   { name:'undo', description:'Отменить последнее изменение (откат к снапшоту).',
     input_schema:{type:'object',properties:{}} },
   { name: 'reclassify_expense',
-    description: 'Изменить категорию или привязать к кастомной категории существующие траты текущего месяца. Вызывай когда пользователь говорит "перенеси снюс в Вредные", "это вредная трата", "переквалифицируй трату", "отнеси X к категории Y". Также вызывай learn_mapping для будущего.',
+    description: 'Изменить категорию существующих трат текущего месяца. Вызывай когда пользователь говорит "перенеси снюс в Вредные", "это вредная трата", "перенеси авиабилет во Внеплановые", "отнеси X к категории Y". ВАЖНО: категория "Внеплановые" выносит трату ЗА лимит переменных (для крупных разовых: авиабилеты, техника). Категория "Вредные расходы" для снюса/вейпа/алкоголя. Указывай keyword (слово из описания траты) и new_category.',
     input_schema: {
       type: 'object',
       properties: {
