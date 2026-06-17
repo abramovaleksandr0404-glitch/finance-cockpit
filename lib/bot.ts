@@ -144,7 +144,7 @@ export interface FinancialState {
   cards: { name: string; debt: number; available: number }[]
   loans_pending: { name: string; amount: number; rate_percent: number; accrued_int: number }[]
   loans_paid: { name: string; amount: number }[]
-  loans_all: { name: string; principal: number; accrued_int: number; rate_percent: number; min_payment: number; due_day: string; paid_this_month: boolean }[]
+  loans_all: { name: string; principal: number; accrued_int: number; rate_percent: number; min_payment: number; due_day: string; paid_this_month: boolean; end_date: string|null; months_left: number|null; overpay_total: number|null }[]
   incomes: { name: string; amount: number; received: boolean; status: string }[]
 }
 
@@ -158,7 +158,7 @@ export async function computeFinancialState(): Promise<FinancialState> {
     s.from('months').select('*').eq('user_id', USER_ID).eq('month_key', monthKey).maybeSingle(),
     s.from('expenses').select('amount,category,description').eq('user_id', USER_ID).eq('month_key', monthKey),
     s.from('cards').select('name,current_debt,card_limit').eq('user_id', USER_ID).order('sort_order'),
-    s.from('loans').select('name,principal,accrued_int,min_payment,rate,paid_month,due_day').eq('user_id', USER_ID).order('sort_order'),
+    s.from('loans').select('name,principal,accrued_int,min_payment,rate,paid_month,due_day,end_date').eq('user_id', USER_ID).order('sort_order'),
     s.from('goals').select('name,amount,purchased').eq('user_id', USER_ID).eq('purchased', false),
     s.from('ru_holidays').select('holiday_date').gte('holiday_date', `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-01`).lte('holiday_date', `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-31`),
     s.from('ru_holidays').select('holiday_date').gte('holiday_date', `${new Date(now.getFullYear(), now.getMonth()+1, 1).getFullYear()}-${String(new Date(now.getFullYear(), now.getMonth()+1, 1).getMonth()+1).padStart(2,'0')}-01`).lte('holiday_date', `${new Date(now.getFullYear(), now.getMonth()+1, 1).getFullYear()}-${String(new Date(now.getFullYear(), now.getMonth()+1, 1).getMonth()+1).padStart(2,'0')}-31`),
@@ -253,11 +253,20 @@ export async function computeFinancialState(): Promise<FinancialState> {
     .map((e:{description:string;amount:number}) => ({ description: e.description ?? 'без описания', amount: Math.round(Number(e.amount ?? 0)) }))
 
   // ── КРЕДИТЫ с процентами ──
-  const loansAll = (loans ?? []).map((l:{name:string;principal:number;accrued_int:number;rate:number;min_payment:number;due_day:string;paid_month:string}) => ({
-    name: l.name, principal: Math.round(Number(l.principal ?? 0)), accrued_int: Math.round(Number(l.accrued_int ?? 0)),
-    rate_percent: Math.round(Number(l.rate ?? 0) * 10000) / 100, min_payment: Math.round(Number(l.min_payment ?? 0)),
-    due_day: String(l.due_day ?? ''), paid_this_month: l.paid_month === monthKey,
-  }))
+  const loansAll = (loans ?? []).map((l:{name:string;principal:number;accrued_int:number;rate:number;min_payment:number;due_day:string;paid_month:string;end_date:string}) => {
+    const principal = Math.round(Number(l.principal ?? 0))
+    const minPay = Math.round(Number(l.min_payment ?? 0))
+    const endDate = l.end_date ? new Date(l.end_date) : null
+    const monthsLeft = endDate ? Math.max(0, (endDate.getFullYear()-now.getFullYear())*12+(endDate.getMonth()-now.getMonth())) : null
+    // Переплата = оставшиеся платежи − оставшееся тело долга (детерминированно)
+    const overpayTotal = (monthsLeft !== null && minPay > 0) ? Math.max(0, monthsLeft * minPay - principal) : null
+    return {
+      name: l.name, principal, accrued_int: Math.round(Number(l.accrued_int ?? 0)),
+      rate_percent: Math.round(Number(l.rate ?? 0) * 10000) / 100, min_payment: minPay,
+      due_day: String(l.due_day ?? ''), paid_this_month: l.paid_month === monthKey,
+      end_date: l.end_date ?? null, months_left: monthsLeft, overpay_total: overpayTotal,
+    }
+  })
   const loansPendingRich = (loans ?? []).filter((l:{principal:number;paid_month:string}) => Number(l.principal) > 0 && l.paid_month !== monthKey)
     .map((l:{name:string;min_payment:number;principal:number;rate:number;accrued_int:number}) => ({
       name: l.name, amount: Math.min(Math.round(Number(l.min_payment)), Math.round(Number(l.principal))),
@@ -842,19 +851,21 @@ export const SYSTEM_PROMPT = `╔═══════════════�
 1. НИКОГДА не используй таблицы (| столбец | столбец |). В Telegram таблицы превращаются в кашу.
    Вместо таблицы — строки списком: «• Название: значение — деталь».
 
-2. ОТВЕЧАЙ ТОЛЬКО НА ЗАДАННЫЙ ВОПРОС. Спросили про кредиты — отвечай про кредиты, не добавляй стипендию/баланс/прочее. Никаких «хвостов» от прошлых тем. Чёткий вопрос → чёткий ответ по теме.
+2. ОТВЕЧАЙ ТОЛЬКО НА ЗАДАННЫЙ ВОПРОС. ПЕРВОЕ ПРЕДЛОЖЕНИЕ — прямой ответ на вопрос, не преамбула. Спросили про зарплату — первое слово «ЗП» или цифра, не «Вот информация» и не хвост прошлой темы. Спросили про кредиты — только кредиты. Спросили про прогноз июля — не добавляй прогноз июня в начало. НИКАКИХ хвостов от предыдущих вопросов в начале ответа.
 
 3. НЕ оставляй пустых строк подряд. Максимум одна пустая строка между смысловыми блоками. Информация должна быть ПЛОТНОЙ — выжимай максимум данных на минимум места.
 
 4. На этом этапе показывай ВСЕ цифры с расшифровкой происхождения: не просто «прогноз −6 135₽», а откуда он сложился (старт + входы − выходы, с числами). Пользователь должен видеть КАК получена каждая цифра. Используй данные из JSON get_financial_summary.
 
-5. Для кредитов: показывай тело и накопленные проценты РАЗДЕЛЬНО (loans_all: principal + accrued_int). Тело — это основной долг, проценты — отдельно. НЕ складывай их в одну цифру.
+5. Для кредитов: показывай тело и накопленные проценты РАЗДЕЛЬНО (loans_all: principal + accrued_int). Тело — основной долг, проценты — отдельно. НЕ складывай их в одну цифру.
+   Для переплаты и срока закрытия — бери ТОЛЬКО поля overpay_total и months_left из loans_all. НИКОГДА не считай переплату или срок самостоятельно — только LLM-галлюцинация может получиться иначе. Дата закрытия = end_date из loans_all. Суммарная переплата = сумма overpay_total по всем кредитам.
 
 6. Отпуска и причину снижения ЗП показывай в полной мере когда спрашивают про зарплату (поля vacations, salary_loss_total).
 
 7. Внеплановые траты показывай отдельным блоком когда спрашивают про траты/расходы/бюджет (extra_expenses, extra_spent) — они вне лимита, но их надо видеть.
+   9. Займы от людей (брат, друг, родители): обновляй дебет через set_balance (деньги физически есть на счету). НО явно предупреждай: «это долг, его нужно вернуть» и НЕ добавляй сумму займа в pending_income. Прогноз вырастет потому что дебет вырос — это корректно, деньги реально будут. Просто пометь что это временно.
 
-8. Прогноз июля и далее: бери next_adv, next_eom, next_forecast из JSON. Они УЖЕ пересчитаны по рабочим дням того месяца. Квартальный бонус показывай отдельной строкой «сверх базового», НЕ вкладывай в базовый прогноз.
+8. Прогноз следующего месяца: бери ТОЛЬКО next_adv, next_eom, next_forecast из JSON get_financial_summary. НИКОГДА не пересчитывай их самостоятельно — даже в сценарных ответах ("что если я куплю X"). next_adv и next_eom УЖЕ верны: salary_net=121600 разделено на рабочие дни ТОГО месяца, НДФЛ НЕ вычитается повторно (оклад уже net). Для июля: 11 рабочих дней в 1-й половине (1-15 включая 15-е), 12 во 2-й. next_adv=58157, next_eom=63444. Если бот посчитал иначе — он ошибся, правда в JSON. Квартальный бонус показывай отдельной строкой «сверх базового», НЕ вкладывай в базовый прогноз.
 
 КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО:
   ✗ Считать в голове
