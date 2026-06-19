@@ -22,6 +22,18 @@ function todayISO(): string { return new Date().toISOString().slice(0, 10) }
 function addDaysISO(iso: string, n: number): string {
   const d = new Date(iso + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10)
 }
+function mondayISO(iso: string): string {
+  const dow = new Date(iso + 'T00:00:00Z').getUTCDay()  // 0=вс..6=сб
+  return addDaysISO(iso, -((dow + 6) % 7))               // сдвиг к понедельнику
+}
+function resolveLoggedDate(hint?: string): string {
+  const t = todayISO()
+  if (!hint) return t
+  const h = hint.trim().toLowerCase()
+  if (h.includes('позавчера')) return addDaysISO(t, -2)
+  if (h.includes('вчера')) return addDaysISO(t, -1)
+  return t
+}
 // Резолвер относительных дат — СТРАХОВКА. Обычно модель сама передаёт ISO due_date
 // (в системном контексте есть текущая ДАТА с днём недели).
 const WD: Record<string, number> = {
@@ -100,6 +112,46 @@ export const plannerTools = [
         category: { type: 'string', description: 'Фильтр по сфере (необязательно)' },
       },
     },
+  },
+  // ── ПРИВЫЧКИ (P-3) ──
+  {
+    name: 'add_habit',
+    description: 'Создать привычку — регулярное действие ДЛЯ СЕБЯ (зал, зарядка, медитация, чтение, бег, английский). Вызывай на «хочу начать ходить в зал», «добавь привычку медитировать», «буду читать каждый день», «хочу заниматься спортом 3 раза в неделю». НЕ для разовых дел (для них add_task). Привычки — это то, что повторяется и развивает; задачи — разовые поручения.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: 'Название привычки (Зал, Медитация, Чтение)' },
+        category: { type: 'string', enum: ['work', 'personal', 'study', 'family', 'health', 'home', 'hobby'], description: 'Сфера (зал/бег → health, чтение → personal/study)' },
+        frequency: { type: 'string', enum: ['daily', 'weekly', 'flexible'], description: 'daily=каждый день; weekly=в определённые дни недели; flexible=N раз в неделю без фиксированных дней' },
+        target_days_per_week: { type: 'number', description: 'Сколько раз в неделю (для flexible/weekly), напр. зал 3 раза → 3' },
+        days_of_week: { type: 'array', items: { type: 'string' }, description: "Фиксированные дни для weekly: ['MO','WE','FR']" },
+        metric_type: { type: 'string', enum: ['boolean', 'quantity'], description: 'boolean=просто сделал/не сделал; quantity=с числом (минуты, страницы, кг)' },
+        metric_unit: { type: 'string', description: "Единица для quantity: 'мин', 'страниц', 'кг', 'км'" },
+      },
+      required: ['title'],
+    },
+  },
+  {
+    name: 'log_habit',
+    description: 'Отметить выполнение привычки (чек-ин). Вызывай на «сделал зарядку», «сходил в зал», «помедитировал 15 минут», «прочитал 30 страниц», «пожал лёжа 80 кг», «пробежал 5 км», «сегодня не тренировался». Если такой привычки ещё нет — она создастся автоматически. Поддерживает прошедшие даты («вчера вечером медитировал», «позавчера был в зале»).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        habit: { type: 'string', description: 'Название привычки (зал, медитация, чтение)' },
+        done: { type: 'boolean', description: 'false если пропустил/не делал (с пояснением в note)' },
+        value: { type: 'number', description: 'Интенсивность: минуты / страницы / кг / повторы / км' },
+        value_unit: { type: 'string', description: "Единица: 'мин', 'страниц', 'кг', 'км'" },
+        logged_date: { type: 'string', description: 'Дата ISO YYYY-MM-DD. По умолчанию сегодня.' },
+        logged_relative: { type: 'string', description: 'ТОЛЬКО если не уверен в дате: «сегодня|вчера|позавчера». Сервер посчитает.' },
+        note: { type: 'string', description: 'Контекст: почему пропустил, детали тренировки, ощущения' },
+      },
+      required: ['habit'],
+    },
+  },
+  {
+    name: 'list_habits',
+    description: 'Показать привычки и их статус за текущую неделю. Вызывай на «мои привычки», «как у меня с привычками», «статистика привычек», «сколько раз я был в зале».',
+    input_schema: { type: 'object', properties: {} },
   },
 ]
 
@@ -245,6 +297,18 @@ export interface PlannerTask {
   parent_id: string | null
 }
 
+export interface HabitToday {
+  id: string
+  title: string
+  category: string | null
+  metric_type: string
+  metric_unit: string | null
+  target_days_per_week: number | null
+  done_today: boolean
+  today_value: number | null
+  week_count: number
+}
+
 export interface PlannerState {
   as_of: string                 // ISO date (сегодня)
   today: PlannerTask[]          // due_date = сегодня, pending
@@ -253,6 +317,7 @@ export interface PlannerState {
   backlog: PlannerTask[]        // due_date IS NULL, pending
   open_count: number            // все pending
   done_today: number            // выполнено сегодня
+  habits: HabitToday[]          // активные привычки + статус на сегодня/неделю
 }
 
 export async function computePlannerState(): Promise<PlannerState> {
@@ -302,6 +367,36 @@ export async function computePlannerState(): Promise<PlannerState> {
   const pending = rows.filter(r => r.status === 'pending')
   const doneToday = rows.filter(r => r.status === 'done')
 
+  // ── Привычки: активные + логи за текущую неделю (Пн-старт) ──
+  const weekStart = mondayISO(today)
+  const [habitsRes, logsRes] = await Promise.all([
+    s.from('planner_habits')
+      .select('id,title,category,metric_type,metric_unit,target_days_per_week')
+      .eq('user_id', USER_ID).eq('status', 'active')
+      .order('sort_order', { ascending: true }),
+    s.from('planner_habit_logs')
+      .select('habit_id,logged_date,done,value')
+      .eq('user_id', USER_ID).gte('logged_date', weekStart),
+  ])
+  const habitRows: Row[] = habitsRes.data ?? []
+  const logRows: Row[] = logsRes.data ?? []
+
+  const habits: HabitToday[] = habitRows.map(h => {
+    const mine = logRows.filter(l => l.habit_id === h.id)
+    const todayLog = mine.find(l => l.logged_date === today)
+    return {
+      id: h.id,
+      title: h.title,
+      category: h.category ?? null,
+      metric_type: h.metric_type,
+      metric_unit: h.metric_unit ?? null,
+      target_days_per_week: h.target_days_per_week ?? null,
+      done_today: !!(todayLog && todayLog.done),
+      today_value: todayLog && todayLog.value != null ? Number(todayLog.value) : null,
+      week_count: mine.filter(l => l.done).length,
+    }
+  })
+
   return {
     as_of: today,
     today:   sortTasks(pending.filter(r => r.due_date === today)),
@@ -310,6 +405,7 @@ export async function computePlannerState(): Promise<PlannerState> {
     backlog: sortTasks(pending.filter(r => !r.due_date)),
     open_count: pending.length,
     done_today: doneToday.length,
+    habits,
   }
 }
 
@@ -362,6 +458,16 @@ function fmtStateForBot(s: PlannerState): string {
     lines.push(`\n📋 БЭКЛОГ: ${s.backlog.length} задач без срока`)
   }
 
+  if (s.habits.length) {
+    lines.push(`\n🔁 ПРИВЫЧКИ СЕГОДНЯ:`)
+    s.habits.forEach(h => {
+      const mark = h.done_today ? '✅' : '⬜'
+      const val = h.today_value != null ? ` (${h.today_value}${h.metric_unit ? ' ' + h.metric_unit : ''})` : ''
+      const tgt = h.target_days_per_week ? ` — ${h.week_count}/${h.target_days_per_week} за неделю` : (h.week_count ? ` — ${h.week_count}× за неделю` : '')
+      lines.push(`  ${mark} ${h.title}${val}${tgt}`)
+    })
+  }
+
   const stats = []
   if (s.done_today) stats.push(`выполнено сегодня: ${s.done_today}`)
   stats.push(`всего открытых: ${s.open_count}`)
@@ -384,11 +490,96 @@ export const plannerSummaryTool = {
   input_schema: { type: 'object' as const, properties: {} },
 }
 
+// ─────────────────────────── ХЕНДЛЕРЫ ПРИВЫЧЕК (P-3) ───────────────────────────
+async function addHabit(input: Row): Promise<string> {
+  const s = db()
+  const title = String(input.title ?? '').trim()
+  if (!title) return 'Ошибка: пустое название привычки.'
+  const freq = ['daily', 'weekly', 'flexible'].includes(String(input.frequency)) ? String(input.frequency) : 'flexible'
+  const row: Row = {
+    user_id: USER_ID,
+    title,
+    category: input.category ?? null,
+    frequency: freq,
+    target_days_per_week: (typeof input.target_days_per_week === 'number') ? input.target_days_per_week : null,
+    days_of_week: Array.isArray(input.days_of_week) ? input.days_of_week : null,
+    metric_type: input.metric_type === 'quantity' ? 'quantity' : 'boolean',
+    metric_unit: input.metric_unit ?? null,
+    status: 'active',
+  }
+  const { data, error } = await s.from('planner_habits').insert(row).select().single()
+  if (error) return `Ошибка создания привычки: ${error.message}`
+  const fr = data.target_days_per_week ? `${data.target_days_per_week}×/нед` : data.frequency
+  return `Привычка создана (ФАКТ ИЗ БД): «${data.title}» [${data.category ?? 'без категории'}], ${fr}, метрика: ${data.metric_type}${data.metric_unit ? ' (' + data.metric_unit + ')' : ''}.`
+}
+
+async function logHabit(input: Row): Promise<string> {
+  const s = db()
+  const key = String(input.habit ?? '').trim()
+  if (!key) return 'Ошибка: не указана привычка.'
+
+  let habit: Row | null = null
+  const { data: found } = await s.from('planner_habits')
+    .select('id,title,metric_type,metric_unit')
+    .eq('user_id', USER_ID).eq('status', 'active').ilike('title', `%${key}%`).limit(1)
+  if (found && found.length) habit = found[0]
+
+  let created = false
+  if (!habit) {
+    const metric = (typeof input.value === 'number') ? 'quantity' : 'boolean'
+    const { data: nh, error: ce } = await s.from('planner_habits').insert({
+      user_id: USER_ID, title: key, frequency: 'flexible', metric_type: metric,
+      metric_unit: input.value_unit ?? null, status: 'active',
+    }).select().single()
+    if (ce) return `Ошибка автосоздания привычки: ${ce.message}`
+    habit = nh; created = true
+  }
+
+  const date = (typeof input.logged_date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(input.logged_date))
+    ? input.logged_date
+    : resolveLoggedDate(input.logged_relative ? String(input.logged_relative) : undefined)
+  const done = input.done === false ? false : true
+
+  const { data, error } = await s.from('planner_habit_logs').upsert({
+    user_id: USER_ID, habit_id: habit!.id, logged_date: date, done,
+    value: (typeof input.value === 'number') ? input.value : null,
+    value_unit: input.value_unit ?? habit!.metric_unit ?? null,
+    note: input.note ?? null, logged_at: new Date().toISOString(),
+  }, { onConflict: 'habit_id,logged_date' }).select().single()
+  if (error) return `Ошибка чек-ина: ${error.message}`
+
+  const weekStart = mondayISO(todayISO())
+  const { data: wl } = await s.from('planner_habit_logs').select('done')
+    .eq('user_id', USER_ID).eq('habit_id', habit!.id).gte('logged_date', weekStart)
+  const wc = (wl ?? []).filter((l: Row) => l.done).length
+
+  const valStr = data.value != null ? ` ${data.value}${data.value_unit ? ' ' + data.value_unit : ''}` : ''
+  const status = done ? `✅ отмечено${valStr}` : '⬜ пропуск'
+  const pre = created ? `Создал привычку «${habit!.title}» и ` : ''
+  const noteStr = input.note ? ' Заметка сохранена.' : ''
+  return `${pre}${status} на ${date} (ФАКТ ИЗ БД). За неделю: ${wc}×.${noteStr}`
+}
+
+async function listHabits(): Promise<string> {
+  const state = await computePlannerState()
+  if (!state.habits.length) return 'Привычек пока нет. Создай через add_habit («хочу начать ходить в зал»).'
+  const lines = state.habits.map(h => {
+    const mark = h.done_today ? '✅' : '⬜'
+    const val = h.today_value != null ? ` (сегодня ${h.today_value}${h.metric_unit ? ' ' + h.metric_unit : ''})` : ''
+    const tgt = h.target_days_per_week ? `${h.week_count}/${h.target_days_per_week}` : `${h.week_count}×`
+    return `${mark} ${h.title} — за неделю ${tgt}${val}`
+  })
+  return `🔁 ПРИВЫЧКИ (неделя с пн) — ФАКТ ИЗ БД:\n` + lines.join('\n')
+}
+
 export async function handlePlannerTool(name: string, input: Record<string, unknown>): Promise<string> {
   const inp = (input ?? {}) as Row
   if (name === 'get_planner_summary') return await getPlannerSummary()
   if (name === 'add_task') return await addTask(inp)
   if (name === 'complete_task') return await completeTask(inp)
   if (name === 'list_tasks') return await listTasks(inp)
+  if (name === 'add_habit') return await addHabit(inp)
+  if (name === 'log_habit') return await logHabit(inp)
+  if (name === 'list_habits') return await listHabits()
   return `Неизвестный planner-инструмент: ${name}`
 }
