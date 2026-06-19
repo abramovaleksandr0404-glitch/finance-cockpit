@@ -188,7 +188,7 @@ export async function computeFinancialState(): Promise<FinancialState> {
     s.from('expenses').select('amount,category,description').eq('user_id', USER_ID).eq('month_key', monthKey),
     s.from('cards').select('name,current_debt,card_limit').eq('user_id', USER_ID).order('sort_order'),
     s.from('loans').select('name,principal,accrued_int,min_payment,rate,paid_month,due_day,end_date').eq('user_id', USER_ID).order('sort_order'),
-    s.from('goals').select('name,amount,purchased').eq('user_id', USER_ID).eq('purchased', false),
+    s.from('goals').select('name,amount,purchased,month_key').eq('user_id', USER_ID).eq('purchased', false).order('sort_order'),
     s.from('ru_holidays').select('holiday_date').gte('holiday_date', `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-01`).lte('holiday_date', `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-31`),
     s.from('ru_holidays').select('holiday_date').gte('holiday_date', `${new Date(now.getFullYear(), now.getMonth()+1, 1).getFullYear()}-${String(new Date(now.getFullYear(), now.getMonth()+1, 1).getMonth()+1).padStart(2,'0')}-01`).lte('holiday_date', `${new Date(now.getFullYear(), now.getMonth()+1, 1).getFullYear()}-${String(new Date(now.getFullYear(), now.getMonth()+1, 1).getMonth()+1).padStart(2,'0')}-31`),
   ])
@@ -269,7 +269,8 @@ export async function computeFinancialState(): Promise<FinancialState> {
 
   // ── СЛОЙ 3 ──
   const forecastEom = netPosition + pendingIncome - pendingLoans - fixedUnpaid - Math.max(0, varLeft)
-  const plannedTotal = (goals ?? []).reduce((a,g:{amount:number}) => a + Math.round(Number(g.amount)), 0)
+  // planned_total = только цели ТЕКУЩЕГО месяца (не все накопительные цели всех месяцев)
+  const plannedTotal = (goals ?? []).filter((g:{month_key:string|null;purchased:boolean}) => g.month_key === monthKey && !g.purchased).reduce((a,g:{amount:number}) => a + Math.round(Number(g.amount)), 0)
   const forecastAfterPlanned = forecastEom - plannedTotal
 
   // ── ОТПУСКА / КОРРЕКТИРОВКИ ЗП ──
@@ -372,7 +373,7 @@ export async function getContext(): Promise<string> {
     supabase.from('loans').select('id,name,principal,accrued_int,min_payment,end_date,rate,paid_month,due_day').eq('user_id',USER_ID).order('sort_order'),
     supabase.from('expenses').select('id,amount,category,description,expense_date,custom_category_id,covers_days').eq('user_id',USER_ID).eq('month_key',monthKey),
     supabase.from('months').select('*').eq('user_id',USER_ID).eq('month_key',monthKey).maybeSingle(),
-    supabase.from('goals').select('id,name,amount,month_key,purchased').eq('user_id',USER_ID).eq('purchased',false).limit(6),
+    supabase.from('goals').select('id,name,amount,month_key,purchased').eq('user_id',USER_ID).eq('purchased',false).order('sort_order'),
     supabase.from('expenses').select('id,category,amount,description,expense_date').eq('user_id',USER_ID).eq('month_key',monthKey).order('created_at',{ascending:false}).limit(5),
     supabase.from('months').select('month_key,clients,revenue').eq('user_id',USER_ID).gte('month_key',qStartKey).lte('month_key',qEndKey),
     supabase.from('cards').select('name,card_limit,current_debt').eq('user_id',USER_ID).order('sort_order'),
