@@ -154,7 +154,7 @@ console.log('\n=== ИНСТРУМЕНТЫ: update_loan ===')
   check('инструмент update_loan зарегистрирован', TOOLS.some(t => t.name === 'update_loan'), true)
   const ul = TOOLS.find(t => t.name === 'update_loan')
   const props = ul?.input_schema?.properties ?? {}
-  check('update_loan требует name', ul?.input_schema?.required?.includes('name'), true)
+  check('update_loan требует name', (ul?.input_schema as any)?.required?.includes('name'), true)
   check('update_loan имеет поле principal', 'principal' in props, true)
   check('update_loan имеет поле rate', 'rate' in props, true)
   check('update_loan имеет поле min_payment', 'min_payment' in props, true)
