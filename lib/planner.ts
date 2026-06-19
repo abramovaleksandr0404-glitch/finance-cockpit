@@ -103,7 +103,7 @@ export const plannerTools = [
   },
 ]
 
-export const PLANNER_TOOL_NAMES = new Set(plannerTools.map(t => t.name))
+export const PLANNER_TOOL_NAMES = new Set([...plannerTools.map(t => t.name), plannerSummaryTool.name])
 
 // ─────────────────────────── ФОРМАТ ───────────────────────────
 function fmtTask(t: Row): string {
@@ -225,8 +225,168 @@ async function listTasks(input: Row): Promise<string> {
   return `Задачи (${scope}), ${rows.length} шт. — ФАКТ ИЗ БД:\n` + rows.map((r: Row) => '• ' + fmtTask(r)).join('\n')
 }
 
+// ═══════════════════════════════════════════════════════════════
+// ЯДРО ПЛАНИРОВЩИКА — computePlannerState()
+// Единственный источник истины. Бот И сайт читают отсюда.
+// LLM не считает — только показывает готовый результат.
+// ═══════════════════════════════════════════════════════════════
+
+export interface PlannerTask {
+  id: string
+  title: string
+  description: string | null
+  category: string | null
+  priority: string
+  status: string
+  due_date: string | null
+  due_time: string | null
+  planned_amount: number | null
+  contact_name: string | null
+  parent_id: string | null
+}
+
+export interface PlannerState {
+  as_of: string                 // ISO date (сегодня)
+  today: PlannerTask[]          // due_date = сегодня, pending
+  overdue: PlannerTask[]        // due_date < сегодня, pending
+  week: PlannerTask[]           // due_date = завтра..+7 дней, pending
+  backlog: PlannerTask[]        // due_date IS NULL, pending
+  open_count: number            // все pending
+  done_today: number            // выполнено сегодня
+}
+
+export async function computePlannerState(): Promise<PlannerState> {
+  const s = db()
+  const today = todayISO()
+  const weekEnd = addDaysISO(today, 7)
+
+  // Один запрос — всё pending + выполненные сегодня
+  const { data, error } = await s
+    .from('planner_tasks')
+    .select('id,title,description,category,priority,status,due_date,due_time,planned_amount,contact_name,parent_id,completed_at')
+    .eq('user_id', USER_ID)
+    .neq('status', 'cancelled')
+    .or(`status.eq.pending,and(status.eq.done,completed_at.gte.${today}T00:00:00Z)`)
+    .order('due_date', { ascending: true, nullsFirst: false })
+    .order('due_time', { ascending: true, nullsFirst: false })
+
+  if (error) throw new Error(`computePlannerState: ${error.message}`)
+
+  const rows: Row[] = data ?? []
+  const rank: Record<string, number> = { high: 0, medium: 1, low: 2, backlog: 3 }
+
+  function sortTasks(arr: Row[]): PlannerTask[] {
+    return [...arr]
+      .sort((a, b) => {
+        // Сначала по времени (если задано), потом по приоритету
+        if (a.due_time && b.due_time && a.due_time !== b.due_time) return a.due_time < b.due_time ? -1 : 1
+        if (a.due_time && !b.due_time) return -1
+        if (!a.due_time && b.due_time) return 1
+        return (rank[a.priority] ?? 1) - (rank[b.priority] ?? 1)
+      })
+      .map(r => ({
+        id: r.id,
+        title: r.title,
+        description: r.description ?? null,
+        category: r.category ?? null,
+        priority: r.priority,
+        status: r.status,
+        due_date: r.due_date ?? null,
+        due_time: r.due_time ? String(r.due_time).slice(0, 5) : null,
+        planned_amount: r.planned_amount ? Math.round(Number(r.planned_amount)) : null,
+        contact_name: r.contact_name ?? null,
+        parent_id: r.parent_id ?? null,
+      }))
+  }
+
+  const pending = rows.filter(r => r.status === 'pending')
+  const doneToday = rows.filter(r => r.status === 'done')
+
+  return {
+    as_of: today,
+    today:   sortTasks(pending.filter(r => r.due_date === today)),
+    overdue: sortTasks(pending.filter(r => r.due_date && r.due_date < today)),
+    week:    sortTasks(pending.filter(r => r.due_date && r.due_date > today && r.due_date <= weekEnd)),
+    backlog: sortTasks(pending.filter(r => !r.due_date)),
+    open_count: pending.length,
+    done_today: doneToday.length,
+  }
+}
+
+// ── Форматировщик для бота (компактный, Telegram-style) ──
+function fmtStateForBot(s: PlannerState): string {
+  const ICONS: Record<string, string> = {
+    work: '💼', personal: '👤', study: '📚', family: '👨‍👩‍👧', health: '🏃', home: '🏠', hobby: '🎨'
+  }
+  const PRIO: Record<string, string> = { high: '🔴', medium: '🟡', low: '⚪', backlog: '📋' }
+
+  function fmtLine(t: PlannerTask): string {
+    const icon = ICONS[t.category ?? ''] ?? '•'
+    const prio = PRIO[t.priority] ?? '•'
+    const time = t.due_time ? ` ${t.due_time}` : ''
+    const amt  = t.planned_amount ? ` (~${t.planned_amount.toLocaleString('ru-RU')}₽)` : ''
+    const who  = t.contact_name ? ` @${t.contact_name}` : ''
+    return `${prio}${icon} ${t.title}${time}${amt}${who}`
+  }
+
+  const lines: string[] = [`📅 ПЛАН — ${s.as_of}`]
+
+  if (s.overdue.length) {
+    lines.push(`\n⚠️ ПРОСРОЧЕНО (${s.overdue.length}):`)
+    s.overdue.forEach(t => lines.push('  ' + fmtLine(t)))
+  }
+
+  if (s.today.length) {
+    lines.push(`\n✅ СЕГОДНЯ (${s.today.length}):`)
+    s.today.forEach(t => lines.push('  ' + fmtLine(t)))
+  } else {
+    lines.push('\n✅ СЕГОДНЯ: задач нет')
+  }
+
+  if (s.week.length) {
+    lines.push(`\n📆 НА НЕДЕЛЕ (${s.week.length}):`)
+    // Группируем по дате
+    const byDate: Record<string, PlannerTask[]> = {}
+    s.week.forEach(t => {
+      const d = t.due_date ?? 'без даты'
+      if (!byDate[d]) byDate[d] = []
+      byDate[d].push(t)
+    })
+    Object.entries(byDate).forEach(([date, tasks]) => {
+      lines.push(`  ${date}:`)
+      tasks.forEach(t => lines.push('    ' + fmtLine(t)))
+    })
+  }
+
+  if (s.backlog.length) {
+    lines.push(`\n📋 БЭКЛОГ: ${s.backlog.length} задач без срока`)
+  }
+
+  const stats = []
+  if (s.done_today) stats.push(`выполнено сегодня: ${s.done_today}`)
+  stats.push(`всего открытых: ${s.open_count}`)
+  lines.push(`\n─\n${stats.join(' | ')}`)
+
+  return lines.join('\n')
+}
+
+// ── Инструмент: get_planner_summary ──
+async function getPlannerSummary(): Promise<string> {
+  const state = await computePlannerState()
+  return fmtStateForBot(state)
+}
+
+// ═══════════════ Добавляем tool в массив ═══════════════
+// (добавлен ниже в plannerTools через re-export патч — см. конец файла)
+export const plannerSummaryTool = {
+  name: 'get_planner_summary',
+  description: 'Сводка планировщика: задачи на сегодня, просроченные, план на неделю, бэклог. Вызывай на: "/today", "план на сегодня", "что у меня сегодня", "задачи на эту неделю", "покажи план", "что нужно сделать". Это NE get_financial_summary — только задачи и дела, без финансов.',
+  input_schema: { type: 'object' as const, properties: {} },
+}
+
 export async function handlePlannerTool(name: string, input: Record<string, unknown>): Promise<string> {
   const inp = (input ?? {}) as Row
+  if (name === 'get_planner_summary') return await getPlannerSummary()
   if (name === 'add_task') return await addTask(inp)
   if (name === 'complete_task') return await completeTask(inp)
   if (name === 'list_tasks') return await listTasks(inp)
