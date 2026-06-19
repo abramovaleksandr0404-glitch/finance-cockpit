@@ -11,8 +11,9 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js'
 
 const USER_ID = '5ebdb411-6021-4dfc-9d0d-caa8e0107502'
-function db(): SupabaseClient {
-  return createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!)
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function db(): SupabaseClient<any, any, any> {
+  return createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!) as any
 }
 
 type Row = Record<string, any>
@@ -543,7 +544,7 @@ async function logHabit(input: Row): Promise<string> {
   const { data, error } = await s.from('planner_habit_logs').upsert({
     user_id: USER_ID, habit_id: habit!.id, logged_date: date, done,
     value: (typeof input.value === 'number') ? input.value : null,
-    value_unit: input.value_unit ?? habit!.metric_unit ?? null,
+    value_unit: input.value_unit ?? (habit ? habit.metric_unit : null) ?? null,
     note: input.note ?? null, logged_at: new Date().toISOString(),
   }, { onConflict: 'habit_id,logged_date' }).select().single()
   if (error) return `Ошибка чек-ина: ${error.message}`
@@ -553,7 +554,7 @@ async function logHabit(input: Row): Promise<string> {
     .eq('user_id', USER_ID).eq('habit_id', habit!.id).gte('logged_date', weekStart)
   const wc = (wl ?? []).filter((l: Row) => l.done).length
 
-  const valStr = data.value != null ? ` ${data.value}${data.value_unit ? ' ' + data.value_unit : ''}` : ''
+  const valStr = data && data.value != null ? ` ${data.value}${data.value_unit ? ' ' + data.value_unit : ''}` : ''
   const status = done ? `✅ отмечено${valStr}` : '⬜ пропуск'
   const pre = created ? `Создал привычку «${habit!.title}» и ` : ''
   const noteStr = input.note ? ' Заметка сохранена.' : ''
