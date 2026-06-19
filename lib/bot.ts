@@ -5,6 +5,7 @@
 let _lastUserMessage = '' // защита зачисления — реальный текст пользователя
 import { createClient, SupabaseClient } from '@supabase/supabase-js'
 import { analyzeDecision, suggestEarlyRepayment, computeWorkingDays, computeVacationAdjustment, computeCreditBurden, computeOptimalRepayment } from './calc'
+import { plannerTools, handlePlannerTool, PLANNER_TOOL_NAMES } from './planner'
 
 const USER_ID = '5ebdb411-6021-4dfc-9d0d-caa8e0107502'
 const TG = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}`
@@ -901,16 +902,6 @@ export const SYSTEM_PROMPT = `╔═══════════════�
 
 8. Прогноз следующего месяца: бери ТОЛЬКО next_adv, next_eom, next_forecast из JSON get_financial_summary. НИКОГДА не пересчитывай их самостоятельно — даже в сценарных ответах ("что если я куплю X"). next_adv и next_eom УЖЕ верны: salary_net=121600 разделено на рабочие дни ТОГО месяца, НДФЛ НЕ вычитается повторно (оклад уже net). Для июля: 11 рабочих дней в 1-й половине (1-15 включая 15-е), 12 во 2-й. next_adv=58157, next_eom=63444. Если бот посчитал иначе — он ошибся, правда в JSON. Квартальный бонус показывай отдельной строкой «сверх базового», НЕ вкладывай в базовый прогноз.
 
-ЗАЙМ АЛЕНЫ:
-• 20 000₽ от Алены (подруга) находятся в дебете Сбера — это НЕ мои деньги, это займ.
-• Назначение: лечение зуба в июне 2026. Вернуть из бонуса или переменных.
-• При ЛЮБОМ ответе про баланс/прогноз: упоминать что «реальных своих денег» = дебет минус 20 000₽.
-• Когда Александр вернёт деньги Алене — записать как расход, уменьшить дебет.
-
-АВИАБИЛЕТЫ И ТРАНСПОРТ НА ПОЕЗДКИ:
-• Авиабилеты, ж/д билеты, такси до/из аэропорта на поездки — всегда Внеплановые, НИКОГДА не Переменные.
-• Это правило без исключений, независимо от суммы.
-
 КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО:
   ✗ Считать в голове
   ✗ Брать цифры из якорей или контекста
@@ -933,6 +924,7 @@ export const SYSTEM_PROMPT = `╔═══════════════�
   ЗП = рабочие дни 15-end × daily_rate
 
 Ты — финансовый ассистент Александра в Telegram. Александр работает в АТОН (продажи инвестиционных продуктов).
+Кроме финансов, ты ведёшь ПЛАНИРОВЩИК — личные/рабочие/учебные/бытовые задачи и дела (инструменты add_task, complete_task, list_tasks). Когда Александр упоминает дело, встречу, запись или дедлайн — фиксируй через add_task (это НЕ add_backlog_item: тот только для задач разработки самого бота). Если у дела есть плановая трата — сохраняй её в planned_amount, но в финансовый прогноз пока НЕ включай. Финансы и план показывай раздельно, не смешивай в одном ответе.
 
 ФОРМАТ ОТВЕТА — КРИТИЧНО:
 - Telegram на мобильном. НИКОГДА не используй markdown-таблицы (символ |). Они ломаются.
@@ -2152,6 +2144,8 @@ export const TOOLS = [
       category: { type: 'string' },
       importance: { type: 'number', description: '1-5, где 5 критично' },
     }, required: ['content'] } },
+  // ── БЛОК ПЛАНИРОВЩИК (P-1) ──
+  ...plannerTools,
 ]
 
 interface ContentBlock { type:string; text?:string; id?:string; name?:string; input?:Record<string,unknown> }
@@ -2237,6 +2231,8 @@ async function getFinancialSummaryJson(): Promise<string> {
 }
 
 async function handleTool(name: string, input: Record<string,unknown>): Promise<string> {
+  // ── ПЛАНИРОВЩИК: перехватываем до финансового fallthrough ──
+  if (PLANNER_TOOL_NAMES.has(name)) return await handlePlannerTool(name, input)
   if (name === 'get_financial_summary') return await getFinancialSummaryJson()
   // Computation tools (read-only, не пишут в БД)
   if (name === 'scenario_analysis') {
