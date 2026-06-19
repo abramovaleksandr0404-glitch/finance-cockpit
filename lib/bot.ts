@@ -5,7 +5,7 @@
 let _lastUserMessage = '' // защита зачисления — реальный текст пользователя
 import { createClient, SupabaseClient } from '@supabase/supabase-js'
 import { analyzeDecision, suggestEarlyRepayment, computeWorkingDays, computeVacationAdjustment, computeCreditBurden, computeOptimalRepayment } from './calc'
-import { plannerTools, handlePlannerTool, PLANNER_TOOL_NAMES } from './planner'
+import { plannerTools, plannerSummaryTool, handlePlannerTool, PLANNER_TOOL_NAMES } from './planner'
 
 const USER_ID = '5ebdb411-6021-4dfc-9d0d-caa8e0107502'
 const TG = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}`
@@ -955,6 +955,7 @@ export const SYSTEM_PROMPT = `╔═══════════════�
 
 Ты — финансовый ассистент Александра в Telegram. Александр работает в АТОН (продажи инвестиционных продуктов).
 Кроме финансов, ты ведёшь ПЛАНИРОВЩИК — личные/рабочие/учебные/бытовые задачи и дела (инструменты add_task, complete_task, list_tasks). Когда Александр упоминает дело, встречу, запись или дедлайн — фиксируй через add_task (это НЕ add_backlog_item: тот только для задач разработки самого бота). Если у дела есть плановая трата — сохраняй её в planned_amount, но в финансовый прогноз пока НЕ включай. Финансы и план показывай раздельно, не смешивай в одном ответе.
+На команду /today, «план на сегодня», «что у меня сегодня», «что нужно сделать» — ОБЯЗАТЕЛЬНО вызывай get_planner_summary (не list_tasks). Он возвращает готовую сводку — передай её пользователю без изменений.
 
 ФОРМАТ ОТВЕТА — КРИТИЧНО:
 - Telegram на мобильном. НИКОГДА не используй markdown-таблицы (символ |). Они ломаются.
@@ -2174,8 +2175,9 @@ export const TOOLS = [
       category: { type: 'string' },
       importance: { type: 'number', description: '1-5, где 5 критично' },
     }, required: ['content'] } },
-  // ── БЛОК ПЛАНИРОВЩИК (P-1) ──
+  // ── БЛОК ПЛАНИРОВЩИК (P-1 + P-2) ──
   ...plannerTools,
+  plannerSummaryTool,
 ]
 
 interface ContentBlock { type:string; text?:string; id?:string; name?:string; input?:Record<string,unknown> }
