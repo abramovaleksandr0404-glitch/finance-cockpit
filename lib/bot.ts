@@ -2180,7 +2180,7 @@ export const TOOLS = [
       category: { type: 'string' },
       importance: { type: 'number', description: '1-5, где 5 критично' },
     }, required: ['content'] } },
-  // ── БЛОК ПЛАНИРОВЩИК (P-1 + P-2) ──
+  // ── БЛОК ПЛАНИРОВЩИК (P-1 + P-2 + P-3 habits) ──
   ...plannerTools,
   plannerSummaryTool,
 ]
