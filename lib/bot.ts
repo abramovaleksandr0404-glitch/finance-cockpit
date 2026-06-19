@@ -33,11 +33,15 @@ function lastWorkingDayOfMonth(y: number, m: number): number {
 
 export async function getHistory(chatId: number) {
   const { data } = await db().from('bot_messages').select('role,content').eq('chat_id', chatId).order('created_at', { ascending: false }).limit(6)
-  // Обрезаем длинные ответы ассистента до сути: история нужна для контекста беседы,
-  // но НЕ должна служить шаблоном формата (иначе бот копирует структуру прошлого ответа).
+  // ВАЖНО: длинные ответы ассистента заменяем тематическим тегом без форматирования.
+  // Причина: первые 200 символов включали заголовки/таблицы → LLM копировал структуру.
+  // Тематический тег даёт контекст ("о чём говорили") без шаблона для копирования.
   return (data ?? []).reverse().map((h: {role:string; content:string}) => {
-    if (h.role === 'assistant' && h.content.length > 200) {
-      return { role: h.role, content: h.content.slice(0, 200) + '…[ответ обрезан]' }
+    if (h.role === 'assistant' && h.content.length > 120) {
+      // Берём суть без markdown: убираем **, *, #, |, эмодзи-заголовки
+      const stripped = h.content.replace(/[*#|_~`]/g,'').replace(/[📊💰🏦📅📤📥🎯⚠️✅]/g,'').trim()
+      const summary = stripped.slice(0, 80).replace(/\n+/g,' ').trim()
+      return { role: h.role, content: `[Ответил: ${summary}…]` }
     }
     return h
   })
