@@ -103,7 +103,7 @@ export const plannerTools = [
   },
 ]
 
-export const PLANNER_TOOL_NAMES = new Set([...plannerTools.map(t => t.name), plannerSummaryTool.name])
+export const PLANNER_TOOL_NAMES = new Set([...plannerTools.map(t => t.name), 'get_planner_summary'])
 
 // ─────────────────────────── ФОРМАТ ───────────────────────────
 function fmtTask(t: Row): string {
