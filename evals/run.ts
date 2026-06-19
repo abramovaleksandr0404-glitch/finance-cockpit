@@ -387,9 +387,9 @@ console.log('\n=== ЯКОРЯ: SPRINT 9 ===')
   // Задача 2: update_anchor инструмент
   check('update_anchor в TOOLS', TOOLS.some(t => t.name === 'update_anchor'), true)
   const ua = TOOLS.find(t => t.name === 'update_anchor')
-  check('update_anchor требует month_key', ua?.input_schema?.required?.includes('month_key'), true)
-  check('update_anchor требует key', ua?.input_schema?.required?.includes('key'), true)
-  check('update_anchor требует value', ua?.input_schema?.required?.includes('value'), true)
+  check('update_anchor требует month_key', (ua?.input_schema as any)?.required?.includes('month_key'), true)
+  check('update_anchor требует key', (ua?.input_schema as any)?.required?.includes('key'), true)
+  check('update_anchor требует value', (ua?.input_schema as any)?.required?.includes('value'), true)
   // Задача 3: ПРАВИЛО №0 в промпте
   check('ПРАВИЛО №0 в SYSTEM_PROMPT', SYSTEM_PROMPT.includes('ПРАВИЛО №0'), true)
   check('АБСОЛЮТНЫЙ ПРИОРИТЕТ в промпте', SYSTEM_PROMPT.includes('АБСОЛЮТНЫЙ ПРИОРИТЕТ'), true)
