@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { generateMorningBriefing, sendTelegram, sendTelegramWithButtons, executeAction, type BotAction } from '@/lib/bot'
-import { computeWorkingDays } from '@/lib/calc'
+import { computeWorkingDays, computeFirstHalfWorkingDays } from '@/lib/calc'
 
 export const dynamic = 'force-dynamic'
 
@@ -37,21 +37,25 @@ export async function GET(req: Request) {
         const wd = computeWorkingDays(nowD.getFullYear(), nowD.getMonth()+1, holidayDates)
         const { data: u } = await supabase.from('users').select('salary_net,fixed_costs').eq('id',USER_ID).single()
         const dailyRate = Math.round(Number(u?.salary_net ?? 0) / wd)
-        const advWd = Math.round(wd/2)
+        const advWd = computeFirstHalfWorkingDays(nowD.getFullYear(), nowD.getMonth()+1, holidayDates)
         await supabase.from('months').upsert({
           user_id: USER_ID,
           month_key: newMonthKey,
           fixed_paid: {},
-          salary_adv_amount: advWd * dailyRate,
-          salary_eom_amount: (wd - advWd) * dailyRate,
+          salary_adv_amount: String(advWd * dailyRate),
+          salary_eom_amount: String((wd - advWd) * dailyRate),
         }, { onConflict: 'user_id,month_key' })
         const fixedTotal = ((u?.fixed_costs as { amount: number }[]) ?? []).reduce((sm, f) => sm + Number(f.amount), 0)
         const anchors = [
-          { key:'working_days', value:String(wd) },
-          { key:'daily_rate', value:String(dailyRate) },
-          { key:'fixed_total', value:String(fixedTotal) },
-          { key:'fixed_unpaid', value:String(fixedTotal) },
-          { key:'var_spent', value:'0' },
+          { key:'working_days',     value:String(wd) },
+          { key:'daily_rate',       value:String(dailyRate) },
+          { key:'adv_working_days', value:String(advWd) },
+          { key:'eom_working_days', value:String(wd - advWd) },
+          { key:'advance_normal',   value:String(advWd * dailyRate) },
+          { key:'eom_salary',       value:String((wd - advWd) * dailyRate) },
+          { key:'fixed_total',      value:String(fixedTotal) },
+          { key:'fixed_unpaid',     value:String(fixedTotal) },
+          { key:'var_spent',        value:'0' },
         ]
         for (const a of anchors) {
           await supabase.from('bot_anchors').upsert({ user_id:USER_ID, month_key:newMonthKey, ...a, updated_at:new Date().toISOString() }, { onConflict: 'user_id,month_key,key' })
