@@ -2200,10 +2200,20 @@ interface ContentBlock { type:string; text?:string; id?:string; name?:string; in
 
 // Один раунд вызова Claude с инструментами
 async function callClaude(modelId: string, systemBlocks: unknown[], messages: unknown[]) {
+  // Prompt Caching: кешируем TOOLS (самый большой статичный блок)
+  const toolsWithCache = [
+    ...TOOLS.slice(0, -1),
+    { ...TOOLS[TOOLS.length - 1], cache_control: { type: 'ephemeral' } }
+  ]
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method:'POST',
-    headers:{'Content-Type':'application/json','x-api-key':process.env.ANTHROPIC_API_KEY!,'anthropic-version':'2023-06-01'},
-    body: JSON.stringify({ model:modelId, max_tokens:1500, system:systemBlocks, tools:TOOLS, messages })
+    headers:{
+      'Content-Type':'application/json',
+      'x-api-key':process.env.ANTHROPIC_API_KEY!,
+      'anthropic-version':'2023-06-01',
+      'anthropic-beta':'prompt-caching-2024-07-31'
+    },
+    body: JSON.stringify({ model:modelId, max_tokens:1500, system:systemBlocks, tools:toolsWithCache, messages })
   })
   return res.json()
 }
