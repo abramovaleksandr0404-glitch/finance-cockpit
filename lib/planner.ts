@@ -485,6 +485,12 @@ async function getPlannerSummary(): Promise<string> {
 
 // ═══════════════ Добавляем tool в массив ═══════════════
 // (добавлен ниже в plannerTools через re-export патч — см. конец файла)
+// ── Публичный экспорт для route.ts (bypass LLM) ──
+export async function todayPlannerResponse(): Promise<string> {
+  const state = await computePlannerState()
+  return fmtStateForBot(state)
+}
+
 export const plannerSummaryTool = {
   name: 'get_planner_summary',
   description: 'Сводка планировщика: задачи на сегодня, просроченные, план на неделю, бэклог. Вызывай на: "/today", "план на сегодня", "что у меня сегодня", "задачи на эту неделю", "покажи план", "что нужно сделать". Это NE get_financial_summary — только задачи и дела, без финансов.',
