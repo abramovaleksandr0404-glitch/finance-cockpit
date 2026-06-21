@@ -192,7 +192,7 @@ export async function computeFinancialState(): Promise<FinancialState> {
     s.from('expenses').select('amount,category,description').eq('user_id', USER_ID).eq('month_key', monthKey),
     s.from('cards').select('name,current_debt,card_limit').eq('user_id', USER_ID).order('sort_order'),
     s.from('loans').select('name,principal,accrued_int,min_payment,rate,paid_month,due_day,end_date').eq('user_id', USER_ID).order('sort_order'),
-    s.from('goals').select('name,amount,purchased,month_key').eq('user_id', USER_ID).eq('purchased', false).order('sort_order'),
+    s.from('goals').select('name,amount,purchased,month_key,target_date').eq('user_id', USER_ID).eq('purchased', false).order('sort_order'),
     s.from('ru_holidays').select('holiday_date').gte('holiday_date', `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-01`).lte('holiday_date', `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-31`),
     s.from('ru_holidays').select('holiday_date').gte('holiday_date', `${new Date(now.getFullYear(), now.getMonth()+1, 1).getFullYear()}-${String(new Date(now.getFullYear(), now.getMonth()+1, 1).getMonth()+1).padStart(2,'0')}-01`).lte('holiday_date', `${new Date(now.getFullYear(), now.getMonth()+1, 1).getFullYear()}-${String(new Date(now.getFullYear(), now.getMonth()+1, 1).getMonth()+1).padStart(2,'0')}-31`),
   ])
@@ -377,7 +377,7 @@ export async function getContext(): Promise<string> {
     supabase.from('loans').select('id,name,principal,accrued_int,min_payment,end_date,rate,paid_month,due_day').eq('user_id',USER_ID).order('sort_order'),
     supabase.from('expenses').select('id,amount,category,description,expense_date,custom_category_id,covers_days').eq('user_id',USER_ID).eq('month_key',monthKey),
     supabase.from('months').select('*').eq('user_id',USER_ID).eq('month_key',monthKey).maybeSingle(),
-    supabase.from('goals').select('id,name,amount,month_key,purchased').eq('user_id',USER_ID).eq('purchased',false).order('sort_order'),
+    supabase.from('goals').select('id,name,amount,month_key,purchased,target_date').eq('user_id',USER_ID).eq('purchased',false).order('sort_order'),
     supabase.from('expenses').select('id,category,amount,description,expense_date').eq('user_id',USER_ID).eq('month_key',monthKey).order('created_at',{ascending:false}).limit(5),
     supabase.from('months').select('month_key,clients,revenue').eq('user_id',USER_ID).gte('month_key',qStartKey).lte('month_key',qEndKey),
     supabase.from('cards').select('name,card_limit,current_debt').eq('user_id',USER_ID).order('sort_order'),
@@ -723,7 +723,7 @@ ${salaryAdjustments.length > 0 ? `\nКОРРЕКТИРОВКИ ЗП:\n${salaryAd
   ИТОГО к списанию: ${rub(pendingLoanPayments + fixedUnpaid + varLeft)}
 
 ПЛАНОВЫЕ ПОКУПКИ ИЮНЯ (цели на месяц, ещё не куплены):
-${plannedPurchases.length ? plannedPurchases.map(g=>`  • ${g.name}: ${rub(Number(g.amount))}`).join('\n')+`\n  ИТОГО плановых: ${rub(plannedTotal)}` : '  (нет запланированных покупок)'}
+${plannedPurchases.length ? plannedPurchases.map(g=>`  • ${g.name}: ${rub(Number(g.amount))}${g.target_date ? ` (срок: ${g.target_date})` : ''}`).join('\n')+`\n  ИТОГО плановых: ${rub(plannedTotal)}` : '  (нет запланированных покупок)'}
 
 ПРОГНОЗ ОСТАТКА К 30-го ИЮНЯ: ${rub(projEnd)}
   [формула: чистая позиция ${rub(netPosition)} (деб.${rub(liquid)}−карты${rub(totalCardDebt)}) + входы ${rub(incomingTotal)} − кредиты ${rub(pendingLoanPayments)} − постоянные ${rub(fixedUnpaid)} − переменные до лимита ${rub(varLeft)}]
