@@ -151,6 +151,19 @@ export function computeWorkingDays(year: number, month: number, holidays?: strin
   return count
 }
 
+
+/** Рабочие дни с 1 по 15 включительно (для расчёта аванса) */
+export function computeFirstHalfWorkingDays(year: number, month: number, holidays?: string[]): number {
+  const holidaySet = new Set(holidays ?? [])
+  let count = 0
+  for (let d = 1; d <= 15; d++) {
+    const dateStr = `${year}-${String(month).padStart(2,'0')}-${String(d).padStart(2,'0')}`
+    const dow = new Date(year, month - 1, d).getDay()
+    if (dow !== 0 && dow !== 6 && !holidaySet.has(dateStr)) count++
+  }
+  return count
+}
+
 export interface CreditBurdenResult {
   dailyRate: number
   totalMonthlyPayment: number
