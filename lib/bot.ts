@@ -1427,7 +1427,14 @@ export async function executeAction(action: BotAction): Promise<void> {
     const { data:u } = await s.from('users').select('debit_balance').eq('id',USER_ID).single()
     const prevBal = Number(u?.debit_balance ?? 0)
     const newBal = Math.round((prevBal - action.amount) * 100) / 100
-    await s.from('users').update({debit_balance:newBal,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
+    // READ-AFTER-WRITE: проверяем что UPDATE применился, retry если нет
+    const { error: debitErr } = await s.from('users').update({debit_balance:newBal,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
+    if (debitErr) console.error('[add_expense] debit UPDATE error:', debitErr)
+    const { data: verifyU } = await s.from('users').select('debit_balance').eq('id',USER_ID).single()
+    if (Math.abs(Number(verifyU?.debit_balance) - newBal) > 1) {
+      console.error('[add_expense] debit mismatch, retrying:', verifyU?.debit_balance, '->', newBal)
+      await s.from('users').update({debit_balance:newBal,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
+    }
     await recordDebitChange(s, prevBal, newBal, `Трата: ${action.description ?? action.category}`, 'expense')
     // Sprint 25: синхронизация якорей var_spent/var_left после каждой траты
     const { data: allExpSync } = await s.from('expenses').select('amount').eq('user_id', USER_ID).eq('month_key', monthKey)
