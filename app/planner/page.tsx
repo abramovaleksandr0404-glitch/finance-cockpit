@@ -1,3 +1,4 @@
+// v2 — cache bust
 import { redirect } from 'next/navigation'
 import { createClient } from '@/lib/supabase/server'
 import PlannerClient from '@/components/planner/PlannerClient'
