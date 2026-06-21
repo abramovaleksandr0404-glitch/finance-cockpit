@@ -1,4 +1,3 @@
-// v2 — cache bust
 import { redirect } from 'next/navigation'
 import { createClient } from '@/lib/supabase/server'
 import PlannerClient from '@/components/planner/PlannerClient'
@@ -19,7 +18,9 @@ function mondayISO(iso: string) {
 }
 
 export default async function PlannerPage() {
-  const supabase = await createClient()
+  // planner_* tables not in generated Database type — cast to any
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const supabase = (await createClient()) as any
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) redirect('/auth')
 
