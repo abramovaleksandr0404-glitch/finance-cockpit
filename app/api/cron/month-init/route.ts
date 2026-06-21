@@ -1,23 +1,11 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
-import { computeWorkingDays } from '@/lib/calc'
+import { computeWorkingDays, computeFirstHalfWorkingDays } from '@/lib/calc'
 import { sendTelegram } from '@/lib/bot'
 
 export const dynamic = 'force-dynamic'
 
 const USER_ID = '5ebdb411-6021-4dfc-9d0d-caa8e0107502'
-
-// Рабочие дни с 1-го по 15-е включительно (для расчёта аванса)
-function computeFirstHalfWorkingDays(year: number, month: number, holidays: string[]): number {
-  const holidaySet = new Set(holidays)
-  let count = 0
-  for (let d = 1; d <= 15; d++) {
-    const dateStr = `${year}-${String(month).padStart(2,'0')}-${String(d).padStart(2,'0')}`
-    const dow = new Date(year, month - 1, d).getDay()
-    if (dow !== 0 && dow !== 6 && !holidaySet.has(dateStr)) count++
-  }
-  return count
-}
 
 export async function GET(req: Request) {
   if (req.headers.get('authorization') !== `Bearer ${process.env.CRON_SECRET}`) {
