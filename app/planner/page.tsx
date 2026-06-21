@@ -4,6 +4,26 @@ import PlannerClient from '@/components/planner/PlannerClient'
 
 export const dynamic = 'force-dynamic'
 
+// ── Локальные типы (planner_* не в Database type — используем any cast + локальные интерфейсы) ──
+type PTask = {
+  id: string; title: string; description?: string | null
+  category?: string | null; priority: string; status: string
+  due_date?: string | null; due_time?: string | null
+  planned_amount?: number | null; contact_name?: string | null; parent_id?: string | null
+}
+type PHabit = {
+  id: string; title: string; category?: string | null; frequency: string
+  target_days_per_week?: number | null; metric_type: string; metric_unit?: string | null; status: string
+}
+type PHabitLog = {
+  id: string; habit_id: string; logged_date: string; done: boolean
+  value?: number | null; value_unit?: string | null; note?: string | null
+}
+type PNotif = {
+  id: string; title: string; message?: string | null; recurrence: string
+  recurrence_day?: number | null; recurrence_hour: number; recurrence_min: number; notify_at: string
+}
+
 const USER_ID = '5ebdb411-6021-4dfc-9d0d-caa8e0107502'
 
 function todayISO() { return new Date().toISOString().slice(0, 10) }
@@ -52,10 +72,10 @@ export default async function PlannerPage() {
       .order('notify_at', { ascending: true }).limit(10),
   ])
 
-  const tasks = tasksRes.data ?? []
-  const habits = habitsRes.data ?? []
-  const logs = logsRes.data ?? []
-  const notifs = notifsRes.data ?? []
+  const tasks = (tasksRes.data ?? []) as PTask[]
+  const habits = (habitsRes.data ?? []) as PHabit[]
+  const logs = (logsRes.data ?? []) as PHabitLog[]
+  const notifs = (notifsRes.data ?? []) as PNotif[]
 
   // Partition tasks client-friendly
   const overdue  = tasks.filter(t => t.due_date && t.due_date < today)
