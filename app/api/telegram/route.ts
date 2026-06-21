@@ -97,6 +97,15 @@ export async function POST(req: Request) {
     const text = ((message.text as string) ?? '').trim()
     if (!text) return NextResponse.json({ ok: true })
 
+    // ── ПЛАНИРОВЩИК: /today /plan /week — bypass LLM, прямо из ядра ────────
+    const PLANNER_SLASH = new Set(['/today', '/plan', '/week', '/habits'])
+    if (PLANNER_SLASH.has(text.split(' ')[0].toLowerCase())) {
+      const { todayPlannerResponse } = await import('@/lib/planner')
+      const planReply = await todayPlannerResponse()
+      await sendTelegram(chatId, planReply)
+      return NextResponse.json({ ok: true })
+    }
+
     const QUICK_ACTIONS: Record<string, string> = {
       '💰 Аванс': 'когда и сколько будет аванс, с учётом всех корректировок',
       '💵 Зарплата': 'когда и сколько будет зарплата в конце месяца',
