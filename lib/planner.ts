@@ -154,9 +154,42 @@ export const plannerTools = [
     description: 'ОБЯЗАТЕЛЬНО вызывай на: «мои привычки», «покажи привычки», «как я с привычками», «сколько раз был в зале», «статистика привычек». НИКОГДА не отвечай из памяти — только из БД через этот инструмент. «мои привычки», «как у меня с привычками», «статистика привычек», «сколько раз я был в зале».',
     input_schema: { type: 'object', properties: {} },
   },
+  // ── УВЕДОМЛЕНИЯ (P-4) ──
+  {
+    name: 'schedule_reminder',
+    description: "ОБЯЗАТЕЛЬНО вызывай на: 'напомни оплатить ЖКХ 5-го в 10:00', 'напомни позвонить завтра в 9', 'напомни про встречу в пятницу в 11'. Времена — МСК. НИКОГДА не говори что создал без вызова инструмента.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        title:           { type: 'string', description: 'Что напомнить' },
+        message:         { type: 'string', description: 'Текст в Telegram (если отличается от title)' },
+        recurrence:      { type: 'string', enum: ['once','daily','weekly','monthly'] },
+        notify_date:     { type: 'string', description: 'ISO YYYY-MM-DD — для once' },
+        notify_hour:     { type: 'number', description: 'Час МСК (0-23)' },
+        notify_min:      { type: 'number', description: 'Минута (0-59)' },
+        recurrence_day:  { type: 'number', description: 'Для monthly: день месяца (1-31)' },
+        recurrence_wday: { type: 'number', description: 'Для weekly: 0=вс,1=пн,2=вт,3=ср,4=чт,5=пт,6=сб' },
+      },
+      required: ['title','recurrence'],
+    },
+  },
+  {
+    name: 'list_reminders',
+    description: "ОБЯЗАТЕЛЬНО вызывай на: 'мои напоминания', 'покажи уведомления'. Никогда из памяти.",
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'cancel_reminder',
+    description: "Отменить напоминание. Вызывай на: 'отмени напоминание про X', 'удали уведомление X'.",
+    input_schema: {
+      type: 'object',
+      properties: { reminder: { type: 'string', description: 'Название (или часть) напоминания' } },
+      required: ['reminder'],
+    },
+  },
 ]
 
-export const PLANNER_TOOL_NAMES = new Set([...plannerTools.map(t => t.name), 'get_planner_summary'])
+export const PLANNER_TOOL_NAMES = new Set([...plannerTools.map(t => t.name), 'get_planner_summary', 'schedule_reminder', 'list_reminders', 'cancel_reminder'])
 
 // ─────────────────────────── ФОРМАТ ───────────────────────────
 function fmtTask(t: Row): string {
@@ -579,6 +612,87 @@ async function listHabits(): Promise<string> {
   return `🔁 ПРИВЫЧКИ (неделя с пн) — ФАКТ ИЗ БД:\n` + lines.join('\n')
 }
 
+// ─────────────── ХЕНДЛЕРЫ УВЕДОМЛЕНИЙ (P-4) ───────────────
+async function scheduleReminder(input: Row): Promise<string> {
+  const s = db()
+  const title = String(input.title ?? '').trim()
+  if (!title) return 'Ошибка: пустой заголовок.'
+  const rec = String(input.recurrence ?? 'once')
+  const hourMsk = Number(input.notify_hour ?? 9)
+  const minVal  = Number(input.notify_min  ?? 0)
+  const hourUtc = (hourMsk - 3 + 24) % 24
+
+  let notifyAt: Date
+  const now = new Date()
+  if (rec === 'once') {
+    const dateStr = String(input.notify_date ?? todayISO())
+    notifyAt = new Date(`${dateStr}T${String(hourUtc).padStart(2,'0')}:${String(minVal).padStart(2,'0')}:00Z`)
+  } else if (rec === 'monthly') {
+    const day = Number(input.recurrence_day ?? 1)
+    notifyAt = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), day, hourUtc, minVal, 0))
+    if (notifyAt <= now) notifyAt = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, day, hourUtc, minVal, 0))
+  } else if (rec === 'weekly') {
+    const wday = Number(input.recurrence_wday ?? 1)
+    const cur = now.getUTCDay()
+    let delta = (wday - cur + 7) % 7; if (delta === 0) delta = 7
+    notifyAt = new Date(now)
+    notifyAt.setUTCDate(notifyAt.getUTCDate() + delta)
+    notifyAt.setUTCHours(hourUtc, minVal, 0, 0)
+  } else {
+    notifyAt = new Date(now)
+    notifyAt.setUTCDate(notifyAt.getUTCDate() + 1)
+    notifyAt.setUTCHours(hourUtc, minVal, 0, 0)
+  }
+
+  const row: Row = {
+    user_id: USER_ID, chat_id: 1655341247, title,
+    message: input.message ? String(input.message) : null, recurrence: rec,
+    recurrence_day:  input.recurrence_day  != null ? Number(input.recurrence_day)  : null,
+    recurrence_wday: input.recurrence_wday != null ? Number(input.recurrence_wday) : null,
+    recurrence_hour: hourMsk, recurrence_min: minVal,
+    notify_at: notifyAt.toISOString(), status: 'active',
+  }
+  const { data, error } = await s.from('scheduled_notifications').insert(row).select().single()
+  if (error) return `Ошибка: ${error.message}`
+  const when = rec === 'once'     ? `${String(input.notify_date ?? todayISO())} ${hourMsk}:${String(minVal).padStart(2,'0')} МСК`
+             : rec === 'monthly'  ? `каждый месяц ${input.recurrence_day ?? 1}-го в ${hourMsk}:${String(minVal).padStart(2,'0')} МСК`
+             : rec === 'weekly'   ? `еженедельно в ${hourMsk}:${String(minVal).padStart(2,'0')} МСК`
+             : `ежедневно в ${hourMsk}:${String(minVal).padStart(2,'0')} МСК`
+  return `🔔 Напоминание создано (ФАКТ ИЗ БД): «${data.title}» — ${when}.`
+}
+
+async function listReminders(): Promise<string> {
+  const s = db()
+  const { data, error } = await s.from('scheduled_notifications')
+    .select('id,title,recurrence,recurrence_day,recurrence_hour,recurrence_min,notify_at')
+    .eq('user_id', USER_ID).eq('status','active')
+    .order('notify_at', { ascending: true }).limit(20)
+  if (error) return `Ошибка: ${error.message}`
+  if (!data || !data.length) return 'Активных напоминаний нет.'
+  const lines = data.map((r: Row) => {
+    const h = r.recurrence_hour ?? 9, m = String(r.recurrence_min ?? 0).padStart(2,'0')
+    const when = r.recurrence === 'monthly' ? `каждый месяц ${r.recurrence_day}-го в ${h}:${m} МСК`
+               : r.recurrence === 'weekly'  ? `еженедельно в ${h}:${m} МСК`
+               : r.recurrence === 'daily'   ? `ежедневно в ${h}:${m} МСК`
+               : new Date(r.notify_at as string).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })
+    return `• ${r.title} — ${when}`
+  })
+  return `🔔 НАПОМИНАНИЯ (ФАКТ ИЗ БД):\n${lines.join('\n')}`
+}
+
+async function cancelReminder(input: Row): Promise<string> {
+  const s = db()
+  const key = String(input.reminder ?? '').trim()
+  if (!key) return 'Ошибка: не указано напоминание.'
+  const { data, error } = await s.from('scheduled_notifications')
+    .update({ status: 'done' })
+    .eq('user_id', USER_ID).eq('status','active').ilike('title', `%${key}%`)
+    .select('id,title')
+  if (error) return `Ошибка: ${error.message}`
+  if (!data || !data.length) return `Не нашёл активное напоминание по «${key}».`
+  return `Отменено: ${data.map((r: Row) => r.title).join(', ')} (ФАКТ ИЗ БД).`
+}
+
 export async function handlePlannerTool(name: string, input: Record<string, unknown>): Promise<string> {
   const inp = (input ?? {}) as Row
   if (name === 'get_planner_summary') return await getPlannerSummary()
@@ -588,5 +702,8 @@ export async function handlePlannerTool(name: string, input: Record<string, unkn
   if (name === 'add_habit') return await addHabit(inp)
   if (name === 'log_habit') return await logHabit(inp)
   if (name === 'list_habits') return await listHabits()
+  if (name === 'schedule_reminder') return await scheduleReminder(inp)
+  if (name === 'list_reminders')    return await listReminders()
+  if (name === 'cancel_reminder')   return await cancelReminder(inp)
   return `Неизвестный planner-инструмент: ${name}`
 }
