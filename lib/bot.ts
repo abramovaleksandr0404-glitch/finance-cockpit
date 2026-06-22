@@ -2524,6 +2524,11 @@ async function runToolLoop(modelId: string, systemBlocks: unknown[], initialMess
   let anyToolCalled = false
   for (let round = 0; round < 6; round++) {
     const data = await callClaude(modelId, systemBlocks, messages)
+    // ДИАГНОСТИКА: если Anthropic вернул ошибку — показываем её, не маскируем в "Готово"
+    if (data.error || !data.content) {
+      console.error('[anthropic error]', JSON.stringify(data).slice(0, 500))
+      return { text: '⚠️ API_ERROR: ' + (data.error?.message || data.error?.type || JSON.stringify(data).slice(0,200)), actionsRun }
+    }
     const content: ContentBlock[] = data.content ?? []
     if (data.stop_reason === 'tool_use') {
       anyToolCalled = true
