@@ -2199,6 +2199,8 @@ export const TOOLS = [
 interface ContentBlock { type:string; text?:string; id?:string; name?:string; input?:Record<string,unknown> }
 
 // Один раунд вызова Claude с инструментами
+export let _lastUsage: Record<string, number> = {}
+
 async function callClaude(modelId: string, systemBlocks: unknown[], messages: unknown[], noTools = false) {
   // Prompt Caching: кешируем TOOLS (самый большой статичный блок)
   const toolsWithCache = [
@@ -2218,7 +2220,9 @@ async function callClaude(modelId: string, systemBlocks: unknown[], messages: un
     },
     body: JSON.stringify(deepCleanSurrogates(bodyObj))
   })
-  return res.json()
+  const j = await res.json()
+  if (j.usage) _lastUsage = j.usage
+  return j
 }
 
 // Удаляет непарные суррогаты (битые эмодзи) из готового JSON — иначе Anthropic
