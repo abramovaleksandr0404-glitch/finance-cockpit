@@ -7,6 +7,24 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js'
 import { analyzeDecision, suggestEarlyRepayment, computeWorkingDays, computeVacationAdjustment, computeCreditBurden, computeOptimalRepayment } from './calc'
 import { plannerTools, plannerSummaryTool, handlePlannerTool, PLANNER_TOOL_NAMES } from './planner'
 
+
+// ── Request-level cache (TTL 60s) — один раз за запрос, не 8 ──────────────
+const _cache = new Map<string, { value: string; ts: number }>()
+const CACHE_TTL = 60_000 // 60 секунд
+
+async function cached<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const now = Date.now()
+  const hit = _cache.get(key)
+  if (hit && now - hit.ts < CACHE_TTL) return JSON.parse(hit.value) as T
+  const value = await fn()
+  _cache.set(key, { value: JSON.stringify(value), ts: now })
+  return value
+}
+
+function invalidateCache(...keys: string[]) {
+  keys.forEach(k => _cache.delete(k))
+}
+
 const USER_ID = '5ebdb411-6021-4dfc-9d0d-caa8e0107502'
 const TG = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}`
 
@@ -358,6 +376,10 @@ export async function computeFinancialState(): Promise<FinancialState> {
 
 // ── Полный контекст с квартальной аналитикой ─────────────────────────────
 export async function getContext(): Promise<string> {
+  return cached('context', _getContextRaw)
+}
+
+async function _getContextRaw(): Promise<string> {
   const supabase = db()
   const monthKey = mk()
   const now = new Date()
@@ -2492,6 +2514,8 @@ async function handleTool(name: string, input: Record<string,unknown>): Promise<
   }
   // DB-writing tools
   await executeAction({ type: name, ...input } as BotAction)
+  // Инвалидируем кеш после любой записи в БД — следующий getContext прочитает свежие данные
+  invalidateCache('context', 'fin_summary', 'loans_summary')
   // Sprint 27: read-after-write — после записи перечитываем ФАКТ из БД.
   // Бот обязан цитировать эти цифры, а не свою арифметику.
   try {
