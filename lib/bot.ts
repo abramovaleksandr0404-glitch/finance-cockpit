@@ -1411,6 +1411,7 @@ export async function executeAction(action: BotAction): Promise<void> {
   action.name = sanitizeStr(action.name) as string | undefined
   action.description = sanitizeStr(action.description)
 
+  // ════════════ РАСХОДЫ ════════════════════════════════════════════
   if (action.type === 'add_expense' && action.amount) {
     // Антидубль: если такая же сумма+описание за последние 5 минут — пропускаем молча
     const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString()
@@ -1438,9 +1439,10 @@ export async function executeAction(action: BotAction): Promise<void> {
       { user_id: USER_ID, key: 'var_spent', value: String(Math.round(newVarSpent)), month_key: monthKey, updated_at: new Date().toISOString() },
       { user_id: USER_ID, key: 'var_left', value: String(Math.round(newVarLeft)), month_key: monthKey, updated_at: new Date().toISOString() },
     ], { onConflict: 'user_id,month_key,key' })
-  }
 
-  if (action.type === 'delete_expense') {
+
+  // ── РАСХОДЫ: удаление / переклассификация / мультидневные ────────────
+  } else if (action.type === 'delete_expense') {
     let exp
     const isUUID = /^[0-9a-f-]{36}$/i.test(String(action.id ?? ''))
     if (!action.id || action.id === 'last') {
@@ -1462,31 +1464,29 @@ export async function executeAction(action: BotAction): Promise<void> {
       await s.from('users').update({debit_balance:newBal,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
       await recordDebitChange(s, prevBal, newBal, `Удаление траты`, 'expense_delete')
     }
-  }
 
-  if (action.type === 'add_client' && action.grade) {
+  } else if (action.type === 'add_client' && action.grade) {
     const { data:month } = await s.from('months').select('clients,revenue').eq('user_id',USER_ID).eq('month_key',monthKey).maybeSingle()
     const cur = (month?.clients as Record<string,number>) ?? {}
     const clients = {...cur, [action.grade]:(cur[action.grade]??0)+1}
     const newRev = Number(month?.revenue??41666) + (action.revenue??0)
     month ? await s.from('months').update({clients,revenue:newRev}).eq('user_id',USER_ID).eq('month_key',monthKey)
          : await s.from('months').insert({user_id:USER_ID,month_key:monthKey,clients,revenue:newRev})
-  }
 
-  if (action.type === 'add_goal' && action.name && action.amount) {
+  } else if (action.type === 'add_goal' && action.name && action.amount) {
     await s.from('goals').insert({user_id:USER_ID,name:action.name,amount:Math.round(action.amount),month_key:action.month_key??null,sort_order:99})
-  }
 
-  if (action.type === 'mark_goal_bought' && action.name) {
+  } else if (action.type === 'mark_goal_bought' && action.name) {
     const { data:goal } = await s.from('goals').select('id,amount').eq('user_id',USER_ID).ilike('name',`%${action.name}%`).maybeSingle()
     if (goal) {
       await s.from('goals').update({purchased:true,purchased_at:new Date().toISOString().split('T')[0]}).eq('id',goal.id)
       const { data:u } = await s.from('users').select('debit_balance').eq('id',USER_ID).single()
       await s.from('users').update({debit_balance:Math.round((Number(u?.debit_balance??0)-Number(goal.amount))*100)/100,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
     }
-  }
 
-  if (action.type === 'mark_salary') {
+
+  // ════════════ ДОХОДЫ И ЗАРПЛАТА ════════════════════════════════════
+  } else if (action.type === 'mark_salary') {
     const payW = /получил|пришло|зачисли|поступило|начислили|пришла|зачислилась|перечислили/i
     if (!payW.test(_lastUserMessage)) return
     const { data:u } = await s.from('users').select('debit_balance,salary_net').eq('id',USER_ID).single()
@@ -1525,9 +1525,10 @@ export async function executeAction(action: BotAction): Promise<void> {
       const newYtd = Number(u3?.ytd_gross ?? 0) + Number(u3?.salary_gross ?? 0)
       await s.from('users').update({ ytd_gross: newYtd }).eq('id', USER_ID)
     }
-  }
 
-  if (action.type === 'mark_single_fixed' && action.name) {
+
+  // ── постоянные расходы (quick mark) ─────────────────────────────────
+  } else if (action.type === 'mark_single_fixed' && action.name) {
     const { data:u } = await s.from('users').select('debit_balance,fixed_costs').eq('id',USER_ID).single()
     const { data:month } = await s.from('months').select('fixed_paid').eq('user_id',USER_ID).eq('month_key',monthKey).maybeSingle()
     const fc = (u?.fixed_costs as {name:string;amount:number;source?:string}[]) ?? []
@@ -1547,9 +1548,10 @@ export async function executeAction(action: BotAction): Promise<void> {
         await s.from('bot_anchors').upsert({user_id:USER_ID,month_key:monthKey,key:'fixed_unpaid',value:String(totalFixed-paidBudget),formula:`${totalFixed}-${paidBudget}`,updated_at:new Date().toISOString()},{onConflict:'user_id,month_key,key'})
       }
     }
-  }
 
-  if (action.type === 'mark_fixed_paid') {
+
+  // ════════════ ПОСТОЯННЫЕ РАСХОДЫ ════════════════════════════════════
+  } else if (action.type === 'mark_fixed_paid') {
     const { data:u } = await s.from('users').select('debit_balance,fixed_costs').eq('id',USER_ID).single()
     const { data:month } = await s.from('months').select('fixed_paid').eq('user_id',USER_ID).eq('month_key',monthKey).maybeSingle()
     const fc = (u?.fixed_costs as {name:string;amount:number;source?:string}[]) ?? []
@@ -1575,9 +1577,8 @@ export async function executeAction(action: BotAction): Promise<void> {
         await recordDebitChange(s, prevBal, newBal, `Постоянные с дебета ${totalDebit}₽${totalCard>0?` | с карты ${totalCard}₽ (дебет не тронут)`:''}`, 'fixed')
       }
     }
-  }
 
-  if (action.type === 'mark_fixed_paid_with_amount' && action.name) {
+  } else if (action.type === 'mark_fixed_paid_with_amount' && action.name) {
     const { data:u } = await s.from('users').select('debit_balance,fixed_costs').eq('id',USER_ID).single()
     const { data:month } = await s.from('months').select('fixed_paid').eq('user_id',USER_ID).eq('month_key',monthKey).maybeSingle()
     const fc = (u?.fixed_costs as {name:string;amount:number}[]) ?? []
@@ -1598,9 +1599,10 @@ export async function executeAction(action: BotAction): Promise<void> {
         await s.from('bot_anchors').upsert({user_id:USER_ID,month_key:monthKey,key:'fixed_unpaid',value:String(totalFixed2-paidBudget2),formula:`${totalFixed2}-${paidBudget2}`,updated_at:new Date().toISOString()},{onConflict:'user_id,month_key,key'})
       }
     }
-  }
 
-  if (action.type === 'mark_loan_paid' && action.name) {
+
+  // ════════════ КРЕДИТЫ И ДОСРОЧНЫЕ ПЛАТЕЖИ ════════════════════════
+  } else if (action.type === 'mark_loan_paid' && action.name) {
     const { data:loan } = await s.from('loans').select('*').eq('user_id',USER_ID).ilike('name',`%${action.name}%`).maybeSingle()
     if (loan && loan.paid_month !== monthKey) {
       const pay = Number(loan.min_payment)
@@ -1613,9 +1615,8 @@ export async function executeAction(action: BotAction): Promise<void> {
       await s.from('users').update({debit_balance:newBal,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
       await recordDebitChange(s, prevBal, newBal, `Кредит: ${loan.name}`, 'loan')
     }
-  }
 
-  if (action.type === 'early_repay' && action.name && action.amount) {
+  } else if (action.type === 'early_repay' && action.name && action.amount) {
     const { data:loan } = await s.from('loans').select('*').eq('user_id',USER_ID).ilike('name',`%${action.name}%`).maybeSingle()
     if (loan) {
       const newPrincipal = Math.max(0, Number(loan.principal) - action.amount)
@@ -1628,9 +1629,8 @@ export async function executeAction(action: BotAction): Promise<void> {
       await s.from('users').update({debit_balance:newBal,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
       await recordDebitChange(s, prevBal, newBal, `Досрочное: ${loan.name}`, 'loan')
     }
-  }
 
-  if (action.type === 'mark_card_payment' && action.name && action.amount) {
+  } else if (action.type === 'mark_card_payment' && action.name && action.amount) {
     const { data: card } = await s.from('cards').select('id,current_debt').eq('user_id', USER_ID).ilike('name', `%${action.name}%`).maybeSingle()
     if (card) {
       await s.from('cards').update({ current_debt: Number(card.current_debt ?? 0) + action.amount }).eq('id', card.id)
@@ -1655,19 +1655,19 @@ export async function executeAction(action: BotAction): Promise<void> {
       { user_id: USER_ID, key: 'cards_summary', value: cardsSummarySync, month_key: 'global', updated_at: new Date().toISOString() },
       { user_id: USER_ID, key: 'net_position', value: String(netPosSync), month_key: 'global', updated_at: new Date().toISOString() },
     ], { onConflict: 'user_id,month_key,key' })
-  }
 
-  if (action.type === 'add_income_event' && action.amount) {
+
+  // ── доход / баланс / закрытие ────────────────────────────────────────
+  } else if (action.type === 'add_income_event' && action.amount) {
     await s.from('income_events').insert({user_id:USER_ID,month_key:monthKey,event_date:new Date().toISOString().split('T')[0],event_type:'other',description:action.description??'Доход',amount:Math.round(action.amount),to_debit:true})
     const { data:u } = await s.from('users').select('debit_balance').eq('id',USER_ID).single()
     const prevBal = Number(u?.debit_balance??0)
     const newBal = Math.round((prevBal+action.amount)*100)/100
     await s.from('users').update({debit_balance:newBal,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
     await recordDebitChange(s, prevBal, newBal, action.description ?? 'Доход', 'income')
-  }
 
   // Получена регулярная выплата (стипендия и т.п.): зачислить + пометить чтобы не дублировать в прогнозе
-  if (action.type === 'mark_recurring_received' && action.name) {
+  } else if (action.type === 'mark_recurring_received' && action.name) {
     const payW2 = /получил|пришло|зачисли|поступило|начислили|пришла|зачислилась|перечислили/i
     if (!payW2.test(_lastUserMessage)) return
     const { data:u } = await s.from('users').select('debit_balance,recurring_incomes').eq('id',USER_ID).single()
@@ -1692,37 +1692,32 @@ export async function executeAction(action: BotAction): Promise<void> {
                : await s.from('months').insert({user_id:USER_ID,month_key:monthKey,recurring_received:received})
       }
     }
-  }
 
-  if (action.type === 'set_balance' && action.account && action.amount != null) {
+  } else if (action.type === 'set_balance' && action.account && action.amount != null) {
     const field = action.account === 'sber' ? 'debit_balance' : 'tbank_debit'
     const { data:uBal } = await s.from('users').select('debit_balance,tbank_debit').eq('id',USER_ID).single()
     const prevBal = Number(action.account === 'sber' ? uBal?.debit_balance : uBal?.tbank_debit ?? 0)
     await s.from('users').update({[field]:action.amount,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
     await recordDebitChange(s, prevBal, Number(action.amount), `Установка баланса (${action.account})`, 'manual')
-  }
 
-  if (action.type === 'close_month') {
+  } else if (action.type === 'close_month') {
     await s.from('months').update({closed:true}).eq('user_id',USER_ID).eq('month_key',monthKey)
-  }
 
-  if (action.type === 'add_fixed_cost' && action.name && action.amount) {
+  } else if (action.type === 'add_fixed_cost' && action.name && action.amount) {
     const { data:u } = await s.from('users').select('fixed_costs').eq('id',USER_ID).single()
     const fc = (u?.fixed_costs as {name:string;amount:number}[]) ?? []
     fc.push({name:action.name, amount:Math.round(action.amount)})
     await s.from('users').update({fixed_costs:fc}).eq('id',USER_ID)
     await updateAnchors(s)
-  }
 
-  if (action.type === 'remove_fixed_cost' && action.name) {
+  } else if (action.type === 'remove_fixed_cost' && action.name) {
     const { data:u } = await s.from('users').select('fixed_costs').eq('id',USER_ID).single()
     const fc = (u?.fixed_costs as {name:string;amount:number}[]) ?? []
     const filtered = fc.filter(f => !f.name.toLowerCase().includes((action.name??'').toLowerCase()))
     await s.from('users').update({fixed_costs:filtered}).eq('id',USER_ID)
     await updateAnchors(s)
-  }
 
-  if (action.type === 'edit_fixed_cost' && action.name) {
+  } else if (action.type === 'edit_fixed_cost' && action.name) {
     const { data:u } = await s.from('users').select('fixed_costs').eq('id',USER_ID).single()
     const fc = (u?.fixed_costs as {name:string;amount:number}[]) ?? []
     const idx = fc.findIndex(f => f.name.toLowerCase().includes((action.name??'').toLowerCase()))
@@ -1732,9 +1727,8 @@ export async function executeAction(action: BotAction): Promise<void> {
       await s.from('users').update({fixed_costs:fc}).eq('id',USER_ID)
       await updateAnchors(s)
     }
-  }
 
-  if (action.type === 'update_loan' && action.name) {
+  } else if (action.type === 'update_loan' && action.name) {
     const { data:loan } = await s.from('loans').select('id,principal').eq('user_id',USER_ID).ilike('name',`%${action.name}%`).maybeSingle()
     if (loan) {
       const upd: Record<string,unknown> = {}
@@ -1752,9 +1746,10 @@ export async function executeAction(action: BotAction): Promise<void> {
         await updateAnchors(s)
       }
     }
-  }
 
-  if (action.type === 'update_settings' && action.field) {
+
+  // ── настройки / оклад / отмена / отпускные ────────────────────────
+  } else if (action.type === 'update_settings' && action.field) {
     const ALLOWED = ['salary_net','salary_gross','ytd_gross','threshold','moment_share','margin_share','var_budget']
     if (action.field === 'nominal' && action.key) {
       const { data:u } = await s.from('users').select('nominals').eq('id',USER_ID).single()
@@ -1763,16 +1758,14 @@ export async function executeAction(action: BotAction): Promise<void> {
     } else if (ALLOWED.includes(action.field)) {
       await s.from('users').update({[action.field]:Number(action.value)}).eq('id',USER_ID)
     }
-  }
 
-  if (action.type === 'update_salary' && action.salary_net != null) {
+  } else if (action.type === 'update_salary' && action.salary_net != null) {
     const upd: Record<string, number> = { salary_net: Math.round(action.salary_net) }
     if (action.salary_gross != null) upd.salary_gross = Math.round(action.salary_gross)
     await s.from('users').update(upd).eq('id', USER_ID)
     await updateAnchors(s)
-  }
 
-  if (action.type === 'undo') {
+  } else if (action.type === 'undo') {
     const { data:sn } = await s.from('undo_snapshots').select('*').eq('user_id',USER_ID).order('created_at',{ascending:false}).limit(1).maybeSingle()
     if (sn) {
       const st = sn.snapshot as Record<string,unknown>
@@ -1789,9 +1782,8 @@ export async function executeAction(action: BotAction): Promise<void> {
       }
       await s.from('undo_snapshots').delete().eq('id',sn.id)
     }
-  }
 
-  if (action.type === 'record_vacation_pay' && action.days && action.paid_amount) {
+  } else if (action.type === 'record_vacation_pay' && action.days && action.paid_amount) {
     const now = new Date()
     const { data:u } = await s.from('users').select('debit_balance,salary_net').eq('id',USER_ID).single()
     const salaryNet = Number(u?.salary_net ?? 121600)
@@ -1824,9 +1816,10 @@ export async function executeAction(action: BotAction): Promise<void> {
     else updateData.salary_eom_amount = Math.max(0, eomAmt - adj.deductFromSalary)
     month ? await s.from('months').update(updateData).eq('user_id',USER_ID).eq('month_key',monthKey)
           : await s.from('months').insert({user_id:USER_ID,month_key:monthKey,...updateData})
-  }
 
-  if (action.type === 'create_custom_category' && action.name) {
+
+  // ════════════ КАТЕГОРИИ / ЯКОРЯ / ПАМЯТЬ ═════════════════════════
+  } else if (action.type === 'create_custom_category' && action.name) {
     const { data:existing } = await s.from('custom_categories').select('id').eq('user_id',USER_ID).ilike('name',action.name).maybeSingle()
     if (!existing) {
       const ins: Record<string,unknown> = {user_id:USER_ID,name:action.name}
@@ -1834,9 +1827,8 @@ export async function executeAction(action: BotAction): Promise<void> {
       if (action.keywords) ins.keywords = action.keywords
       await s.from('custom_categories').insert(ins)
     }
-  }
 
-  if (action.type === 'add_keyword' && action.name && action.keyword) {
+  } else if (action.type === 'add_keyword' && action.name && action.keyword) {
     const { data:cat } = await s.from('custom_categories').select('id,keywords').eq('user_id',USER_ID).ilike('name',`%${action.name}%`).maybeSingle()
     if (cat) {
       const kws = (cat.keywords as string[]) ?? []
@@ -1844,13 +1836,11 @@ export async function executeAction(action: BotAction): Promise<void> {
         await s.from('custom_categories').update({keywords:[...kws,action.keyword]}).eq('id',cat.id)
       }
     }
-  }
 
-  if (action.type === 'remove_custom_category' && action.name) {
+  } else if (action.type === 'remove_custom_category' && action.name) {
     await s.from('custom_categories').delete().eq('user_id',USER_ID).ilike('name',`%${action.name}%`)
-  }
 
-  if (action.type === 'learn_mapping' && action.trigger) {
+  } else if (action.type === 'learn_mapping' && action.trigger) {
     const upsertData: Record<string,unknown> = {user_id:USER_ID,trigger:action.trigger.toLowerCase()}
     if (action.category) upsertData.category = action.category
     if (action.custom_category_name) {
@@ -1858,9 +1848,8 @@ export async function executeAction(action: BotAction): Promise<void> {
       if (cat) upsertData.custom_category_id = cat.id
     }
     await s.from('bot_learnings').upsert(upsertData,{onConflict:'user_id,trigger',ignoreDuplicates:false})
-  }
 
-  if (action.type === 'save_correction' && action.correction) {
+  } else if (action.type === 'save_correction' && action.correction) {
     console.log('[save_correction] called:', action.correction?.slice(0, 50))
     const { data: recentMsgs } = await s.from('bot_messages').select('role,content,created_at').eq('user_id', USER_ID).order('created_at', {ascending: false}).limit(4)
     const msgs = (recentMsgs ?? []).reverse()
@@ -1869,9 +1858,8 @@ export async function executeAction(action: BotAction): Promise<void> {
     const userSaid = lastUser?.content ?? '[нет сообщения]'
     const botAnswered = action.bot_answered ?? (lastBot?.content?.slice(0, 400) ?? '[нет ответа]')
     await s.from('bot_corrections').insert({user_id:USER_ID,user_said:userSaid,bot_answered:botAnswered,correction:action.correction,category:action.category??'logic'})
-  }
 
-  if (action.type === 'reclassify_expense') {
+  } else if (action.type === 'reclassify_expense') {
     const monthKey2 = mk()
     let customCatId: string | null = null
     if (action.custom_category_name) {
@@ -1889,9 +1877,8 @@ export async function executeAction(action: BotAction): Promise<void> {
       // Запомнить маппинг
       await executeAction({ type: 'learn_mapping', trigger: action.keyword.toLowerCase(), category: action.new_category, custom_category_name: action.custom_category_name })
     }
-  }
 
-  if (action.type === 'update_cashflow') {
+  } else if (action.type === 'update_cashflow') {
     const monthKey3 = mk()
     const upd: Record<string, unknown> = {}
     if (action.adv_amount   != null) upd.salary_adv_amount = action.adv_amount
@@ -1902,9 +1889,8 @@ export async function executeAction(action: BotAction): Promise<void> {
       exists ? await s.from('months').update(upd).eq('user_id', USER_ID).eq('month_key', monthKey3)
              : await s.from('months').insert({ user_id: USER_ID, month_key: monthKey3, ...upd })
     }
-  }
 
-  if (action.type === 'update_revenue') {
+  } else if (action.type === 'update_revenue') {
     const targetMk = action.month_key ?? (() => {
       const now = new Date(); const pm = new Date(now.getFullYear(), now.getMonth(), 1)
       pm.setMonth(pm.getMonth()-1)
@@ -1923,9 +1909,10 @@ export async function executeAction(action: BotAction): Promise<void> {
       await s.from('months').update({ bonus_amount: null })
         .eq('user_id',USER_ID).eq('month_key',nextMk)
     }
-  }
 
-  if (action.type === 'add_backlog_item' && action.title) {
+
+  // ── бэклог / идеи ──────────────────────────────────────────────────
+  } else if (action.type === 'add_backlog_item' && action.title) {
     await s.from('bot_backlog').insert({
       user_id: USER_ID,
       title: action.title,
@@ -1933,9 +1920,8 @@ export async function executeAction(action: BotAction): Promise<void> {
       priority: action.priority ?? 2,
       category: action.category ?? 'feature',
     })
-  }
 
-  if (action.type === 'add_idea' && action.description) {
+  } else if (action.type === 'add_idea' && action.description) {
     await s.from('bot_ideas').insert({
       user_id: USER_ID,
       idea: action.description,
@@ -1943,9 +1929,8 @@ export async function executeAction(action: BotAction): Promise<void> {
       category: action.category ?? 'feature',
       priority: action.priority ?? 2,
     }).select()
-  }
 
-  if (action.type === 'add_multiday_expense' && action.amount) {
+  } else if (action.type === 'add_multiday_expense' && action.amount) {
     await s.from('expenses').insert({
       user_id: USER_ID, month_key: mk(),
       expense_date: new Date().toISOString().split('T')[0],
@@ -1959,9 +1944,8 @@ export async function executeAction(action: BotAction): Promise<void> {
     const newBal = Math.round((Number(u?.debit_balance ?? 0) - action.amount) * 100) / 100
     await s.from('users').update({ debit_balance: newBal, debit_updated_at: new Date().toISOString() }).eq('id', USER_ID)
     await recordDebitChange(s, Number(u?.debit_balance ?? 0), newBal, `Мультидневная: ${action.description ?? action.category} (${action.covers_days}д)`, 'expense')
-  }
 
-  if (action.type === 'update_anchor' && action.month_key && action.key && action.value != null) {
+  } else if (action.type === 'update_anchor' && action.month_key && action.key && action.value != null) {
     await s.from('bot_anchors').upsert({
       user_id: USER_ID,
       month_key: action.month_key,
@@ -1970,9 +1954,8 @@ export async function executeAction(action: BotAction): Promise<void> {
       formula: action.formula ?? null,
       updated_at: new Date().toISOString(),
     }, { onConflict: 'user_id,month_key,key' })
-  }
 
-  if (action.type === 'save_memory' && action.content) {
+  } else if (action.type === 'save_memory' && action.content) {
     await s.from('bot_memories').insert({
       user_id: USER_ID,
       content: sanitizeStr(action.content, 1000),
