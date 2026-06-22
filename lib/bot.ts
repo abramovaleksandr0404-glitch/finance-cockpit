@@ -2199,12 +2199,15 @@ export const TOOLS = [
 interface ContentBlock { type:string; text?:string; id?:string; name?:string; input?:Record<string,unknown> }
 
 // Один раунд вызова Claude с инструментами
-async function callClaude(modelId: string, systemBlocks: unknown[], messages: unknown[]) {
+async function callClaude(modelId: string, systemBlocks: unknown[], messages: unknown[], noTools = false) {
   // Prompt Caching: кешируем TOOLS (самый большой статичный блок)
   const toolsWithCache = [
     ...TOOLS.slice(0, -1),
     { ...TOOLS[TOOLS.length - 1], cache_control: { type: 'ephemeral' } }
   ]
+  const bodyObj: Record<string, unknown> = { model:modelId, max_tokens:1500, system:systemBlocks, messages }
+  // noTools=true в финализирующем запросе — модель ОБЯЗАНА дать текст, не может звать инструменты
+  if (!noTools) bodyObj.tools = toolsWithCache
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method:'POST',
     headers:{
@@ -2213,7 +2216,7 @@ async function callClaude(modelId: string, systemBlocks: unknown[], messages: un
       'anthropic-version':'2023-06-01',
       'anthropic-beta':'prompt-caching-2024-07-31'
     },
-    body: JSON.stringify({ model:modelId, max_tokens:1500, system:systemBlocks, tools:toolsWithCache, messages })
+    body: JSON.stringify(bodyObj)
   })
   return res.json()
 }
@@ -2518,10 +2521,12 @@ async function handleTool(name: string, input: Record<string,unknown>): Promise<
 async function runToolLoop(modelId: string, systemBlocks: unknown[], initialMessages: unknown[]): Promise<{ text:string; actionsRun:string[] }> {
   const messages = [...initialMessages]
   const actionsRun: string[] = []
-  for (let round = 0; round < 5; round++) {
+  let anyToolCalled = false
+  for (let round = 0; round < 6; round++) {
     const data = await callClaude(modelId, systemBlocks, messages)
     const content: ContentBlock[] = data.content ?? []
     if (data.stop_reason === 'tool_use') {
+      anyToolCalled = true
       const toolResults: unknown[] = []
       for (const block of content) {
         if (block.type === 'tool_use' && block.name) {
@@ -2543,10 +2548,25 @@ async function runToolLoop(modelId: string, systemBlocks: unknown[], initialMess
       // следующий раунд — модель даст финальный текст или вызовет ещё инструменты
     } else {
       const text = content.filter(b => b.type === 'text').map(b => b.text).join('\n').trim()
-      return { text: text || '✅ Готово', actionsRun }
+      if (text) return { text, actionsRun }
+      // Модель завершила ход БЕЗ текста. Если инструменты не вызывались — это чистое действие.
+      if (!anyToolCalled) return { text: '✅ Готово', actionsRun }
+      // Иначе данные собраны, но ответ не сформулирован → выходим в финализацию ниже.
+      break
     }
   }
-  return { text: '⚠️ Слишком много шагов, останавливаюсь. Проверь результат на сайте.', actionsRun }
+  // ФИНАЛИЗАЦИЯ: модель собрала данные через инструменты, но не дала текст
+  // (частая слабость Haiku) ИЛИ исчерпала раунды. Добивающий запрос БЕЗ tools —
+  // модель не может звать инструменты, поэтому ОБЯЗАНА сформулировать текст из контекста.
+  try {
+    const finalData = await callClaude(modelId, systemBlocks, messages, true)
+    const finalText = ((finalData.content ?? []) as ContentBlock[])
+      .filter(b => b.type === 'text').map(b => b.text).join('\n').trim()
+    if (finalText) return { text: finalText, actionsRun }
+  } catch (e) {
+    console.error('[finalize]', e)
+  }
+  return { text: actionsRun.length ? '✅ Готово' : '⚠️ Не смог сформулировать ответ. Попробуй переформулировать вопрос.', actionsRun }
 }
 
 async function processWithModel(text: string, chatId: number, model: 'haiku'|'sonnet'): Promise<string> {
