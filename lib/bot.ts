@@ -2255,6 +2255,9 @@ async function callClaude(modelId: string, systemBlocks: unknown[], messages: un
 
 // ── ДЕТЕРМИНИРОВАННАЯ СВОДКА КРЕДИТОВ ──
 async function getLoansSummaryJson(): Promise<string> {
+  return cached('loans_summary', _getLoansRaw)
+}
+async function _getLoansRaw(): Promise<string> {
   const s = db()
   const { data: loans } = await s.from('loans').select('name,principal,rate,min_payment,end_date,paid_month').eq('user_id', USER_ID).order('rate', { ascending: false })
   const mk2 = mk()
@@ -2280,6 +2283,9 @@ async function getLoansSummaryJson(): Promise<string> {
 }
 
 async function getFinancialSummaryJson(): Promise<string> {
+  return cached('fin_summary', _getFinancialSummaryRaw)
+}
+async function _getFinancialSummaryRaw(): Promise<string> {
   // ЕДИНЫЙ ИСТОЧНИК: всё из ядра computeFinancialState(). Здесь НЕТ своей математики.
   const st = await computeFinancialState()
   const s = db()
