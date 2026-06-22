@@ -1,4 +1,4 @@
-import { processMessage } from '@/lib/bot'
+import { processMessage, _lastUsage } from '@/lib/bot'
 
 export const dynamic = 'force-dynamic'
 
@@ -13,5 +13,5 @@ export async function POST(req: Request) {
   }
   const CHAT_ID = Number(process.env.ALLOWED_TELEGRAM_CHAT_ID)
   const response = await processMessage(message, CHAT_ID)
-  return Response.json({ response, ok: true })
+  return Response.json({ response, ok: true, usage: _lastUsage })
 }
