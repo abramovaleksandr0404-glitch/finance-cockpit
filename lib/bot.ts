@@ -199,6 +199,9 @@ async function accrueLoansCore(s: SupabaseClient): Promise<void> {
 }
 
 export async function computeFinancialState(): Promise<FinancialState> {
+  return cached('core_state', _computeFinancialStateRaw)
+}
+async function _computeFinancialStateRaw(): Promise<FinancialState> {
   const s = db(); const monthKey = mk(); const now = new Date()
   await accrueLoansCore(s)  // начисляем проценты ДО чтения данных кредитов
   const [
@@ -1329,38 +1332,6 @@ export interface BotAction {
   clients?: Record<string, number>  // for update_revenue: {grade: count}
 }
 
-// ── НАДЁЖНЫЙ ПАРСЕР ACTION ─────────────────────────────────────────────────
-function extractActions(text: string): { actions: BotAction[], cleanText: string } {
-  const actions: BotAction[] = []
-  let cleanText = text
-  // Ищем все ACTION:{...} где угодно в тексте
-  const regex = /ACTION\s*:\s*(\{[^\n]*?\})/g
-  const matches = Array.from(text.matchAll(regex))
-  
-  for (const m of matches) {
-    try {
-      // Чиним частые ошибки: addexpense → add_expense, removefixedcost → remove_fixed_cost
-      const fixed = m[1]
-        .replace(/"addexpense"/g,'"add_expense"').replace(/"deleteexpense"/g,'"delete_expense"')
-        .replace(/"addclient"/g,'"add_client"').replace(/"addgoal"/g,'"add_goal"')
-        .replace(/"markgoalbought"/g,'"mark_goal_bought"').replace(/"marksalary"/g,'"mark_salary"')
-        .replace(/"marksinglefixed"/g,'"mark_single_fixed"').replace(/"markfixedpaid"/g,'"mark_fixed_paid"')
-        .replace(/"markloanpaid"/g,'"mark_loan_paid"').replace(/"earlyrepay"/g,'"early_repay"')
-        .replace(/"addincomeevent"/g,'"add_income_event"').replace(/"setbalance"/g,'"set_balance"')
-        .replace(/"closemonth"/g,'"close_month"').replace(/"updatesettings"/g,'"update_settings"')
-        .replace(/"addfixedcost"/g,'"add_fixed_cost"').replace(/"removefixedcost"/g,'"remove_fixed_cost"')
-        .replace(/"editfixedcost"/g,'"edit_fixed_cost"')
-      actions.push(JSON.parse(fixed))
-      cleanText = cleanText.replace(m[0], '')
-    } catch (e) {
-      console.error('[Action parse]', m[1], e)
-      cleanText = cleanText.replace(m[0], '') // убрать всё равно, чтобы пользователь не видел мусор
-    }
-  }
-  return { actions, cleanText: cleanText.replace(/\n{3,}/g, '\n\n').trim() }
-}
-
-// ── Запись истории изменений дебетового баланса ────────────────────────────
 async function recordDebitChange(
   s: SupabaseClient,
   prevBalance: number,
@@ -2521,7 +2492,7 @@ async function handleTool(name: string, input: Record<string,unknown>): Promise<
   // DB-writing tools
   await executeAction({ type: name, ...input } as BotAction)
   // Инвалидируем кеш после любой записи в БД — следующий getContext прочитает свежие данные
-  invalidateCache('context', 'fin_summary', 'loans_summary')
+  invalidateCache('core_state', 'context', 'fin_summary', 'loans_summary')
   // Sprint 27: read-after-write — после записи перечитываем ФАКТ из БД.
   // Бот обязан цитировать эти цифры, а не свою арифметику.
   try {
