@@ -2224,10 +2224,22 @@ async function callClaude(modelId: string, systemBlocks: unknown[], messages: un
 // Удаляет непарные суррогаты (битые эмодзи) из готового JSON — иначе Anthropic
 // отклоняет весь запрос с "invalid high surrogate". Страховка на любой источник.
 function stripLoneSurrogates(s: string): string {
-  // toWellFormed() (ES2024, Node 20+) заменяет непарные суррогаты на U+FFFD.
-  // Надёжнее regex — ловит битые эмодзи из ЛЮБОГО источника перед отправкой в API.
-  const anyS = s as unknown as { toWellFormed?: () => string }
-  return typeof anyS.toWellFormed === 'function' ? anyS.toWellFormed() : s
+  // Посимвольно убираем непарные суррогаты (битые эмодзи). Работает на ЛЮБОМ Node
+  // (toWellFormed есть только в Node 20+; regex с суррогатами хрупок к экранированию).
+  let out = ''
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i)
+    if (c >= 0xD800 && c <= 0xDBFF) {
+      const n = s.charCodeAt(i + 1)
+      if (n >= 0xDC00 && n <= 0xDFFF) { out += s[i] + s[i + 1]; i++ }
+      // иначе: непарный high surrogate — выбрасываем
+    } else if (c >= 0xDC00 && c <= 0xDFFF) {
+      // непарный low surrogate — выбрасываем
+    } else {
+      out += s[i]
+    }
+  }
+  return out
 }
 
 // Обработка одного инструмента — возвращает строку-результат для tool_result
@@ -2695,7 +2707,7 @@ export async function generateMorningBriefing(isWeekly = false): Promise<string>
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method:'POST',
     headers:{'Content-Type':'application/json','x-api-key':process.env.ANTHROPIC_API_KEY!,'anthropic-version':'2023-06-01'},
-    body:JSON.stringify({
+    body:stripLoneSurrogates(JSON.stringify({
       model: isWeekly ? 'claude-sonnet-4-6' : 'claude-haiku-4-5-20251001',
       max_tokens:800,
       system:[
@@ -2703,7 +2715,7 @@ export async function generateMorningBriefing(isWeekly = false): Promise<string>
         {type:'text',text:'\n\nКОНТЕКСТ:\n'+context}
       ],
       messages:[{role:'user',content:prompt}]
-    })
+    }))
   })
   const data = await res.json()
   return data.content?.[0]?.text ?? '🌅 Доброе утро!'
