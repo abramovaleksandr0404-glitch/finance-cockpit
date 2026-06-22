@@ -2524,10 +2524,17 @@ async function runToolLoop(modelId: string, systemBlocks: unknown[], initialMess
   let anyToolCalled = false
   for (let round = 0; round < 6; round++) {
     const data = await callClaude(modelId, systemBlocks, messages)
-    // ДИАГНОСТИКА: если Anthropic вернул ошибку — показываем её, не маскируем в "Готово"
+    // Честная обработка ошибок API — НЕ маскируем в "Готово" (иначе невозможно понять что сломалось)
     if (data.error || !data.content) {
       console.error('[anthropic error]', JSON.stringify(data).slice(0, 500))
-      return { text: '⚠️ API_ERROR: ' + (data.error?.message || data.error?.type || JSON.stringify(data).slice(0,200)), actionsRun }
+      const errMsg = String(data.error?.message || '')
+      if (/credit balance|too low|billing|insufficient/i.test(errMsg))
+        return { text: '⚠️ Закончились кредиты Anthropic API. Пополни баланс: console.anthropic.com → Plans & Billing.', actionsRun }
+      if (/rate.?limit|overloaded|too many|429|529/i.test(errMsg))
+        return { text: '⏳ API перегружен или лимит запросов. Попробуй через минуту.', actionsRun }
+      if (/authentication|api.?key|401/i.test(errMsg))
+        return { text: '🔑 Проблема с ключом API. Проверь ANTHROPIC_API_KEY в Vercel.', actionsRun }
+      return { text: '⚠️ Ошибка API: ' + (errMsg || 'неизвестная ошибка').slice(0, 150), actionsRun }
     }
     const content: ContentBlock[] = data.content ?? []
     if (data.stop_reason === 'tool_use') {
