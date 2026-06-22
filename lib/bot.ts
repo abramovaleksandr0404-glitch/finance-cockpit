@@ -58,7 +58,7 @@ export async function getHistory(chatId: number) {
     if (h.role === 'assistant' && h.content.length > 120) {
       // Берём суть без markdown: убираем **, *, #, |, эмодзи-заголовки
       const stripped = h.content.replace(/[*#|_~`]/g,'').replace(/[📊💰🏦📅📤📥🎯⚠️✅]/g,'').trim()
-      const summary = stripped.slice(0, 80).replace(/\n+/g,' ').trim()
+      const summary = Array.from(stripped).slice(0, 80).join('').replace(/\n+/g,' ').trim()
       return { role: h.role, content: `[Ответил: ${summary}…]` }
     }
     return h
@@ -2216,9 +2216,17 @@ async function callClaude(modelId: string, systemBlocks: unknown[], messages: un
       'anthropic-version':'2023-06-01',
       'anthropic-beta':'prompt-caching-2024-07-31'
     },
-    body: JSON.stringify(bodyObj)
+    body: stripLoneSurrogates(JSON.stringify(bodyObj))
   })
   return res.json()
+}
+
+// Удаляет непарные суррогаты (битые эмодзи) из готового JSON — иначе Anthropic
+// отклоняет весь запрос с "invalid high surrogate". Страховка на любой источник.
+function stripLoneSurrogates(s: string): string {
+  return s
+    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g, '')  // high без low
+    .replace(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '')  // low без high
 }
 
 // Обработка одного инструмента — возвращает строку-результат для tool_result
