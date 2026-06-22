@@ -2578,6 +2578,7 @@ async function processWithModel(text: string, chatId: number, model: 'haiku'|'so
   // Принудительный финансовый контекст: данные из БД ВСЕГДА при финансовых вопросах
   const isFinancial = /дебет|бюджет|бонус|баланс|трат|потрач|осталось|доход|аванс|зп|зарплат|кредит|карт|финанс|остат|переменн|лимит|деньг|прогноз|сколько|ликвидност|сальдо|позиц/i.test(text)
   const isLoans = /кредит|долг|погаш|рефинанс|досрочн|переплат|займ|ставк/i.test(text)
+  // Батч: все данные параллельно — один круговой запрос вместо трёх последовательных
   const [context, history, analysis, forcedFinData, forcedLoans] = await Promise.all([
     getContext(),
     getHistory(chatId),
