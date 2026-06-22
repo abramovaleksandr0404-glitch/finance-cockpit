@@ -2224,9 +2224,10 @@ async function callClaude(modelId: string, systemBlocks: unknown[], messages: un
 // Удаляет непарные суррогаты (битые эмодзи) из готового JSON — иначе Anthropic
 // отклоняет весь запрос с "invalid high surrogate". Страховка на любой источник.
 function stripLoneSurrogates(s: string): string {
-  return s
-    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g, '')  // high без low
-    .replace(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '')  // low без high
+  // toWellFormed() (ES2024, Node 20+) заменяет непарные суррогаты на U+FFFD.
+  // Надёжнее regex — ловит битые эмодзи из ЛЮБОГО источника перед отправкой в API.
+  const anyS = s as unknown as { toWellFormed?: () => string }
+  return typeof anyS.toWellFormed === 'function' ? anyS.toWellFormed() : s
 }
 
 // Обработка одного инструмента — возвращает строку-результат для tool_result
