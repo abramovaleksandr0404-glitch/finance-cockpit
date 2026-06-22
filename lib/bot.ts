@@ -2216,7 +2216,7 @@ async function callClaude(modelId: string, systemBlocks: unknown[], messages: un
       'anthropic-version':'2023-06-01',
       'anthropic-beta':'prompt-caching-2024-07-31'
     },
-    body: stripLoneSurrogates(JSON.stringify(bodyObj))
+    body: JSON.stringify(deepCleanSurrogates(bodyObj))
   })
   return res.json()
 }
@@ -2240,6 +2240,22 @@ function stripLoneSurrogates(s: string): string {
     }
   }
   return out
+}
+
+// Рекурсивно чистит непарные суррогаты во ВСЕХ строках ДО JSON.stringify.
+// Важно: stringify экранирует суррогаты в \udXXX-текст, поэтому чистить ПОСЛЕ бесполезно —
+// Anthropic парсит \udXXX обратно в суррогат и отвергает запрос.
+function deepCleanSurrogates(obj: unknown): unknown {
+  if (typeof obj === 'string') return stripLoneSurrogates(obj)
+  if (Array.isArray(obj)) return obj.map(deepCleanSurrogates)
+  if (obj && typeof obj === 'object') {
+    const out: Record<string, unknown> = {}
+    for (const k of Object.keys(obj as Record<string, unknown>)) {
+      out[k] = deepCleanSurrogates((obj as Record<string, unknown>)[k])
+    }
+    return out
+  }
+  return obj
 }
 
 // Обработка одного инструмента — возвращает строку-результат для tool_result
@@ -2707,7 +2723,7 @@ export async function generateMorningBriefing(isWeekly = false): Promise<string>
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method:'POST',
     headers:{'Content-Type':'application/json','x-api-key':process.env.ANTHROPIC_API_KEY!,'anthropic-version':'2023-06-01'},
-    body:stripLoneSurrogates(JSON.stringify({
+    body:JSON.stringify(deepCleanSurrogates({
       model: isWeekly ? 'claude-sonnet-4-6' : 'claude-haiku-4-5-20251001',
       max_tokens:800,
       system:[
