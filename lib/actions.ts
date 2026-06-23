@@ -9,7 +9,13 @@ import { computeWorkingDays, computeVacationAdjustment } from './calc'
 export let _lastUserMessage = ''
 export function setLastUserMessage(msg: string) { _lastUserMessage = msg }
 
+// DRY_RUN: когда true, executeAction анализирует но НЕ пишет в БД (для тестов)
+export let _dryRun = false
+export function setDryRun(v: boolean) { _dryRun = v }
+
 export async function executeAction(action: BotAction): Promise<void> {
+  // DRY_RUN: тестовый режим — не выполняем запись в БД
+  if (_dryRun) { console.log('[dry_run] skip executeAction:', action.type); return }
   const s = db()
   const monthKey = mk()
 
