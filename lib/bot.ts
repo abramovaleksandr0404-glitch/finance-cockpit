@@ -15,8 +15,8 @@ import {
 export { USER_ID, db, mk, rub, getHistory, saveHistory, logMessage, storeChatId } from './shared'
 
 // ── Action executor ───────────────────────────────────────────────────────────
-import { executeAction, setLastUserMessage } from './actions'
-export { executeAction } from './actions'
+import { executeAction, setLastUserMessage, setDryRun } from './actions'
+export { executeAction, setDryRun } from './actions'
 
 let _lastUserMessage = ''  // синхронизируется через setLastUserMessage
 async function accrueLoansCore(s: SupabaseClient): Promise<void> {
