@@ -1721,6 +1721,16 @@ async function handleTool(name: string, input: Record<string,unknown>): Promise<
     const advReceived = !!month?.salary_adv_received
     return JSON.stringify({ daysLeft, advDay: targetAdvDay, targetMonth, advReceived, advAmt })
   }
+  if (name === 'delete_memory') {
+    const fragment = String(input.content_fragment ?? '').slice(0, 100)
+    if (fragment) {
+      await db().from('bot_memories')
+        .delete()
+        .eq('user_id', USER_ID)
+        .ilike('content', `%${fragment}%`)
+    }
+    return JSON.stringify({ deleted: true, fragment })
+  }
   if (name === 'list_memories') {
     const { data } = await db().from('bot_memories')
       .select('content,category,importance,created_at')
