@@ -622,12 +622,19 @@ export async function executeAction(action: BotAction): Promise<void> {
     }, { onConflict: 'user_id,month_key,key' })
 
   } else if (action.type === 'save_memory' && action.content) {
-    await s.from('bot_memories').insert({
-      user_id: USER_ID,
-      content: sanitizeStr(action.content, 1000),
-      category: action.category ?? 'general',
-      importance: Math.min(5, Math.max(1, Math.round(Number(action.importance ?? 3)))),
-    })
+    // Проверяем дубликаты — не сохраняем то что уже знаем
+    const cleanContent = sanitizeStr(action.content, 1000)
+    const { data: existing } = await s.from('bot_memories')
+      .select('id').eq('user_id', USER_ID).ilike('content', `%${cleanContent.slice(0,50)}%`).limit(1)
+    if (!existing?.length) {
+      await s.from('bot_memories').insert({
+        user_id: USER_ID,
+        content: cleanContent,
+        category: action.category ?? 'general',
+        importance: Math.min(5, Math.max(1, Math.round(Number(action.importance ?? 3)))),
+        last_accessed: new Date().toISOString(),
+      })
+    }
   }
 }
 
