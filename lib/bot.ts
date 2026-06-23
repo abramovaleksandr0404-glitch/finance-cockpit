@@ -1713,15 +1713,39 @@ async function handleTool(name: string, input: Record<string,unknown>): Promise<
     const advReceived = !!month?.salary_adv_received
     return JSON.stringify({ daysLeft, advDay: targetAdvDay, targetMonth, advReceived, advAmt })
   }
-  if (name === 'semantic_search') {
-    // Используем простой текстовый поиск пока нет эмбеддингов
+  if (name === 'list_memories') {
     const { data } = await db().from('bot_memories')
-      .select('content,category,importance')
+      .select('content,category,importance,created_at')
       .eq('user_id', USER_ID)
-      .ilike('content', `%${input.query}%`)
       .order('importance', { ascending: false })
-      .limit(3)
-    return JSON.stringify(data ?? [])
+      .order('created_at', { ascending: false })
+      .limit(20)
+    return JSON.stringify({ count: data?.length ?? 0, memories: data ?? [] })
+  }
+  if (name === 'semantic_search') {
+    // Улучшенный поиск: все memories, отфильтрованные по ключевым словам + sort по importance
+    const q = String(input.query ?? '').toLowerCase()
+    const words = q.split(/\s+/).filter(w => w.length > 2)
+    const { data: all } = await db().from('bot_memories')
+      .select('content,category,importance,created_at')
+      .eq('user_id', USER_ID)
+      .order('importance', { ascending: false })
+      .order('created_at', { ascending: false })
+      .limit(30)
+    // Rank: сколько слов запроса содержит запись
+    const ranked = (all ?? [])
+      .map(m => ({ ...m, score: words.filter(w => m.content.toLowerCase().includes(w)).length }))
+      .filter(m => m.score > 0 || words.length === 0)
+      .sort((a,b) => b.score - a.score || b.importance - a.importance)
+      .slice(0, 5)
+    // Обновляем last_accessed для найденных
+    if (ranked.length) {
+      await db().from('bot_memories')
+        .update({ last_accessed: new Date().toISOString() })
+        .eq('user_id', USER_ID)
+        .in('content', ranked.map(m => m.content))
+    }
+    return JSON.stringify(ranked.map(m => ({ content: m.content, category: m.category, importance: m.importance })))
   }
   // DB-writing tools
   await executeAction({ type: name, ...input } as BotAction)
