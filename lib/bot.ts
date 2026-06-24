@@ -2668,6 +2668,34 @@ function routeModel(text: string): 'haiku' | 'sonnet' {
   return 'haiku'
 }
 
+
+// Версия processWithModel для тестов: НЕ сохраняет историю, НЕ загрязняет bot_messages
+export async function processWithModelForTest(text: string, _chatId: number): Promise<string> {
+  if (!process.env.ANTHROPIC_API_KEY) return '⚠️ Добавь ANTHROPIC_API_KEY в Vercel.'
+  const model = routeModel(text)
+  const needAnalysis = /проанализир|анализ трат|паттерн/i.test(text)
+  const isFinancial = /дебет|бюджет|бонус|баланс|трат|потрач|осталось|доход|аванс|зп|зарплат|кредит|карт|финан/i.test(text)
+  const isLoans = /кредит|долг|погаш|рефинанс|займ/i.test(text)
+  const [context, analysis, forcedFinData, forcedLoans] = await Promise.all([
+    getContext(),
+    needAnalysis ? getSpendingAnalysis() : Promise.resolve(''),
+    isFinancial ? getFinancialSummaryJson().catch(() => '') : Promise.resolve(''),
+    isLoans ? getLoansSummaryJson().catch(() => '') : Promise.resolve(''),
+  ])
+  const fullContext = context + (analysis ? '\n\n' + analysis : '')
+  const modelId = model === 'sonnet' ? 'claude-sonnet-4-6' : 'claude-haiku-4-5-20251001'
+  const systemBlocks: unknown[] = [
+    { type:'text', text:SYSTEM_PROMPT, cache_control:{type:'ephemeral'} },
+    { type:'text', text:'\n\nКОНТЕКСТ:\n'+fullContext },
+  ]
+  if (forcedLoans) systemBlocks.push({ type:'text', text:'\n\n╔══ КРЕДИТЫ ИЗ БД ══╗\n'+forcedLoans })
+  if (forcedFinData) systemBlocks.push({ type:'text', text:'\n\n╔══ ДАННЫЕ ИЗ БД ══╗\n'+forcedFinData })
+  const messages = [{ role:'user' as const, content:text }]  // БЕЗ истории
+  const { text: reply } = await runToolLoop(modelId, systemBlocks, messages)
+  // НЕ сохраняем историю — тест изолирован
+  return reply
+}
+
 export async function processMessage(text: string, chatId: number): Promise<string> {
   if (!process.env.ANTHROPIC_API_KEY) return '⚠️ Добавь ANTHROPIC_API_KEY в Vercel.'
   return processWithModel(text, chatId, routeModel(text))
