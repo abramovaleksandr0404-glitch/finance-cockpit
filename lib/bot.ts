@@ -697,10 +697,10 @@ async function _getContextRaw(): Promise<string> {
   const { data: memories } = await supabase.from('bot_memories')
     .select('content,category')
     .eq('user_id', USER_ID)
-    .gte('importance', 4)
+    .gte('importance', 3)
     .order('importance', { ascending: false })
-    .order('last_accessed', { ascending: false })
-    .limit(5)
+    .order('created_at', { ascending: false })
+    .limit(8)
   if (memories?.length) {
     memoriesSection = '\n📚 КЛЮЧЕВЫЕ ПАТТЕРНЫ И ФАКТЫ:\n'
       + memories.map(m => `  • ${m.content}`).join('\n') + '\n'
@@ -896,6 +896,14 @@ export const SYSTEM_PROMPT = `╔═══════════════�
 ⚡ ЕДИНСТВЕННЫЙ ИСТОЧНИК ЦИФР — инструмент get_financial_summary.
 При любом финансовом вопросе: ПЕРВЫМ вызови get_financial_summary, ПОТОМ отвечай.
 НЕ называй финансовые цифры без вызова get_financial_summary.
+
+🧠 ДОЛГОСРОЧНАЯ ПАМЯТЬ:
+• СОХРАНЯЙ через save_memory (importance=4-5): паттерны трат, изменения дохода, цели, жизненные события.
+• НЕ СОХРАНЯЙ: разовые покупки, меняющиеся числа (дебет/долги), вопросы без долгосрочной ценности.
+• «что ты обо мне знаешь/помнишь» → list_memories.
+• «забудь это» → delete_memory.
+• Вопросы о паттернах или прошлых договорённостях → semantic_search.
+
 
 ⚡ ПРАВИЛА ФОРМАТИРОВАНИЯ ОТВЕТА:
 • ПРОГНОЗ = forecast_end из JSON — брать ДОСЛОВНО, НЕ пересчитывать
@@ -1956,12 +1964,16 @@ export async function executeAction(action: BotAction): Promise<void> {
     }, { onConflict: 'user_id,month_key,key' })
 
   } else if (action.type === 'save_memory' && action.content) {
-    await s.from('bot_memories').insert({
-      user_id: USER_ID,
-      content: sanitizeStr(action.content, 1000),
-      category: action.category ?? 'general',
-      importance: Math.min(5, Math.max(1, Math.round(Number(action.importance ?? 3)))),
-    })
+    const clean = sanitizeStr(action.content, 1000)
+    const { data: ex } = await s.from('bot_memories')
+      .select('id').eq('user_id', USER_ID).ilike('content', `%${clean.slice(0,40)}%`).limit(1)
+    if (!ex?.length) {
+      await s.from('bot_memories').insert({
+        user_id: USER_ID, content: clean,
+        category: action.category ?? 'general',
+        importance: Math.min(5, Math.max(1, Math.round(Number(action.importance ?? 3)))),
+      })
+    }
   }
 }
 
@@ -2506,8 +2518,22 @@ async function handleTool(name: string, input: Record<string,unknown>): Promise<
     const advReceived = !!month?.salary_adv_received
     return JSON.stringify({ daysLeft, advDay: targetAdvDay, targetMonth, advReceived, advAmt })
   }
+  if (name === 'list_memories') {
+    const { data } = await db().from('bot_memories')
+      .select('content,category,importance,created_at')
+      .eq('user_id', USER_ID)
+      .order('importance', { ascending: false })
+      .order('created_at', { ascending: false })
+      .limit(20)
+    return JSON.stringify({ count: data?.length ?? 0, memories: data ?? [] })
+  }
+  if (name === 'delete_memory') {
+    const fragment = String(input.content_fragment ?? '').slice(0, 100)
+    if (fragment) await db().from('bot_memories').delete().eq('user_id', USER_ID).ilike('content', `%${fragment}%`)
+    return JSON.stringify({ deleted: true })
+  }
   if (name === 'semantic_search') {
-    // Используем простой текстовый поиск пока нет эмбеддингов
+    // Ranked поиск: все memories → фильтр по словам → сортировка
     const { data } = await db().from('bot_memories')
       .select('content,category,importance')
       .eq('user_id', USER_ID)
