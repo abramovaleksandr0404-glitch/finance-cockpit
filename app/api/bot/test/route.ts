@@ -1,4 +1,4 @@
-import { processMessage, _lastUsage } from '@/lib/bot'
+import { processWithModelForTest } from '@/lib/bot'
 
 export const dynamic = 'force-dynamic'
 
@@ -12,7 +12,8 @@ export async function POST(req: Request) {
   if (!message || typeof message !== 'string') {
     return Response.json({ error: 'message required' }, { status: 400 })
   }
-  const CHAT_ID = Number(process.env.ALLOWED_TELEGRAM_CHAT_ID)
-  const response = await processMessage(message, CHAT_ID)
-  return Response.json({ response, ok: true, usage: _lastUsage })
+  // TEST_CHAT_ID: фейковый id — тестовые сообщения НЕ попадают в историю реального пользователя
+  const TEST_CHAT_ID = -999999
+  const response = await processWithModelForTest(message, TEST_CHAT_ID)
+  return Response.json({ response, ok: true })
 }
