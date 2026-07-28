@@ -195,6 +195,14 @@ export async function GET(req: Request) {
 
     const isWeekly = new Date().getDay() === 0
     const briefing = await generateMorningBriefing(isWeekly)
+    // briefing === null → LLM недоступен. НЕ шлём пустое «Доброе утро» без цифр.
+    // Вместо этого — один короткий честный алерт (статический текст, 0 токенов).
+    if (!briefing) {
+      await sendTelegram(user.telegram_chat_id,
+        '⚠️ Утренний дайджест не собран — Anthropic API недоступен (обычно: закончились кредиты).\n' +
+        'Данные в БД в порядке. Проверь console.anthropic.com → Plans & Billing.')
+      return NextResponse.json({ ok: false, reason: 'llm_unavailable' })
+    }
     await sendTelegram(user.telegram_chat_id, briefing)
     return NextResponse.json({ ok: true, isWeekly })
   } catch (err) {

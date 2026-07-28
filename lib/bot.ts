@@ -1964,7 +1964,8 @@ export async function executeAction(action: BotAction): Promise<void> {
     }, { onConflict: 'user_id,month_key,key' })
 
   } else if (action.type === 'save_memory' && action.content) {
-    const clean = sanitizeStr(action.content, 1000)
+    const clean = sanitizeStr(action.content, 1000) ?? ''
+    if (!clean) return
     const { data: ex } = await s.from('bot_memories')
       .select('id').eq('user_id', USER_ID).ilike('content', `%${clean.slice(0,40)}%`).limit(1)
     if (!ex?.length) {
@@ -2753,8 +2754,10 @@ export async function processImage(fileId: string, chatId: number, caption?: str
   } catch(err) { console.error('[vision]',err); return '❌ Ошибка чтения.' }
 }
 
-export async function generateMorningBriefing(isWeekly = false): Promise<string> {
-  if (!process.env.ANTHROPIC_API_KEY) return '🌅 Доброе утро, Александр!'
+// Возвращает null если дайджест собрать не удалось (нет ключа / нет кредитов / ошибка API).
+// null = НЕ отправлять ничего. Пустое «Доброе утро!» без данных — мусор в Telegram.
+export async function generateMorningBriefing(isWeekly = false): Promise<string | null> {
+  if (!process.env.ANTHROPIC_API_KEY) return null
   const context = await getContext()
   const today = new Date()
   const dateFmt = today.toLocaleDateString('ru-RU',{weekday:'long',day:'numeric',month:'long'})
@@ -2775,7 +2778,12 @@ export async function generateMorningBriefing(isWeekly = false): Promise<string>
     }))
   })
   const data = await res.json()
-  return data.content?.[0]?.text ?? '🌅 Доброе утро!'
+  if (data.error) {
+    console.error('[morning] Anthropic API error:', data.error?.type, data.error?.message)
+    return null
+  }
+  const text = data.content?.[0]?.text
+  return (typeof text === 'string' && text.trim().length > 0) ? text : null
 }
 
 export async function transcribeVoice(fileId: string): Promise<string|null> {
