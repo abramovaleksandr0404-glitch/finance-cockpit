@@ -897,12 +897,19 @@ export const SYSTEM_PROMPT = `╔═══════════════�
 При любом финансовом вопросе: ПЕРВЫМ вызови get_financial_summary, ПОТОМ отвечай.
 НЕ называй финансовые цифры без вызова get_financial_summary.
 
-🧠 ДОЛГОСРОЧНАЯ ПАМЯТЬ:
-• СОХРАНЯЙ через save_memory (importance=4-5): паттерны трат, изменения дохода, цели, жизненные события.
-• НЕ СОХРАНЯЙ: разовые покупки, меняющиеся числа (дебет/долги), вопросы без долгосрочной ценности.
-• «что ты обо мне знаешь/помнишь» → list_memories.
-• «забудь это» → delete_memory.
-• Вопросы о паттернах или прошлых договорённостях → semantic_search.
+🧠 ДОЛГОСРОЧНАЯ ПАМЯТЬ — СНАЧАЛА ОПРЕДЕЛИ ТИП СООБЩЕНИЯ:
+
+❓ ЭТО ВОПРОС (есть «?», или начинается с какие/что/когда/сколько/помнишь/напомни/расскажи):
+   ⛔ ЗАПРЕЩЕНО save_memory и update_anchor. Тебя СПРОСИЛИ — ты ничего нового не узнал.
+   • «что ты обо мне знаешь/помнишь» → list_memories
+   • «какие были договорённости / что мы решали / мои паттерны» → semantic_search
+   • Отвечай тем, что нашёл. Не нашёл — скажи «не нахожу в памяти», НЕ выдумывай и НЕ пиши «запомнил».
+
+📌 ЭТО УТВЕРЖДЕНИЕ (пользователь сообщает новый факт о себе):
+   • save_memory (importance 4-5): паттерны трат, изменения дохода, цели, жизненные события.
+   • НЕ сохраняй: разовые покупки, меняющиеся числа (дебет/долги), и НИКОГДА — сам вопрос пользователя.
+
+🗑 «забудь это / неактуально» → delete_memory.
 
 
 ⚡ ПРАВИЛА ФОРМАТИРОВАНИЯ ОТВЕТА:
@@ -957,7 +964,8 @@ export const SYSTEM_PROMPT = `╔═══════════════�
 • Это правило без исключений, независимо от суммы.
 
 ✅ АВТОСОХРАНЕНИЕ КОНТЕКСТА:
-Когда пользователь сообщает ЛЮБОЙ ключевой факт — дату события, сумму, имя человека, назначение платежа — НЕМЕДЛЕННО сохрани через update_anchor. Не жди команды «запомни». Примеры:
+Когда пользователь СООБЩАЕТ (не спрашивает!) ЛЮБОЙ ключевой факт — дату события, сумму, имя человека, назначение платежа — НЕМЕДЛЕННО сохрани через update_anchor. Не жди команды «запомни».
+⛔ Если сообщение — ВОПРОС, это правило НЕ действует: ничего не сохраняй, только читай и отвечай. Примеры:
 • «поездка 28-30 июля» → update_anchor с ключом события
 • «Кириллу отдать 24 500₽ в день аванса» → update_anchor
 • «деньги от Алены на зуб» → update_anchor loan_from_alyona
@@ -2563,14 +2571,33 @@ async function handleTool(name: string, input: Record<string,unknown>): Promise<
     return JSON.stringify({ deleted: true })
   }
   if (name === 'semantic_search') {
-    // Ranked поиск: все memories → фильтр по словам → сортировка
-    const { data } = await db().from('bot_memories')
+    // Ranked поиск по основам слов. ilike по всей фразе не работал никогда:
+    // «какие были договорённости по брокеру» целиком в тексте записи не встречается.
+    // Основа 4 буквы решает русскую морфологию («займом»→«займ»), ё→е — разнописание.
+    const norm = (t: string) => t.toLowerCase().replace(/ё/g, 'е')
+    const STOP = new Set(['что','как','где','когда','какие','какой','какая','мои','моя','мне','меня',
+      'был','было','были','там','это','для','про','его','она','они','тебе','ты','вот','или','нет'])
+    const stems = norm(String(input.query ?? ''))
+      .split(/[^a-zа-я0-9]+/)
+      .filter(w => w.length > 2 && !STOP.has(w))
+      .map(w => w.length > 4 ? w.slice(0, 4) : w)
+    const { data: all } = await db().from('bot_memories')
       .select('content,category,importance')
       .eq('user_id', USER_ID)
-      .ilike('content', `%${input.query}%`)
       .order('importance', { ascending: false })
-      .limit(3)
-    return JSON.stringify(data ?? [])
+      .limit(50)
+    const ranked = (all ?? [])
+      .map(m => {
+        const c = norm(String(m.content))
+        return { ...m, score: stems.filter(st => c.includes(st)).length }
+      })
+      .filter(m => m.score > 0)
+      .sort((a, b) => b.score - a.score || b.importance - a.importance)
+      .slice(0, 5)
+    return JSON.stringify({
+      found: ranked.length,
+      memories: ranked.map(m => ({ content: m.content, category: m.category, importance: m.importance })),
+    })
   }
   // DB-writing tools
   await executeAction({ type: name, ...input } as BotAction)
