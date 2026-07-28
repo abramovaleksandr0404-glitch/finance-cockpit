@@ -2180,6 +2180,14 @@ export const TOOLS = [
   { name: 'semantic_search',
     description: 'Поиск похожих фактов и паттернов из памяти. Вызывай когда пользователь спрашивает что-то похожее на прошлые ошибки или паттерны.',
     input_schema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } },
+  { name: 'list_memories',
+    description: 'Показать все сохранённые факты из долгосрочной памяти. Вызывай когда пользователь спрашивает "что ты обо мне знаешь", "что помнишь".',
+    input_schema: { type: 'object', properties: {} } },
+  { name: 'delete_memory',
+    description: 'Удалить факт из долгосрочной памяти. Вызывай когда пользователь говорит "забудь", "это неактуально".',
+    input_schema: { type: 'object', properties: {
+      content_fragment: { type: 'string', description: 'Фрагмент текста записи для поиска и удаления' },
+    }, required: ['content_fragment'] } },
   { name: 'save_memory',
     description: 'Сохранить важный факт или паттерн в долгосрочную память. Вызывай когда пользователь говорит "запомни", "это важно", или когда выявлен устойчивый паттерн.',
     input_schema: { type: 'object', properties: {
@@ -2196,6 +2204,21 @@ interface ContentBlock { type:string; text?:string; id?:string; name?:string; in
 
 // Один раунд вызова Claude с инструментами
 export let _lastUsage: Record<string, number> = {}
+
+// Накопитель за ВЕСЬ запрос (все раунды tool-loop), а не за последний раунд.
+// Без этого стоимость запроса недооценивается в 3-5 раз.
+export let _reqUsage: Record<string, number> = {}
+export function resetReqUsage() { _reqUsage = {} }
+
+// Ставит cache_control на последний system-блок.
+// Эффект: внутри одного tool-loop раунды 2..6 читают ВЕСЬ префикс
+// (промпт + контекст + forced-данные) из кэша по ~10% цены вместо 100%.
+function withPrefixCache(blocks: unknown[]): unknown[] {
+  if (blocks.length === 0) return blocks
+  const last = blocks[blocks.length - 1] as Record<string, unknown>
+  blocks[blocks.length - 1] = { ...last, cache_control: { type: 'ephemeral' } }
+  return blocks
+}
 
 async function callClaude(modelId: string, systemBlocks: unknown[], messages: unknown[], noTools = false) {
   // Prompt Caching: кешируем TOOLS (самый большой статичный блок)
@@ -2217,7 +2240,13 @@ async function callClaude(modelId: string, systemBlocks: unknown[], messages: un
     body: JSON.stringify(deepCleanSurrogates(bodyObj))
   })
   const j = await res.json()
-  if (j.usage) _lastUsage = j.usage
+  if (j.usage) {
+    _lastUsage = j.usage
+    for (const [k, v] of Object.entries(j.usage)) {
+      if (typeof v === 'number') _reqUsage[k] = (_reqUsage[k] ?? 0) + v
+    }
+    _reqUsage.rounds = (_reqUsage.rounds ?? 0) + 1
+  }
   return j
 }
 
@@ -2633,6 +2662,7 @@ async function runToolLoop(modelId: string, systemBlocks: unknown[], initialMess
 }
 
 async function processWithModel(text: string, chatId: number, model: 'haiku'|'sonnet'): Promise<string> {
+  resetReqUsage()
   _lastUserMessage = text
   const needAnalysis = /проанализир|анализ трат|паттерн|на что трачу|куда уход|структур.*трат/i.test(text)
   // Принудительный финансовый контекст: данные из БД ВСЕГДА при финансовых вопросах
@@ -2674,7 +2704,7 @@ async function processWithModel(text: string, chatId: number, model: 'haiku'|'so
     ...history.map(h => ({ role:h.role as 'user'|'assistant', content:h.content })),
     { role:'user', content:text }
   ]
-  const { text: reply } = await runToolLoop(modelId, systemBlocks, messages)
+  const { text: reply } = await runToolLoop(modelId, withPrefixCache(systemBlocks), messages)
   Promise.all([
     saveHistory(chatId,'user',text,'text'),
     saveHistory(chatId,'assistant',reply,'text')
@@ -2698,6 +2728,7 @@ function routeModel(text: string): 'haiku' | 'sonnet' {
 
 // Версия processWithModel для тестов: НЕ сохраняет историю, НЕ загрязняет bot_messages
 export async function processWithModelForTest(text: string, _chatId: number): Promise<string> {
+  resetReqUsage()
   if (!process.env.ANTHROPIC_API_KEY) return '⚠️ Добавь ANTHROPIC_API_KEY в Vercel.'
   const model = routeModel(text)
   const needAnalysis = /проанализир|анализ трат|паттерн/i.test(text)
@@ -2718,7 +2749,7 @@ export async function processWithModelForTest(text: string, _chatId: number): Pr
   if (forcedLoans) systemBlocks.push({ type:'text', text:'\n\n╔══ КРЕДИТЫ ИЗ БД ══╗\n'+forcedLoans })
   if (forcedFinData) systemBlocks.push({ type:'text', text:'\n\n╔══ ДАННЫЕ ИЗ БД ══╗\n'+forcedFinData })
   const messages = [{ role:'user' as const, content:text }]  // БЕЗ истории
-  const { text: reply } = await runToolLoop(modelId, systemBlocks, messages)
+  const { text: reply } = await runToolLoop(modelId, withPrefixCache(systemBlocks), messages)
   // НЕ сохраняем историю — тест изолирован
   return reply
 }
@@ -2748,7 +2779,7 @@ export async function processImage(fileId: string, chatId: number, caption?: str
       ...history.map(h=>({role:h.role as 'user'|'assistant',content:h.content})),
       {role:'user',content:[{type:'image',source:{type:'base64',media_type:mime,data:base64}},{type:'text',text:userText}]}
     ]
-    const { text: reply } = await runToolLoop('claude-sonnet-4-6', systemBlocks, messages)
+    const { text: reply } = await runToolLoop('claude-sonnet-4-6', withPrefixCache(systemBlocks), messages)
     Promise.all([saveHistory(chatId,'user',`[фото: ${userText}]`), saveHistory(chatId,'assistant',reply)]).catch(()=>{})
     return reply
   } catch(err) { console.error('[vision]',err); return '❌ Ошибка чтения.' }
