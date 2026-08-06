@@ -1536,18 +1536,30 @@ export async function executeAction(action: BotAction): Promise<void> {
     let exp
     const isUUID = /^[0-9a-f-]{36}$/i.test(String(action.id ?? ''))
     if (!action.id || action.id === 'last') {
-      const { data } = await s.from('expenses').select('id,amount,description').eq('user_id',USER_ID).eq('month_key',monthKey).order('created_at',{ascending:false}).limit(1).maybeSingle()
+      const { data } = await s.from('expenses').select('id,amount,description,source_type').eq('user_id',USER_ID).eq('month_key',monthKey).order('created_at',{ascending:false}).limit(1).maybeSingle()
       exp = data
     } else if (isUUID) {
-      const { data } = await s.from('expenses').select('id,amount,description').eq('user_id',USER_ID).eq('id',action.id).maybeSingle()
+      const { data } = await s.from('expenses').select('id,amount,description,source_type').eq('user_id',USER_ID).eq('id',action.id).maybeSingle()
       exp = data
     } else {
-      const { data } = await s.from('expenses').select('id,amount,description').eq('user_id',USER_ID).eq('month_key',monthKey).ilike('description',`%${action.id}%`).order('created_at',{ascending:false}).limit(1).maybeSingle()
+      const { data } = await s.from('expenses').select('id,amount,description,source_type').eq('user_id',USER_ID).eq('month_key',monthKey).ilike('description',`%${action.id}%`).order('created_at',{ascending:false}).limit(1).maybeSingle()
       exp = data
     }
     if (!exp) return // Запись не найдена — бот сообщит что не нашёл
     if (exp) {
       await s.from('expenses').delete().eq('id',exp.id)
+      // Трата с карты — возвращаем на карту, а не на дебет.
+      // Раньше любое удаление зачисляло деньги на дебет и завышало баланс.
+      if ((exp as { source_type?: string }).source_type === 'card') {
+        const { data: cardRow } = await s.from('cards').select('id,current_debt')
+          .eq('user_id', USER_ID).gt('current_debt', 0)
+          .order('current_debt', { ascending: false }).limit(1).maybeSingle()
+        if (cardRow) {
+          await s.from('cards').update({ current_debt: Math.max(0, Number(cardRow.current_debt) - Number(exp.amount)) }).eq('id', cardRow.id)
+        }
+        invalidateCache('core_state', 'context', 'fin_summary', 'loans_summary')
+        return
+      }
       const { data:u } = await s.from('users').select('debit_balance').eq('id',USER_ID).single()
       const prevBal = Number(u?.debit_balance ?? 0)
       const newBal = Math.round((prevBal + Number(exp.amount)) * 100) / 100
@@ -1727,9 +1739,12 @@ export async function executeAction(action: BotAction): Promise<void> {
       await recordDebitChange(s, prevBal, newBal, `Досрочное: ${loan.name}`, 'loan')
     }
 
-  } else if (action.type === 'pay_card_debt' && action.name && action.amount != null) {
+  } else if (action.type === 'pay_card_debt' && action.amount != null) {
+    // Имя карты приходит в поле card (по схеме инструмента), name — запасной вариант
+    const cardName = String((action as { card?: string }).card ?? action.name ?? '')
+    if (!cardName) return
     const { data: card } = await s.from('cards').select('id,current_debt,name')
-      .eq('user_id', USER_ID).ilike('name', `%${action.name}%`).maybeSingle()
+      .eq('user_id', USER_ID).ilike('name', `%${cardName}%`).maybeSingle()
     if (!card) return
     const cur = Number(card.current_debt ?? 0)
     const setExact = Boolean((action as { set_exact?: boolean }).set_exact)
