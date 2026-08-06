@@ -63,6 +63,30 @@ export async function GET(req: Request) {
   }
 
   const deleted = { corrections: 0, memories: 0, anchors: 0 }
+  const fixes: string[] = []
+
+  // ?zerocards=1 — обнулить долги по всем картам (подтверждено пользователем)
+  if (new URL(req.url).searchParams.get('zerocards') === '1') {
+    await db.from('cards').update({ current_debt: 0 }).eq('user_id', USER_ID)
+    fixes.push('все долги по картам обнулены')
+  }
+
+  // ?setsources=1 — проставить источник списания постоянным тратам
+  if (new URL(req.url).searchParams.get('setsources') === '1') {
+    const SRC: Record<string, string> = {
+      'ЖКХ': 'credit_tbank', 'коммунал': 'credit_tbank',
+      'Электричество': 'debit_sber', 'Интернет': 'debit_sber',
+      'DDX': 'debit_sber', 'Обучение': 'debit_sber',
+    }
+    const fc = (user?.fixed_costs ?? []) as { name: string; source?: string }[]
+    const patched = fc.map(f => {
+      if (f.source) return f
+      const hit = Object.entries(SRC).find(([k]) => f.name.toLowerCase().includes(k.toLowerCase()))
+      return hit ? { ...f, source: hit[1] } : f
+    })
+    await db.from('users').update({ fixed_costs: patched }).eq('id', USER_ID)
+    fixes.push(`источники проставлены: ${patched.filter(f => f.source).length}/${patched.length}`)
+  }
 
   // Точечное удаление конкретных записей памяти: ?memids=uuid,uuid
   const memIds = (new URL(req.url).searchParams.get('memids') ?? '')
@@ -92,6 +116,7 @@ export async function GET(req: Request) {
 
   return Response.json({
     mode: doCleanup ? 'CLEANUP EXECUTED' : 'audit only',
+    fixes,
     deleted,
     corrections_total: corrections?.length ?? 0,
     corrections_junk: junk.length,

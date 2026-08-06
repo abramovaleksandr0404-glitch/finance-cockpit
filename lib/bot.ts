@@ -630,7 +630,10 @@ async function _getContextRaw(): Promise<string> {
   const fixedLines = (fixedCosts as {name:string;amount:number;day?:number;source?:string}[]).map((f,i) => {
     const paid = fixedPaid[String(i)] !== undefined
     const dayStr = f.day ? ` (${f.day}-го)` : ''
-    const srcStr = f.source === 'credit_tbank' ? ' 💳Т' : ' 🏦'
+    const srcStr = f.source === 'credit_tbank' ? ' 💳Т'
+      : f.source === 'credit_sber' ? ' 💳С'
+      : f.source === 'debit_sber' ? ' 🏦'
+      : ' ❓'
     return `  ${paid?'✅':'⏳'} ${f.name}${dayStr}${srcStr}: ${rub(f.amount)}`
   }).join('\n')
   const goalLines = (goals ?? []).map(g => `  • ${g.name}: ${rub(Number(g.amount))} ${g.month_key ? '('+g.month_key+')' : '(накопление)'}`).join('\n') || '  (нет)'
@@ -1340,13 +1343,16 @@ add_idea ≠ add_backlog_item: идея — сырое пожелание, backl
 • Брокер → только если спрашивают про брокер/АТОН/портфель
 • ПОЛНЫЙ ОТВЕТ только при: 'полный бюджет' / 'полная картина' / 'покажи всё' / 'детально'
 
-ДЕБЕТ vs КРЕДИТНАЯ КАРТА:
-• Дебет Сбер = свои деньги → используй add_expense (не трогает кредитки)
-• Кредитная карта = займ у банка → mark_card_payment
-  - Расходы с кредитки НЕ уменьшают dебет
-  - Долг по карте = пассив, растёт при каждой трате
-• Если пользователь не уточнил источник → спроси: 'С дебета или кредитки?'
-• ЖКХ и Общежитие → всегда с Т-Банк кредитной`
+ИСТОЧНИК СПИСАНИЯ — ОДИН ИНСТРУМЕНТ, ЯВНЫЙ ПАРАМЕТР:
+• ЛЮБАЯ трата (дебет или карта) → add_expense с параметром source.
+  source='debit' — Сбер дебет: уменьшается баланс.
+  source='credit_tbank' | 'credit_sber' | 'split' — карта: растёт долг, дебет НЕ трогается.
+• ⛔ НИКОГДА не вызывай add_expense и mark_card_payment для одной траты —
+  трата запишется дважды. add_expense умеет оба случая сам.
+• Пользователь не назвал источник → СПРОСИ «С дебета или с карты?». Не угадывай.
+• Источник постоянных трат смотри в блоке ПОСТОЯННЫЕ: 💳Т — Т-Банк кредитная,
+  🏦 — Сбер дебет, ❓ — источник не задан, надо уточнить у пользователя.
+  Не используй правила из памяти вместо этого блока: состав постоянных меняется.`
 
 export interface BotAction {
   type: string
@@ -1454,10 +1460,43 @@ export async function executeAction(action: BotAction): Promise<void> {
 
   // ════════════ РАСХОДЫ ════════════════════════════════════════════
   if (action.type === 'add_expense' && action.amount) {
-    // Антидубль: если такая же сумма+описание за последние 5 минут — пропускаем молча
+    // Антидубль: та же сумма за последние 5 минут. Описание сравниваем только
+    // если оно есть — иначе ilike('') не совпадал ни с чем и дубли проходили.
     const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString()
-    const { data: dupes } = await s.from('expenses').select('id').eq('user_id', USER_ID).eq('amount', Math.round(action.amount)).ilike('description', action.description ?? '').gte('created_at', fiveMinAgo).limit(1)
-    if (dupes && dupes.length > 0) return
+    let dupQ = s.from('expenses').select('id').eq('user_id', USER_ID)
+      .eq('amount', Math.round(action.amount)).gte('created_at', fiveMinAgo)
+    if (action.description) dupQ = dupQ.ilike('description', action.description)
+    const { data: dupes } = await dupQ.limit(1)
+    if (dupes && dupes.length > 0) { console.log('[add_expense] антидубль: пропуск'); return }
+
+    // ИСТОЧНИК определяет, какой счёт меняется. Раньше add_expense всегда
+    // списывал с дебета, а траты с карты шли отдельным инструментом —
+    // из-за выбора между двумя путями бот задваивал операции.
+    const src = String((action as { source?: string }).source ?? 'debit')
+    const CARD_NAMES: Record<string, string> = {
+      credit_tbank: 'Т-Банк', credit_sber: 'Сбер кредитка', split: 'Яндекс Сплит',
+    }
+
+    if (src !== 'debit') {
+      const cardName = CARD_NAMES[src] ?? 'Т-Банк'
+      const { data: card } = await s.from('cards').select('id,current_debt')
+        .eq('user_id', USER_ID).ilike('name', `%${cardName}%`).maybeSingle()
+      if (card) {
+        await s.from('cards').update({ current_debt: Number(card.current_debt ?? 0) + action.amount }).eq('id', card.id)
+      }
+      await s.from('expenses').insert({
+        user_id: USER_ID, month_key: monthKey,
+        expense_date: new Date().toISOString().split('T')[0],
+        category: action.category ?? 'Прочее',
+        amount: Math.round(action.amount),
+        description: action.description ?? null,
+        source_type: 'card',
+      })
+      // Дебет НЕ трогаем: карта — это пассив
+      invalidateCache('core_state', 'context', 'fin_summary', 'loans_summary')
+      return
+    }
+
     await s.from('expenses').insert({user_id:USER_ID,month_key:monthKey,expense_date:new Date().toISOString().split('T')[0],category:action.category??'Прочее',amount:Math.round(action.amount),description:action.description??null,source_type:'debit'})
     const { data:u } = await s.from('users').select('debit_balance').eq('id',USER_ID).single()
     const prevBal = Number(u?.debit_balance ?? 0)
@@ -2043,8 +2082,8 @@ export async function executeAction(action: BotAction): Promise<void> {
 
 // ── ИНСТРУМЕНТЫ (tool calling) — надёжная замена парсингу ACTION ──────────
 export const TOOLS = [
-  { name:'add_expense', description:'Записать переменную трату. Используй когда пользователь сообщает что потратил/купил/заплатил за разовое.',
-    input_schema:{type:'object',properties:{amount:{type:'number'},category:{type:'string',enum:['Еда и кафе','Транспорт','Здоровье','Развлечения','Одежда','Инвестиции','Прочее']},description:{type:'string'}},required:['amount']} },
+  { name:'add_expense', description:'Записать трату С ЛЮБОГО источника (дебет ИЛИ кредитная карта). ЕДИНСТВЕННЫЙ инструмент для трат — не комбинируй с mark_card_payment, иначе трата запишется дважды. Обязательно укажи source; если пользователь не сказал откуда — спроси.',
+    input_schema:{type:'object',properties:{amount:{type:'number'},category:{type:'string',enum:['Еда и кафе','Транспорт','Здоровье','Развлечения','Одежда','Инвестиции','Прочее']},description:{type:'string'},source:{type:'string',enum:['debit','credit_tbank','credit_sber','split'],description:'Откуда списано: debit — Сбер дебет (уменьшает баланс); credit_tbank / credit_sber / split — кредитная карта (растёт долг, дебет не трогается)'}},required:['amount','source']} },
   { name:'delete_expense', description:'Удалить трату. По умолчанию последнюю (id="last") или по фрагменту id.',
     input_schema:{type:'object',properties:{id:{type:'string'}}} },
   { name:'add_client', description:'Записать закрытого клиента/сделку. Грейд g3/g4/g56/g78/g9/g10.',
