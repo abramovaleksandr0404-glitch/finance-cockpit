@@ -63,7 +63,10 @@ function lastWorkingDayOfMonth(y: number, m: number): number {
 }
 
 export async function getHistory(chatId: number) {
-  const { data } = await db().from('bot_messages').select('role,content').eq('chat_id', chatId).order('created_at', { ascending: false }).limit(6)
+  // Окно 40 минут: без него в контекст попадали сообщения многочасовой давности,
+  // и бот подмешивал прошлую тему в ответ на новый вопрос.
+  const since = new Date(Date.now() - 40 * 60 * 1000).toISOString()
+  const { data } = await db().from('bot_messages').select('role,content').eq('chat_id', chatId).gte('created_at', since).order('created_at', { ascending: false }).limit(6)
   // ВАЖНО: длинные ответы ассистента заменяем тематическим тегом без форматирования.
   // Причина: первые 200 символов включали заголовки/таблицы → LLM копировал структуру.
   // Тематический тег даёт контекст ("о чём говорили") без шаблона для копирования.
@@ -1677,6 +1680,22 @@ export async function executeAction(action: BotAction): Promise<void> {
     await recordDebitChange(s, Number(u?.debit_balance ?? 0), newBal, `Мультидневная: ${action.description ?? action.category} (${action.covers_days}д)`, 'expense')
 
   } else if (action.type === 'update_anchor' && action.month_key && action.key && action.value != null) {
+    // Производные значения в якорях запрещены НА ЗАПИСЬ, а не только на чтение.
+    // Иначе бот заново создаёт устаревшие копии таблиц: monthly_loan_payment
+    // писался как 37008 при реальных 38558 — снова два источника правды.
+    const DERIVED_KEYS = new Set([
+      'salary_net', 'var_budget', 'var_spent', 'var_left',
+      'total_loans', 'monthly_loan_payment',
+      'tbank_credit_debt', 'tbank_credit_available', 'tbank_credit_limit',
+      'cards_summary', 'net_position', 'fixed_total', 'fixed_unpaid',
+      'advance_normal', 'advance_actual', 'eom_salary', 'daily_rate', 'working_days',
+      'forecast_end', 'forecast_after_advance',
+    ])
+    if (DERIVED_KEYS.has(String(action.key))) {
+      console.log(`[update_anchor] отклонён производный ключ: ${action.key}`)
+      _lastWriteBlocked = 'update_anchor:derived'
+      return
+    }
     await s.from('bot_anchors').upsert({
       user_id: USER_ID,
       month_key: action.month_key,
