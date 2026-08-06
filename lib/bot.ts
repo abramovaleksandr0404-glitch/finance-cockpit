@@ -1413,7 +1413,7 @@ export async function executeAction(action: BotAction): Promise<void> {
   const snapLabel: Record<string,string> = {
     add_expense:'трата',delete_expense:'удаление',add_client:'клиент',add_goal:'цель',
     mark_goal_bought:'покупка',mark_salary:'зарплата',mark_single_fixed:'постоянная',
-    mark_fixed_paid:'все постоянные',mark_loan_paid:'кредит',early_repay:'досрочное',
+    mark_fixed_paid:'все постоянные',mark_loan_paid:'кредит',early_repay:'досрочное',pay_card_debt:'погашение карты',
     add_income_event:'доход',set_balance:'баланс',close_month:'закрытие',
     mark_recurring_received:'регулярный доход',
     update_settings:'настройки',add_fixed_cost:'+постоянная',
@@ -1725,6 +1725,26 @@ export async function executeAction(action: BotAction): Promise<void> {
       const newBal = Math.round((prevBal-action.amount)*100)/100
       await s.from('users').update({debit_balance:newBal,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
       await recordDebitChange(s, prevBal, newBal, `Досрочное: ${loan.name}`, 'loan')
+    }
+
+  } else if (action.type === 'pay_card_debt' && action.name && action.amount != null) {
+    const { data: card } = await s.from('cards').select('id,current_debt,name')
+      .eq('user_id', USER_ID).ilike('name', `%${action.name}%`).maybeSingle()
+    if (!card) return
+    const cur = Number(card.current_debt ?? 0)
+    const setExact = Boolean((action as { set_exact?: boolean }).set_exact)
+    if (setExact) {
+      // Корректировка данных: ставим точный остаток, деньги не двигаются
+      await s.from('cards').update({ current_debt: Math.max(0, action.amount) }).eq('id', card.id)
+    } else {
+      const pay = Math.min(cur, action.amount)
+      await s.from('cards').update({ current_debt: cur - pay }).eq('id', card.id)
+      // Реальное погашение: деньги уходят с дебета
+      const { data: u } = await s.from('users').select('debit_balance').eq('id', USER_ID).single()
+      const prev = Number(u?.debit_balance ?? 0)
+      const next = Math.round((prev - pay) * 100) / 100
+      await s.from('users').update({ debit_balance: next, debit_updated_at: new Date().toISOString() }).eq('id', USER_ID)
+      await recordDebitChange(s, prev, next, `Погашение карты: ${card.name}`, 'card_payment')
     }
 
   } else if (action.type === 'mark_card_payment' && action.name && action.amount) {
@@ -2290,6 +2310,13 @@ export const TOOLS = [
   { name: 'check_salary_pattern',
     description: 'Показать историю реальных выплат (аванс/ЗП) и средние суммы. Вызывай на: "когда обычно приходит ЗП", "сколько в среднем аванс", "история выплат", "паттерн зарплаты".',
     input_schema: { type: 'object', properties: {} } },
+  { name: 'pay_card_debt',
+    description: 'ПОГАСИТЬ долг по кредитной карте: долг уменьшается, дебет Сбера уменьшается на ту же сумму. Используй на «погасил карту», «внёс на кредитку», «закрыл долг по карте». Для установки точного долга без движения денег укажи set_exact=true.',
+    input_schema: { type: 'object', properties: {
+      card: { type: 'string', description: 'Название карты: Т-Банк / Сбер кредитка / Яндекс Сплит' },
+      amount: { type: 'number', description: 'Сумма погашения, либо точный остаток долга если set_exact=true' },
+      set_exact: { type: 'boolean', description: 'true — установить долг равным amount (корректировка данных, дебет не трогается)' },
+    }, required: ['card', 'amount'] } },
   { name: 'mark_card_payment',
     description: 'Записать оплату с кредитной карты (Т-Банк кредитная, Сбер кредитка, Яндекс Сплит). Вызывай когда пользователь говорит "оплатил с кредитки", "с карты Т-Банк", "Яндекс Сплитом". НЕ уменьшает debit_balance.',
     input_schema: { type: 'object', properties: {
@@ -2743,7 +2770,7 @@ async function handleTool(name: string, input: Record<string,unknown>): Promise<
   // модель обходила их, вызывая соседний инструмент (early_repay → update_loan).
   const MONEY_WRITES = new Set([
     'add_expense', 'add_multiday_expense', 'delete_expense', 'mark_card_payment',
-    'early_repay', 'mark_loan_paid', 'update_loan', 'mark_goal_bought',
+    'early_repay', 'mark_loan_paid', 'update_loan', 'mark_goal_bought', 'pay_card_debt',
     'mark_fixed_paid', 'mark_fixed_paid_with_amount', 'mark_single_fixed',
     'set_balance', 'update_salary', 'mark_salary', 'mark_recurring_received',
     'record_vacation_pay', 'close_month', 'update_cashflow', 'add_income_event',
