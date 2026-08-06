@@ -62,7 +62,7 @@ export async function GET(req: Request) {
     else survivors.push({ id: m.id, content: String(m.content) })
   }
 
-  const deleted = { corrections: 0, memories: 0 }
+  const deleted = { corrections: 0, memories: 0, anchors: 0 }
   if (doCleanup) {
     if (junk.length) {
       await db.from('bot_corrections').delete().in('id', junk.map(c => c.id))
@@ -72,6 +72,13 @@ export async function GET(req: Request) {
       await db.from('bot_memories').delete().in('id', memDupes.map(m => m.id))
       deleted.memories = memDupes.length
     }
+    // Якоря-дубликаты таблиц: источник правды — таблица, якорь только устаревает
+    const DERIVED = ['salary_net', 'var_budget', 'total_loans', 'monthly_loan_payment',
+      'tbank_credit_debt', 'tbank_credit_available', 'tbank_credit_limit',
+      'cards_summary', 'net_position', 'fixed_total', 'fixed_unpaid']
+    const { data: killed } = await db.from('bot_anchors')
+      .delete().eq('user_id', USER_ID).in('key', DERIVED).select('key')
+    deleted.anchors = killed?.length ?? 0
   }
 
   return Response.json({

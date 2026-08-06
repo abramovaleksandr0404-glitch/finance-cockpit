@@ -434,22 +434,36 @@ async function _getContextRaw(): Promise<string> {
   function buildAnchorSection(): string {
     if (!anchors?.length) return ''
     const lines: string[] = [
-      '╔══════════════════════════════════════════╗',
-      '║  ЯКОРЯ — БРАТЬ ДОСЛОВНО, НЕ ПЕРЕСЧИТЫВАТЬ ║',
-      '╚══════════════════════════════════════════╝',
+      '╔═══════════════════════════════════════════════════╗',
+      '║  ЯКОРЯ — только факты, которых нет в таблицах.     ║',
+      '║  Если цифра есть в блоке ДАННЫЕ ИЗ БД — берётся    ║',
+      '║  ОНА, а не якорь. Якорь может быть устаревшим.     ║',
+      '╚═══════════════════════════════════════════════════╝',
     ]
     for (const mk of [monthKey, nextMonthKey, 'global']) {
       const rows = Object.values(anchorMap[mk] ?? {})
       if (!rows.length) continue
       const label = mk === 'global' ? '📌 ГЛОБАЛЬНЫЕ' : `📌 ${mk}`
       lines.push(`\n${label}:`)
-      const DYNAMIC_KEYS = new Set([
-        'var_spent', 'var_left',
-        'forecast_end', 'forecast_after_advance',
+      // Значения, ВЫЧИСЛЯЕМЫЕ из таблиц-источников, НИКОГДА не подаём из якорей.
+      // Якорь — это снимок на момент записи; таблица меняется каждый день.
+      // Ровно так в июне возникли два источника правды и посыпались галлюцинации.
+      const DERIVED_KEYS = new Set([
+        // меняются ежедневно
+        'var_spent', 'var_left', 'forecast_end', 'forecast_after_advance',
         'last_evening_alert_date', 'today_context',
+        // дублируют users
+        'salary_net', 'var_budget',
+        // дублируют loans
+        'total_loans', 'monthly_loan_payment',
+        // дублируют cards
+        'tbank_credit_debt', 'tbank_credit_available', 'tbank_credit_limit',
+        'cards_summary', 'net_position',
+        // дублируют fixed_costs + months.fixed_paid
+        'fixed_total', 'fixed_unpaid',
       ])
       for (const r of rows) {
-        if (DYNAMIC_KEYS.has(r.key)) continue
+        if (DERIVED_KEYS.has(r.key)) continue
         lines.push(`  ${r.key}: ${r.value}${r.formula ? ` (${r.formula})` : ''}`)
       }
     }
