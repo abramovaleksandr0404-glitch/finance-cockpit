@@ -65,6 +65,15 @@ export async function GET(req: Request) {
   const deleted = { corrections: 0, memories: 0, anchors: 0 }
   const fixes: string[] = []
 
+  // ?dropanchors=key1,key2 — точечно удалить якоря по ключу
+  const dropKeys = (new URL(req.url).searchParams.get('dropanchors') ?? '')
+    .split(',').map(x => x.trim()).filter(Boolean)
+  if (dropKeys.length) {
+    const { data: gone } = await db.from('bot_anchors')
+      .delete().eq('user_id', USER_ID).in('key', dropKeys).select('key')
+    fixes.push(`якоря удалены: ${(gone ?? []).map(g => g.key).join(', ') || 'нет совпадений'}`)
+  }
+
   // ?nostipend=1 — удалить стипендию из регулярных доходов.
   // Пока строка жива, ядро каждый запрос заново вставляет её в контекст,
   // и никакие слова пользователя «стипендии больше нет» на это не влияют.
