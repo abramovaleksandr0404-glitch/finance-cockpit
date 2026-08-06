@@ -408,7 +408,7 @@ async function _getContextRaw(): Promise<string> {
     supabase.from('cards').select('name,card_limit,current_debt').eq('user_id',USER_ID).order('sort_order'),
     supabase.from('income_events').select('event_date,description,amount').eq('user_id',USER_ID).eq('month_key',monthKey),
     supabase.from('custom_categories').select('id,name,monthly_limit,alert_at_percent').eq('user_id',USER_ID),
-    supabase.from('bot_corrections').select('correction,category,created_at').eq('user_id',USER_ID).in('category', ['formula','fact']).order('created_at',{ascending:false}).limit(3),
+    supabase.from('bot_corrections').select('correction,category,created_at').eq('user_id',USER_ID).order('created_at',{ascending:false}).limit(8),
     supabase.from('ru_holidays').select('holiday_date').gte('holiday_date',`${now.getFullYear()}-${String(curMonth).padStart(2,'0')}-01`).lte('holiday_date',`${now.getFullYear()}-${String(curMonth).padStart(2,'0')}-31`),
     supabase.from('expenses').select('amount,category').eq('user_id', USER_ID).eq('month_key', prevMK),
     supabase.from('bot_anchors').select('month_key,key,value,formula').eq('user_id',USER_ID).in('month_key',[monthKey,nextMonthKey,'global','broker']).order('month_key'),
@@ -1238,13 +1238,24 @@ record_advance, record_eom_salary, mark_recurring_received — вызывать 
 Если пользователь подтвердил или поправил категорию → обязательно вызови
 learn_mapping с правильной категорией.
 
-ОБУЧЕНИЕ НА ОШИБКАХ:
-При словах 'неверно', 'ошибся', 'не так', 'галлюцинируешь', 'ошибка', 'неправильно', 'это неправильно':
-→ ПЕРВОЕ И ОБЯЗАТЕЛЬНОЕ действие: вызови save_correction НЕМЕДЛЕННО, ДО любого ответа.
-category: math (ошибка в цифрах), formula (формула), logic (логика), context (перепутал факты)
-Это НЕ опционально. Без вызова save_correction — ошибка повторится снова.
-bot_answered = твой предыдущий ответ (первые 500 символов).
-correction = суть поправки пользователя одним предложением.
+ОБУЧЕНИЕ НА ОШИБКАХ — СНАЧАЛА РАЗДЕЛИ, ЧТО ИМЕННО НЕВЕРНО:
+
+1️⃣ НЕВЕРНЫ ДАННЫЕ (цифра, дата, сумма, статус оплаты):
+   → Исправь В БАЗЕ соответствующим инструментом (update_card_debt, update_loan,
+     update_anchor, mark_fixed_paid, delete_expense и т.п.).
+   → save_correction НЕ вызывай. Цифры не хранятся в правилах.
+
+2️⃣ НЕВЕРНО ПОВЕДЕНИЕ (перепутал источник данных, не тот формат, не та категория,
+   посчитал сам вместо запроса к БД):
+   → Вызови save_correction с правилом БЕЗ ЕДИНОЙ ЦИФРЫ.
+   ✅ «Долг по картам брать из БД, а не из истории диалога»
+   ✅ «Авиабилеты относить к внеплановым, не к лимиту переменных»
+   ❌ «Долг Т-Банк 71252₽» — это данные, а не правило. Будет отклонено.
+   category: rule (логика) | format (оформление) | mapping (категории трат)
+
+Часто нужны ОБА шага: сначала исправить цифру в БД, потом сохранить правило,
+чтобы ошибка не повторилась.
+«забудь это правило» → delete_correction. «чему ты научился» → list_corrections.
 
 АВТОТРИГГЕР СЦЕНАРНОГО АНАЛИЗА:
 Если пользователь упоминает:
@@ -1867,13 +1878,26 @@ export async function executeAction(action: BotAction): Promise<void> {
 
   } else if (action.type === 'save_correction' && action.correction) {
     console.log('[save_correction] called:', action.correction?.slice(0, 50))
+    const text = String(action.correction)
+    // ГЛАВНОЕ ПРАВИЛО: в коррекции живут ПРАВИЛА ПОВЕДЕНИЯ, а не числа.
+    // Число устаревает к следующей трате и начинает противоречить БД —
+    // именно так накопились 58 мёртвых коррекций с июньскими суммами.
+    if (/\d{3,}/.test(text.replace(/\s/g, ''))) {
+      console.log('[save_correction] ОТКЛОНЕНО: содержит суммы')
+      _lastCorrectionRejected = true
+      return
+    }
     const { data: recentMsgs } = await s.from('bot_messages').select('role,content,created_at').eq('user_id', USER_ID).order('created_at', {ascending: false}).limit(4)
     const msgs = (recentMsgs ?? []).reverse()
     const lastUser = msgs.filter(m => m.role === 'user').pop()
     const lastBot = msgs.filter(m => m.role === 'assistant').pop()
     const userSaid = lastUser?.content ?? '[нет сообщения]'
     const botAnswered = action.bot_answered ?? (lastBot?.content?.slice(0, 400) ?? '[нет ответа]')
-    await s.from('bot_corrections').insert({user_id:USER_ID,user_said:userSaid,bot_answered:botAnswered,correction:action.correction,category:action.category??'logic'})
+    // Дедуп: не плодим одинаковые правила
+    const { data: dup } = await s.from('bot_corrections')
+      .select('id').eq('user_id', USER_ID).ilike('correction', `%${text.slice(0, 35)}%`).limit(1)
+    if (dup?.length) { console.log('[save_correction] дубликат, пропуск'); return }
+    await s.from('bot_corrections').insert({user_id:USER_ID,user_said:userSaid,bot_answered:botAnswered,correction:text,category:action.category??'rule'})
 
   } else if (action.type === 'reclassify_expense') {
     const monthKey2 = mk()
@@ -1974,14 +1998,31 @@ export async function executeAction(action: BotAction): Promise<void> {
   } else if (action.type === 'save_memory' && action.content) {
     const clean = sanitizeStr(action.content, 1000) ?? ''
     if (!clean) return
-    const { data: ex } = await s.from('bot_memories')
-      .select('id').eq('user_id', USER_ID).ilike('content', `%${clean.slice(0,40)}%`).limit(1)
-    if (!ex?.length) {
+    // Дедуп по смыслу, а не по префиксу: сравниваем набор значимых слов.
+    // Префиксный ilike(40) пропускал «Александр работает в АТОН...» ×4 —
+    // варианты расходились после 40-го символа.
+    const words = (t: string) => new Set(
+      t.toLowerCase().replace(/ё/g, 'е')
+        .split(/[^a-zа-я0-9]+/)
+        .filter(w => w.length > 3)
+        .map(w => w.slice(0, 5)))
+    const newWords = words(clean)
+    const { data: existing } = await s.from('bot_memories')
+      .select('id,content').eq('user_id', USER_ID).limit(100)
+    const isDup = (existing ?? []).some(m => {
+      const oldWords = words(String(m.content))
+      const common = [...newWords].filter(w => oldWords.has(w)).length
+      const smaller = Math.min(newWords.size, oldWords.size)
+      return smaller > 0 && common / smaller >= 0.7
+    })
+    if (!isDup) {
       await s.from('bot_memories').insert({
         user_id: USER_ID, content: clean,
         category: action.category ?? 'general',
         importance: Math.min(5, Math.max(1, Math.round(Number(action.importance ?? 3)))),
       })
+    } else {
+      console.log('[save_memory] дубликат по смыслу, пропуск')
     }
   }
 }
@@ -2067,12 +2108,20 @@ export const TOOLS = [
       custom_category_name:{type:'string'}
     },required:['trigger']} },
   { name:'save_correction',
-    description:'Сохранить ошибку бота для обучения. Вызывай когда пользователь говорит "неверно", "ты ошибся", "не так".',
+    description:'Сохранить ПРАВИЛО ПОВЕДЕНИЯ после ошибки. Вызывай когда пользователь говорит "неверно", "ты ошибся", "не так". ЗАПРЕЩЕНО передавать сюда конкретные суммы — числа живут в БД. Формулируй правило обобщённо: не "долг карты 71252₽", а "долг карты брать из БД, не из истории диалога".',
     input_schema:{type:'object',properties:{
       bot_answered:{type:'string',description:'Что ответил бот (неверно) — первые 500 символов'},
-      correction:{type:'string',description:'Правильный ответ/объяснение пользователя'},
-      category:{type:'string',enum:['math','context','logic','tool','formula']}
+      correction:{type:'string',description:'Правило БЕЗ цифр: как надо себя вести в подобной ситуации впредь'},
+      category:{type:'string',enum:['rule','format','mapping'],description:'rule — логика/формула, format — оформление ответа, mapping — отнесение трат к категориям'}
     },required:['bot_answered','correction']} },
+  { name:'list_corrections',
+    description:'Показать сохранённые правила поведения. Вызывай при "чему ты научился", "какие правила помнишь".',
+    input_schema:{type:'object',properties:{}} },
+  { name:'delete_correction',
+    description:'Удалить устаревшее правило поведения. Вызывай при "забудь это правило", "это правило неактуально".',
+    input_schema:{type:'object',properties:{
+      fragment:{type:'string',description:'Фрагмент текста правила для поиска и удаления'}
+    },required:['fragment']} },
   { name:'undo', description:'Отменить последнее изменение (откат к снапшоту).',
     input_schema:{type:'object',properties:{}} },
   { name: 'reclassify_expense',
@@ -2212,6 +2261,10 @@ interface ContentBlock { type:string; text?:string; id?:string; name?:string; in
 
 // Один раунд вызова Claude с инструментами
 export let _lastUsage: Record<string, number> = {}
+
+// Ставится в true, если save_correction отклонён из-за цифр в тексте.
+// handleTool читает флаг и объясняет модели, что делать вместо этого.
+let _lastCorrectionRejected = false
 
 // Накопитель за ВЕСЬ запрос (все раунды tool-loop), а не за последний раунд.
 // Без этого стоимость запроса недооценивается в 3-5 раз.
@@ -2556,6 +2609,19 @@ async function handleTool(name: string, input: Record<string,unknown>): Promise<
     const advReceived = !!month?.salary_adv_received
     return JSON.stringify({ daysLeft, advDay: targetAdvDay, targetMonth, advReceived, advAmt })
   }
+  if (name === 'list_corrections') {
+    const { data } = await db().from('bot_corrections')
+      .select('correction,category,created_at')
+      .eq('user_id', USER_ID)
+      .order('created_at', { ascending: false })
+      .limit(20)
+    return JSON.stringify({ count: data?.length ?? 0, rules: data ?? [] })
+  }
+  if (name === 'delete_correction') {
+    const fragment = String(input.fragment ?? '').slice(0, 100)
+    if (fragment) await db().from('bot_corrections').delete().eq('user_id', USER_ID).ilike('correction', `%${fragment}%`)
+    return JSON.stringify({ deleted: true })
+  }
   if (name === 'list_memories') {
     const { data } = await db().from('bot_memories')
       .select('content,category,importance,created_at')
@@ -2600,7 +2666,15 @@ async function handleTool(name: string, input: Record<string,unknown>): Promise<
     })
   }
   // DB-writing tools
+  _lastCorrectionRejected = false
   await executeAction({ type: name, ...input } as BotAction)
+  if (name === 'save_correction' && _lastCorrectionRejected) {
+    return JSON.stringify({
+      saved: false,
+      reason: 'Коррекция содержит конкретные суммы и НЕ сохранена. Числа хранятся только в БД.',
+      what_to_do: 'Если цифра в БД неверна — исправь её инструментом (update_card_debt / update_loan / add_expense и т.п.). Если это правило поведения — переформулируй БЕЗ цифр и вызови save_correction ещё раз.',
+    })
+  }
   // Инвалидируем кеш после любой записи в БД — следующий getContext прочитает свежие данные
   invalidateCache('core_state', 'context', 'fin_summary', 'loans_summary')
   // Sprint 27: read-after-write — после записи перечитываем ФАКТ из БД.
