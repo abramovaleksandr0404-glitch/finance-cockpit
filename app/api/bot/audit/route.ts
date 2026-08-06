@@ -41,7 +41,7 @@ export async function GET(req: Request) {
   ] = await Promise.all([
     db.from('bot_corrections').select('id,correction,category,created_at').eq('user_id', USER_ID).order('created_at', { ascending: false }),
     db.from('bot_memories').select('id,content,category,importance,created_at').eq('user_id', USER_ID).order('importance', { ascending: false }),
-    db.from('users').select('salary_net,var_budget,fixed_costs').eq('id', USER_ID).maybeSingle(),
+    db.from('users').select('salary_net,var_budget,fixed_costs,recurring_incomes,debit_balance,debit_tbank').eq('id', USER_ID).maybeSingle(),
     db.from('months').select('*').eq('user_id', USER_ID).eq('month_key', monthKey).maybeSingle(),
     db.from('cards').select('name,card_limit,current_debt').eq('user_id', USER_ID),
     db.from('loans').select('name,principal,rate,min_payment').eq('user_id', USER_ID),
@@ -64,6 +64,16 @@ export async function GET(req: Request) {
 
   const deleted = { corrections: 0, memories: 0, anchors: 0 }
   const fixes: string[] = []
+
+  // ?nostipend=1 — удалить стипендию из регулярных доходов.
+  // Пока строка жива, ядро каждый запрос заново вставляет её в контекст,
+  // и никакие слова пользователя «стипендии больше нет» на это не влияют.
+  if (new URL(req.url).searchParams.get('nostipend') === '1') {
+    const ri = (user?.recurring_incomes ?? []) as { name: string }[]
+    const kept = ri.filter(r => !/стипенд/i.test(r.name))
+    await db.from('users').update({ recurring_incomes: kept }).eq('id', USER_ID)
+    fixes.push(`регулярные доходы: было ${ri.length}, стало ${kept.length}`)
+  }
 
   // ?zerocards=1 — обнулить долги по всем картам (подтверждено пользователем)
   if (new URL(req.url).searchParams.get('zerocards') === '1') {
@@ -130,6 +140,9 @@ export async function GET(req: Request) {
       salary_net: user?.salary_net,
       var_budget: user?.var_budget,
       fixed_costs: user?.fixed_costs,
+      recurring_incomes: user?.recurring_incomes,
+      debit_balance: user?.debit_balance,
+      debit_tbank: user?.debit_tbank,
       month_row: month,
       cards,
       loans,
