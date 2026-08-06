@@ -189,7 +189,7 @@ async function snap(label: string) {
 export interface FinancialState {
   // слой 0 — сырьё
   month_key: string; today: number; days_in_month: number; days_left: number
-  debit_sber: number; tbank_debit: number
+  debit_sber: number; tbank_debit: number; cash: number
   // слой 1 — базовые агрегаты
   liquid: number; card_debt: number; net_position: number
   var_spent: number; extra_spent: number
@@ -249,10 +249,11 @@ async function _computeFinancialStateRaw(): Promise<FinancialState> {
   const s = db(); const monthKey = mk(); const now = new Date()
   await accrueLoansCore(s)  // начисляем проценты ДО чтения данных кредитов
   const [
-    { data: u }, { data: month }, { data: expenses },
+    { data: u }, { data: cashAnchor }, { data: month }, { data: expenses },
     { data: cards }, { data: loans }, { data: goals }, { data: holidays }, { data: nextHolidays },
   ] = await Promise.all([
     s.from('users').select('debit_balance,tbank_debit,var_budget,fixed_costs,salary_net,recurring_incomes').eq('id', USER_ID).single(),
+    s.from('bot_anchors').select('value').eq('user_id', USER_ID).eq('key', 'cash_on_hand').eq('month_key', 'global').maybeSingle(),
     s.from('months').select('*').eq('user_id', USER_ID).eq('month_key', monthKey).maybeSingle(),
     s.from('expenses').select('amount,category,description').eq('user_id', USER_ID).eq('month_key', monthKey),
     s.from('cards').select('name,current_debt,card_limit').eq('user_id', USER_ID).order('sort_order'),
@@ -268,9 +269,12 @@ async function _computeFinancialStateRaw(): Promise<FinancialState> {
   const daysLeft = daysInMonth - today + 1
   const debitSber = Math.round(Number(u?.debit_balance ?? 0))
   const tbankDebit = Math.round(Number(u?.tbank_debit ?? 0))
+  // Наличные — такие же свои деньги, как остаток на дебете. Входят в ликвидность
+  // и в дневной бюджет; раньше им негде было храниться и бот их «забывал».
+  const cash = Math.round(Number(cashAnchor?.value ?? 0))
 
   // ── СЛОЙ 1 ──
-  const liquid = debitSber + tbankDebit
+  const liquid = debitSber + tbankDebit + cash
   const cardList = (cards ?? []).map((c:{name:string;current_debt:number;card_limit:number}) => ({
     name: c.name, debt: Math.round(Number(c.current_debt ?? 0)),
     available: Math.round(Number(c.card_limit ?? 0)) - Math.round(Number(c.current_debt ?? 0)),
@@ -397,7 +401,7 @@ async function _computeFinancialStateRaw(): Promise<FinancialState> {
 
   return {
     month_key: monthKey, today, days_in_month: daysInMonth, days_left: daysLeft,
-    debit_sber: debitSber, tbank_debit: tbankDebit,
+    debit_sber: debitSber, tbank_debit: tbankDebit, cash,
     liquid, card_debt: cardDebt, net_position: netPosition,
     var_spent: varSpent, extra_spent: extraSpent,
     fixed_total: fixedTotal, fixed_paid: fixedPaid,
@@ -778,7 +782,8 @@ async function _getContextRaw(): Promise<string> {
 БАЛАНС:
   Дебет Сбер: ${rub(__core.debit_sber)}
   Т-Банк дебет: ${rub(__core.tbank_debit)}
-  ЛИКВИДНОСТЬ ИТОГО: ${rub(_liquid)}
+  Наличные на руках: ${rub(__core.cash)}
+  ЛИКВИДНОСТЬ ИТОГО: ${rub(_liquid)} (дебеты + наличные)
   Чистая позиция: ${rub(_liquid)} − ${rub(_totalCardDebt)} долг по картам = ${rub(_netPosition)}
 
 💳 КРЕДИТНЫЕ КАРТЫ (ПАССИВЫ):
@@ -1002,7 +1007,7 @@ export async function executeAction(action: BotAction): Promise<void> {
   const snapLabel: Record<string,string> = {
     add_expense:'трата',delete_expense:'удаление',add_client:'клиент',add_goal:'цель',
     mark_goal_bought:'покупка',mark_salary:'зарплата',mark_single_fixed:'постоянная',
-    mark_fixed_paid:'все постоянные',mark_loan_paid:'кредит',early_repay:'досрочное',pay_card_debt:'погашение карты',
+    mark_fixed_paid:'все постоянные',mark_loan_paid:'кредит',early_repay:'досрочное',pay_card_debt:'погашение карты',update_cash:'наличные',
     add_income_event:'доход',set_balance:'баланс',close_month:'закрытие',
     mark_recurring_received:'регулярный доход',
     update_settings:'настройки',add_fixed_cost:'+постоянная',
@@ -1679,6 +1684,21 @@ export async function executeAction(action: BotAction): Promise<void> {
     await s.from('users').update({ debit_balance: newBal, debit_updated_at: new Date().toISOString() }).eq('id', USER_ID)
     await recordDebitChange(s, Number(u?.debit_balance ?? 0), newBal, `Мультидневная: ${action.description ?? action.category} (${action.covers_days}д)`, 'expense')
 
+  } else if (action.type === 'update_cash' && action.amount != null) {
+    // Наличные хранятся в bot_anchors: это факт без собственной таблицы.
+    // Производной величиной не является, поэтому запрет на якоря их не касается.
+    const delta = Boolean((action as { delta?: boolean }).delta)
+    let next = Math.round(action.amount)
+    if (delta) {
+      const { data: cur } = await s.from('bot_anchors').select('value')
+        .eq('user_id', USER_ID).eq('key', 'cash_on_hand').eq('month_key', 'global').maybeSingle()
+      next = Math.round(Number(cur?.value ?? 0)) + Math.round(action.amount)
+    }
+    await s.from('bot_anchors').upsert({
+      user_id: USER_ID, month_key: 'global', key: 'cash_on_hand',
+      value: String(Math.max(0, next)), updated_at: new Date().toISOString(),
+    }, { onConflict: 'user_id,month_key,key' })
+
   } else if (action.type === 'update_anchor' && action.month_key && action.key && action.value != null) {
     // Производные значения в якорях запрещены НА ЗАПИСЬ, а не только на чтение.
     // Иначе бот заново создаёт устаревшие копии таблиц: monthly_loan_payment
@@ -1886,7 +1906,7 @@ async function _getFinancialSummaryRaw(): Promise<string> {
     source: 'LIVE_DB_CORE',
     month_key: st.month_key,
     today: st.today, days_left: st.days_left,
-    debit_sber: st.debit_sber, tbank_debit: st.tbank_debit, total_liquid: st.liquid,
+    debit_sber: st.debit_sber, tbank_debit: st.tbank_debit, cash: st.cash, total_liquid: st.liquid,
     card_debt_total: st.card_debt,
     cards: st.cards,
     net_position: st.net_position,
@@ -2157,7 +2177,7 @@ async function handleTool(name: string, input: Record<string,unknown>): Promise<
   // модель обходила их, вызывая соседний инструмент (early_repay → update_loan).
   const MONEY_WRITES = new Set([
     'add_expense', 'add_multiday_expense', 'delete_expense', 'mark_card_payment',
-    'early_repay', 'mark_loan_paid', 'update_loan', 'mark_goal_bought', 'pay_card_debt',
+    'early_repay', 'mark_loan_paid', 'update_loan', 'mark_goal_bought', 'pay_card_debt', 'update_cash',
     'mark_fixed_paid', 'mark_fixed_paid_with_amount', 'mark_single_fixed',
     'set_balance', 'update_salary', 'mark_salary', 'mark_recurring_received',
     'record_vacation_pay', 'close_month', 'update_cashflow', 'add_income_event',

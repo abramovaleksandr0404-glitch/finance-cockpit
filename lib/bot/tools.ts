@@ -178,6 +178,12 @@ export const TOOLS = [
         priority: { type: 'number', description: '1=критично, 2=нормально, 3=когда-нибудь' },
       },
       required: ['description'] } },
+  { name: 'update_cash',
+    description: 'Изменить сумму наличных на руках. Наличные входят в ликвидность и дневной бюджет наравне с дебетом. Используй на «наличными X», «потратил наличкой», «снял с карты».',
+    input_schema: { type: 'object', properties: {
+      amount: { type: 'number', description: 'Новая сумма наличных; либо изменение, если delta=true (трата — отрицательное число)' },
+      delta: { type: 'boolean', description: 'true — прибавить/вычесть к текущим наличным вместо установки точной суммы' },
+    }, required: ['amount'] } },
   { name: 'update_anchor',
     description: 'Обновить якорное значение когда пользователь подтверждает новую верную цифру. Вызывай когда пользователь говорит: "аванс теперь X", "запомни что в июле Y дней", "исправь: ЗП = Z".',
     input_schema: { type: 'object',
