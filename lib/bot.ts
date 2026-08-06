@@ -3,6 +3,16 @@
  * Детерминированный расчёт через get_financial_summary. LLM не считает цифры.
  */
 let _lastUserMessage = '' // защита зачисления — реальный текст пользователя
+
+// Сослагательное наклонение: «что если», «если погасить», «предположим».
+// Такие вопросы требуют РАСЧЁТА, а не записи в БД. Без этой проверки бот
+// исполнял гипотетические сценарии как реальные операции.
+const HYPOTHETICAL = /\b(если|бы|предполож|допустим|сценари|представ|что будет|хватит ли|стоит ли|имеет смысл|выгодн)\b/i
+function isHypothetical(): boolean {
+  return HYPOTHETICAL.test(_lastUserMessage)
+}
+// Какая запись была заблокирована как гипотетическая — сообщаем модели
+let _lastWriteBlocked = ''
 import { createClient, SupabaseClient } from '@supabase/supabase-js'
 import { analyzeDecision, suggestEarlyRepayment, computeWorkingDays, computeVacationAdjustment, computeCreditBurden, computeOptimalRepayment } from './calc'
 import { plannerTools, plannerSummaryTool, handlePlannerTool, PLANNER_TOOL_NAMES } from './planner'
@@ -1557,6 +1567,7 @@ export async function executeAction(action: BotAction): Promise<void> {
     await s.from('goals').insert({user_id:USER_ID,name:action.name,amount:Math.round(action.amount),month_key:action.month_key??null,sort_order:99})
 
   } else if (action.type === 'mark_goal_bought' && action.name) {
+    if (isHypothetical()) { console.log('[mark_goal_bought] ЗАБЛОКИРОВАНО: гипотетический вопрос'); _lastWriteBlocked = 'mark_goal_bought'; return }
     const { data:goal } = await s.from('goals').select('id,amount').eq('user_id',USER_ID).ilike('name',`%${action.name}%`).maybeSingle()
     if (goal) {
       await s.from('goals').update({purchased:true,purchased_at:new Date().toISOString().split('T')[0]}).eq('id',goal.id)
@@ -1683,6 +1694,7 @@ export async function executeAction(action: BotAction): Promise<void> {
 
   // ════════════ КРЕДИТЫ И ДОСРОЧНЫЕ ПЛАТЕЖИ ════════════════════════
   } else if (action.type === 'mark_loan_paid' && action.name) {
+    if (isHypothetical()) { console.log('[mark_loan_paid] ЗАБЛОКИРОВАНО: гипотетический вопрос'); _lastWriteBlocked = 'mark_loan_paid'; return }
     const { data:loan } = await s.from('loans').select('*').eq('user_id',USER_ID).ilike('name',`%${action.name}%`).maybeSingle()
     if (loan && loan.paid_month !== monthKey) {
       const pay = Number(loan.min_payment)
@@ -1697,6 +1709,11 @@ export async function executeAction(action: BotAction): Promise<void> {
     }
 
   } else if (action.type === 'early_repay' && action.name && action.amount) {
+    if (isHypothetical()) {
+      console.log('[early_repay] ЗАБЛОКИРОВАНО: вопрос сослагательный, нужен расчёт а не запись')
+      _lastWriteBlocked = 'early_repay'
+      return
+    }
     const { data:loan } = await s.from('loans').select('*').eq('user_id',USER_ID).ilike('name',`%${action.name}%`).maybeSingle()
     if (loan) {
       const newPrincipal = Math.max(0, Number(loan.principal) - action.amount)
@@ -2720,7 +2737,17 @@ async function handleTool(name: string, input: Record<string,unknown>): Promise<
   }
   // DB-writing tools
   _lastCorrectionRejected = false
+  _lastWriteBlocked = ''
   await executeAction({ type: name, ...input } as BotAction)
+  if (_lastWriteBlocked) {
+    const blocked = _lastWriteBlocked
+    _lastWriteBlocked = ''
+    return JSON.stringify({
+      saved: false,
+      reason: `Операция «${blocked}» НЕ выполнена: вопрос задан в сослагательном наклонении («если», «предположим», «стоит ли»).`,
+      what_to_do: 'Это запрос на РАСЧЁТ, а не на изменение данных. Посчитай сценарий и покажи результат, явно указав что это прогноз и данные не изменены. Если пользователь захочет применить — он скажет утвердительно.',
+    })
+  }
   if (name === 'save_correction' && _lastCorrectionRejected) {
     return JSON.stringify({
       saved: false,
