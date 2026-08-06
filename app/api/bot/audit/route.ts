@@ -63,6 +63,15 @@ export async function GET(req: Request) {
   }
 
   const deleted = { corrections: 0, memories: 0, anchors: 0 }
+
+  // Точечное удаление конкретных записей памяти: ?memids=uuid,uuid
+  const memIds = (new URL(req.url).searchParams.get('memids') ?? '')
+    .split(',').map(s => s.trim()).filter(Boolean)
+  if (memIds.length) {
+    await db.from('bot_memories').delete().eq('user_id', USER_ID).in('id', memIds)
+    deleted.memories += memIds.length
+  }
+
   if (doCleanup) {
     if (junk.length) {
       await db.from('bot_corrections').delete().in('id', junk.map(c => c.id))
@@ -90,7 +99,7 @@ export async function GET(req: Request) {
     memories_total: memories?.length ?? 0,
     memories_dupes: memDupes.length,
     memories_dupes_list: memDupes,
-    memories_survivors: survivors.map(s => s.content.slice(0, 130)),
+    memories_survivors: survivors.map(s => ({ id: s.id, text: s.content.slice(0, 130) })),
     state: {
       month_key: monthKey,
       salary_net: user?.salary_net,
