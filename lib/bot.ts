@@ -2738,6 +2738,25 @@ async function handleTool(name: string, input: Record<string,unknown>): Promise<
   // DB-writing tools
   _lastCorrectionRejected = false
   _lastWriteBlocked = ''
+  // Централизованная защита: на сослагательный вопрос НИ ОДИН инструмент,
+  // меняющий деньги, не должен сработать. Точечных проверок недостаточно —
+  // модель обходила их, вызывая соседний инструмент (early_repay → update_loan).
+  const MONEY_WRITES = new Set([
+    'add_expense', 'add_multiday_expense', 'delete_expense', 'mark_card_payment',
+    'early_repay', 'mark_loan_paid', 'update_loan', 'mark_goal_bought',
+    'mark_fixed_paid', 'mark_fixed_paid_with_amount', 'mark_single_fixed',
+    'set_balance', 'update_salary', 'mark_salary', 'mark_recurring_received',
+    'record_vacation_pay', 'close_month', 'update_cashflow', 'add_income_event',
+    'add_fixed_cost', 'remove_fixed_cost', 'edit_fixed_cost', 'update_revenue',
+  ])
+  if (MONEY_WRITES.has(name) && isHypothetical()) {
+    console.log(`[guard] ${name} заблокирован: сослагательный вопрос`)
+    return JSON.stringify({
+      saved: false,
+      reason: `Операция «${name}» НЕ выполнена: вопрос сослагательный («если», «предположим», «стоит ли», «хватит ли»).`,
+      what_to_do: 'Это запрос на РАСЧЁТ. Посчитай сценарий и покажи результат, прямо указав что данные НЕ изменены. Для применения пользователь скажет утвердительно («погаси», «запиши», «отметь»).',
+    })
+  }
   await executeAction({ type: name, ...input } as BotAction)
   if (_lastWriteBlocked) {
     const blocked = _lastWriteBlocked
