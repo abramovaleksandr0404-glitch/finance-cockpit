@@ -9,6 +9,9 @@ let _lastUserMessage = '' // защита зачисления — реальн�
 // исполнял гипотетические сценарии как реальные операции.
 const HYPOTHETICAL = /\b(если|бы|предполож|допустим|сценари|представ|что будет|хватит ли|стоит ли|имеет смысл|выгодн)\b/i
 function isHypothetical(): boolean {
+  // Пустое значение = входная точка не выставила текст. Считаем ситуацию
+  // подозрительной и блокируем запись: лучше переспросить, чем испортить данные.
+  if (!_lastUserMessage) return true
   return HYPOTHETICAL.test(_lastUserMessage)
 }
 // Какая запись была заблокирована как гипотетическая — сообщаем модели
@@ -2321,6 +2324,9 @@ function routeModel(text: string): 'haiku' | 'sonnet' {
 // Версия processWithModel для тестов: НЕ сохраняет историю, НЕ загрязняет bot_messages
 export async function processWithModelForTest(text: string, _chatId: number): Promise<string> {
   resetReqUsage()
+  // Без этой строки isHypothetical() читал пустое значение и защита от
+  // сослагательных вопросов в тестовом пути была молча отключена.
+  _lastUserMessage = text
   if (!process.env.ANTHROPIC_API_KEY) return '⚠️ Добавь ANTHROPIC_API_KEY в Vercel.'
   const model = routeModel(text)
   const needAnalysis = /проанализир|анализ трат|паттерн/i.test(text)
