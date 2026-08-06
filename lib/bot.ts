@@ -82,6 +82,34 @@ export async function saveHistory(chatId: number, role: 'user'|'assistant', cont
 export async function logMessage(chatId: number, role: 'user'|'assistant', content: string, msgType = 'text') {
   await db().from('bot_messages').insert({ chat_id: chatId, user_id: USER_ID, role, content, msg_type: msgType }).then(()=>{})
 }
+// Отбивка о деплое без внешних вебхуков и CI.
+// Vercel прокидывает SHA коммита в окружение. Сравниваем с последним известным
+// в bot_anchors: разошлись — значит выкатилась новая версия, шлём уведомление.
+export async function checkDeployNotification(chatId: number): Promise<void> {
+  const sha = process.env.VERCEL_GIT_COMMIT_SHA
+  if (!sha) return
+  try {
+    const s = db()
+    const { data: known } = await s.from('bot_anchors')
+      .select('value').eq('user_id', USER_ID).eq('key', 'last_deploy_sha').maybeSingle()
+    if (known?.value === sha) return
+
+    // Первый запуск: только запоминаем, не спамим историей деплоев
+    const isFirst = !known
+    await s.from('bot_anchors').upsert({
+      user_id: USER_ID, key: 'last_deploy_sha', value: sha,
+      month_key: 'global', updated_at: new Date().toISOString(),
+    }, { onConflict: 'user_id,key,month_key' })
+    if (isFirst) return
+
+    const msg = (process.env.VERCEL_GIT_COMMIT_MESSAGE ?? '').split('\n')[0].slice(0, 300)
+    await sendTelegram(chatId, `🚀 *Обновление задеплоено*\n\n${msg || 'без описания'}\n\n\`${sha.slice(0, 8)}\``)
+  } catch (e) {
+    console.error('[deploy-notify] ', e)
+  }
+}
+
+
 export async function storeChatId(chatId: number) {
   await db().from('users').update({ telegram_chat_id: chatId }).eq('id', USER_ID)
 }

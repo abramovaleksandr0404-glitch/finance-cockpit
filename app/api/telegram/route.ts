@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { processMessage, processImage, sendTelegram, transcribeVoice, storeChatId, executeAction } from '@/lib/bot'
+import { processMessage, processImage, sendTelegram, transcribeVoice, storeChatId, executeAction, checkDeployNotification } from '@/lib/bot'
 
 const WEBHOOK_SECRET = process.env.BOT_WEBHOOK_SECRET
 
@@ -57,6 +57,8 @@ export async function POST(req: Request) {
 
   // Сохранить chat_id для утреннего дежурства
   storeChatId(chatId).catch(() => {})
+  // Новая версия выкачена — сообщаем один раз, не блокируя ответ
+  checkDeployNotification(chatId).catch(() => {})
 
   try {
     // ── Голосовое сообщение ──────────────────────────────────
