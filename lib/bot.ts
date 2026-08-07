@@ -1066,6 +1066,28 @@ export async function executeAction(action: BotAction): Promise<void> {
       credit_tbank: 'Т-Банк', credit_sber: 'Сбер кредитка', split: 'Яндекс Сплит',
     }
 
+    // Наличные — отдельная ветка. Без неё src='cash' попадал бы в блок карт
+    // ниже (условие src !== 'debit') и ошибочно увеличивал долг Т-Банка.
+    if (src === 'cash') {
+      const { data: cur } = await s.from('bot_anchors').select('value')
+        .eq('user_id', USER_ID).eq('key', 'cash_on_hand').eq('month_key', 'global').maybeSingle()
+      const left = Math.max(0, Math.round(Number(cur?.value ?? 0)) - Math.round(action.amount))
+      await s.from('bot_anchors').upsert({
+        user_id: USER_ID, month_key: 'global', key: 'cash_on_hand',
+        value: String(left), updated_at: new Date().toISOString(),
+      }, { onConflict: 'user_id,month_key,key' })
+      await s.from('expenses').insert({
+        user_id: USER_ID, month_key: monthKey,
+        expense_date: new Date().toISOString().split('T')[0],
+        category: action.category ?? 'Прочее',
+        amount: Math.round(action.amount),
+        description: action.description ?? null,
+        source_type: 'cash',
+      })
+      invalidateCache('core_state', 'context', 'fin_summary', 'loans_summary')
+      return
+    }
+
     if (src !== 'debit') {
       const cardName = CARD_NAMES[src] ?? 'Т-Банк'
       const { data: card } = await s.from('cards').select('id,current_debt')
@@ -1129,6 +1151,18 @@ export async function executeAction(action: BotAction): Promise<void> {
       await s.from('expenses').delete().eq('id',exp.id)
       // Трата с карты — возвращаем на карту, а не на дебет.
       // Раньше любое удаление зачисляло деньги на дебет и завышало баланс.
+      // Трата наличными — возвращаем в наличные, иначе удаление завысило бы дебет
+      if ((exp as { source_type?: string }).source_type === 'cash') {
+        const { data: cur } = await s.from('bot_anchors').select('value')
+          .eq('user_id', USER_ID).eq('key', 'cash_on_hand').eq('month_key', 'global').maybeSingle()
+        await s.from('bot_anchors').upsert({
+          user_id: USER_ID, month_key: 'global', key: 'cash_on_hand',
+          value: String(Math.round(Number(cur?.value ?? 0)) + Number(exp.amount)),
+          updated_at: new Date().toISOString(),
+        }, { onConflict: 'user_id,month_key,key' })
+        invalidateCache('core_state', 'context', 'fin_summary', 'loans_summary')
+        return
+      }
       if ((exp as { source_type?: string }).source_type === 'card') {
         const { data: cardRow } = await s.from('cards').select('id,current_debt')
           .eq('user_id', USER_ID).gt('current_debt', 0)

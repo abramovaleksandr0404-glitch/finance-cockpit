@@ -3,8 +3,8 @@
 import { plannerTools, plannerSummaryTool } from '../planner'
 
 export const TOOLS = [
-  { name:'add_expense', description:'Записать трату С ЛЮБОГО источника (дебет ИЛИ кредитная карта). ЕДИНСТВЕННЫЙ инструмент для трат — не комбинируй с mark_card_payment, иначе трата запишется дважды. Обязательно укажи source; если пользователь не сказал откуда — спроси.',
-    input_schema:{type:'object',properties:{amount:{type:'number'},category:{type:'string',enum:['Еда и кафе','Транспорт','Здоровье','Развлечения','Одежда','Инвестиции','Прочее']},description:{type:'string'},source:{type:'string',enum:['debit','credit_tbank','credit_sber','split'],description:'Откуда списано: debit — Сбер дебет (уменьшает баланс); credit_tbank / credit_sber / split — кредитная карта (растёт долг, дебет не трогается)'}},required:['amount','source']} },
+  { name:'add_expense', description:'Записать трату С ЛЮБОГО источника (дебет, наличные ИЛИ кредитная карта). ЕДИНСТВЕННЫЙ инструмент для трат — не комбинируй с mark_card_payment или update_cash, иначе трата запишется дважды. Обязательно укажи source; если пользователь не сказал откуда — спроси.',
+    input_schema:{type:'object',properties:{amount:{type:'number'},category:{type:'string',enum:['Еда и кафе','Транспорт','Здоровье','Развлечения','Одежда','Инвестиции','Прочее']},description:{type:'string'},source:{type:'string',enum:['debit','cash','credit_tbank','credit_sber','split'],description:'Откуда списано: debit — Сбер дебет (уменьшает баланс); cash — наличные на руках (уменьшает наличные); credit_tbank / credit_sber / split — кредитная карта (растёт долг, дебет не трогается)'}},required:['amount','source']} },
   { name:'delete_expense', description:'Удалить трату. По умолчанию последнюю (id="last") или по фрагменту id.',
     input_schema:{type:'object',properties:{id:{type:'string'}}} },
   { name:'add_client', description:'Записать закрытого клиента/сделку. Грейд g3/g4/g56/g78/g9/g10.',
