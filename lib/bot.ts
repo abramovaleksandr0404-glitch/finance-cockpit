@@ -2623,7 +2623,7 @@ async function processWithModel(text: string, chatId: number, model: 'haiku'|'so
     isLoans ? getLoansSummaryJson().catch(() => '') : Promise.resolve(''),
   ])
   const fullContext = context + (analysis ? '\n\n' + analysis : '')
-  const modelId = model === 'sonnet' ? 'claude-sonnet-4-6' : 'claude-haiku-4-5-20251001'
+  const modelId = model === 'sonnet' ? 'claude-sonnet-5' : 'claude-haiku-4-5-20251001'
   const systemBlocks: unknown[] = [
     { type:'text', text:SYSTEM_PROMPT, cache_control:{type:'ephemeral'} },
     { type:'text', text:'\n\nКОНТЕКСТ:\n'+fullContext },
@@ -2690,7 +2690,7 @@ export async function processWithModelForTest(text: string, _chatId: number): Pr
     isLoans ? getLoansSummaryJson().catch(() => '') : Promise.resolve(''),
   ])
   const fullContext = context + (analysis ? '\n\n' + analysis : '')
-  const modelId = model === 'sonnet' ? 'claude-sonnet-4-6' : 'claude-haiku-4-5-20251001'
+  const modelId = model === 'sonnet' ? 'claude-sonnet-5' : 'claude-haiku-4-5-20251001'
   const systemBlocks: unknown[] = [
     { type:'text', text:SYSTEM_PROMPT, cache_control:{type:'ephemeral'} },
     { type:'text', text:'\n\nКОНТЕКСТ:\n'+fullContext },
@@ -2728,7 +2728,7 @@ export async function processImage(fileId: string, chatId: number, caption?: str
       ...history.map(h=>({role:h.role as 'user'|'assistant',content:h.content})),
       {role:'user',content:[{type:'image',source:{type:'base64',media_type:mime,data:base64}},{type:'text',text:userText}]}
     ]
-    const { text: reply } = await runToolLoop('claude-sonnet-4-6', withPrefixCache(systemBlocks), messages)
+    const { text: reply } = await runToolLoop('claude-sonnet-5', withPrefixCache(systemBlocks), messages)
     Promise.all([saveHistory(chatId,'user',`[фото: ${userText}]`), saveHistory(chatId,'assistant',reply)]).catch(()=>{})
     return reply
   } catch(err) { console.error('[vision]',err); return '❌ Ошибка чтения.' }
@@ -2748,7 +2748,7 @@ export async function generateMorningBriefing(isWeekly = false): Promise<string 
     method:'POST',
     headers:{'Content-Type':'application/json','x-api-key':process.env.ANTHROPIC_API_KEY!,'anthropic-version':'2023-06-01'},
     body:JSON.stringify(deepCleanSurrogates({
-      model: isWeekly ? 'claude-sonnet-4-6' : 'claude-haiku-4-5-20251001',
+      model: isWeekly ? 'claude-sonnet-5' : 'claude-haiku-4-5-20251001',
       max_tokens:800,
       system:[
         {type:'text',text:SYSTEM_PROMPT,cache_control:{type:'ephemeral'}},
