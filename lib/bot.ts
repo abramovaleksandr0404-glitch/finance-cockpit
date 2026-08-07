@@ -1545,6 +1545,11 @@ export async function executeAction(action: BotAction): Promise<void> {
     }
 
   } else if (action.type === 'set_balance' && action.account && action.amount != null) {
+    if (!/\d{3,}/.test(_lastUserMessage.replace(/\s/g, ''))) {
+      console.log('[set_balance] ЗАБЛОКИРОВАНО: нет суммы в сообщении пользователя')
+      _lastWriteBlocked = 'set_balance:no_amount_in_message'
+      return
+    }
     const field = action.account === 'sber' ? 'debit_balance' : 'tbank_debit'
     const { data:uBal } = await s.from('users').select('debit_balance,tbank_debit').eq('id',USER_ID).single()
     const prevBal = Number(action.account === 'sber' ? uBal?.debit_balance : uBal?.tbank_debit ?? 0)
@@ -1555,6 +1560,11 @@ export async function executeAction(action: BotAction): Promise<void> {
     await s.from('months').update({closed:true}).eq('user_id',USER_ID).eq('month_key',monthKey)
 
   } else if (action.type === 'add_fixed_cost' && action.name && action.amount) {
+    if (!/\d{3,}/.test(_lastUserMessage.replace(/\s/g, ''))) {
+      console.log('[add_fixed_cost] ЗАБЛОКИРОВАНО: нет суммы в сообщении пользователя')
+      _lastWriteBlocked = 'add_fixed_cost:no_amount_in_message'
+      return
+    }
     const { data:u } = await s.from('users').select('fixed_costs').eq('id',USER_ID).single()
     const fc = (u?.fixed_costs as {name:string;amount:number}[]) ?? []
     fc.push({name:action.name, amount:Math.round(action.amount)})
@@ -1569,6 +1579,13 @@ export async function executeAction(action: BotAction): Promise<void> {
     await updateAnchors(s)
 
   } else if (action.type === 'edit_fixed_cost' && action.name) {
+    // Защита нужна только если меняется СУММА — переименование без суммы
+    // не может испортить деньги, блокировать его было бы лишним.
+    if (action.amount && !/\d{3,}/.test(_lastUserMessage.replace(/\s/g, ''))) {
+      console.log('[edit_fixed_cost] ЗАБЛОКИРОВАНО: меняется сумма, но её нет в сообщении пользователя')
+      _lastWriteBlocked = 'edit_fixed_cost:no_amount_in_message'
+      return
+    }
     const { data:u } = await s.from('users').select('fixed_costs').eq('id',USER_ID).single()
     const fc = (u?.fixed_costs as {name:string;amount:number}[]) ?? []
     const idx = fc.findIndex(f => f.name.toLowerCase().includes((action.name??'').toLowerCase()))
@@ -1623,6 +1640,11 @@ export async function executeAction(action: BotAction): Promise<void> {
     }
 
   } else if (action.type === 'update_salary' && action.salary_net != null) {
+    if (!/\d{3,}/.test(_lastUserMessage.replace(/\s/g, ''))) {
+      console.log('[update_salary] ЗАБЛОКИРОВАНО: нет суммы в сообщении пользователя')
+      _lastWriteBlocked = 'update_salary:no_amount_in_message'
+      return
+    }
     const upd: Record<string, number> = { salary_net: Math.round(action.salary_net) }
     if (action.salary_gross != null) upd.salary_gross = Math.round(action.salary_gross)
     await s.from('users').update(upd).eq('id', USER_ID)
@@ -1755,6 +1777,11 @@ export async function executeAction(action: BotAction): Promise<void> {
     }
 
   } else if (action.type === 'update_cashflow') {
+    if (!/\d{3,}/.test(_lastUserMessage.replace(/\s/g, ''))) {
+      console.log('[update_cashflow] ЗАБЛОКИРОВАНО: нет суммы в сообщении пользователя')
+      _lastWriteBlocked = 'update_cashflow:no_amount_in_message'
+      return
+    }
     const monthKey3 = mk()
     const upd: Record<string, unknown> = {}
     if (action.adv_amount   != null) upd.salary_adv_amount = action.adv_amount
@@ -1767,6 +1794,11 @@ export async function executeAction(action: BotAction): Promise<void> {
     }
 
   } else if (action.type === 'update_revenue') {
+    if (!/\d{3,}/.test(_lastUserMessage.replace(/\s/g, ''))) {
+      console.log('[update_revenue] ЗАБЛОКИРОВАНО: нет суммы в сообщении пользователя')
+      _lastWriteBlocked = 'update_revenue:no_amount_in_message'
+      return
+    }
     const targetMk = action.month_key ?? (() => {
       const now = new Date(); const pm = new Date(now.getFullYear(), now.getMonth(), 1)
       pm.setMonth(pm.getMonth()-1)
@@ -2416,11 +2448,12 @@ async function handleTool(name: string, input: Record<string,unknown>): Promise<
   if (_lastWriteBlocked) {
     const blocked = _lastWriteBlocked
     _lastWriteBlocked = ''
-    if (blocked === 'update_loan:no_amount_in_message') {
+    if (blocked.endsWith(':no_amount_in_message')) {
+      const toolName = blocked.split(':')[0]
       return JSON.stringify({
         saved: false,
-        reason: 'update_loan НЕ выполнен: в сообщении пользователя нет суммы. Read-only вопросы (график, прогноз, "покажи") не повод менять данные кредита.',
-        what_to_do: 'Если это была just read-only команда (loan_forecast и т.п.) — просто ответь на неё, ничего не нужно "чинить" или "синхронизировать" в БД. Данные кредита уже верны, пока пользователь явно не прислал новую цифру от банка.',
+        reason: `${toolName} НЕ выполнен: в сообщении пользователя нет суммы. Read-only вопросы ("покажи", "график", "прогноз") не повод менять хранимые данные.`,
+        what_to_do: 'Если это был просто вопрос на чтение — ответь на него, ничего не нужно "чинить" или "синхронизировать" в БД. Данные уже верны, пока пользователь явно не прислал новую цифру.',
       })
     }
     return JSON.stringify({
