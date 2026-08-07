@@ -66,6 +66,23 @@ export async function GET(req: Request) {
   const deleted = { corrections: 0, memories: 0, anchors: 0 }
   const fixes: string[] = []
 
+  // ?restoreloans=name:principal:payment,name:principal:payment
+  // Точечное восстановление кредита без LLM — модель ранее меняла А/Б
+  // без единого следа в журнале, откатывать нужно напрямую.
+  const restoreSpec = new URL(req.url).searchParams.get('restoreloans') ?? ''
+  if (restoreSpec) {
+    for (const part of restoreSpec.split(',')) {
+      const [name, principal, payment] = part.split(':')
+      if (!name || !principal || !payment) continue
+      const { data: hit } = await db.from('loans').select('id')
+        .eq('user_id', USER_ID).ilike('name', `%${name}%`).maybeSingle()
+      if (hit) {
+        await db.from('loans').update({ principal: Number(principal), min_payment: Number(payment) }).eq('id', hit.id)
+        fixes.push(`${name}: тело=${principal}, платёж=${payment}`)
+      }
+    }
+  }
+
   // ?dropanchors=key1,key2 — точечно удалить якоря по ключу
   const dropKeys = (new URL(req.url).searchParams.get('dropanchors') ?? '')
     .split(',').map(x => x.trim()).filter(Boolean)

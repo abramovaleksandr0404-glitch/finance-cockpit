@@ -258,6 +258,19 @@ function annuityMonthsFor(principal: number, monthlyRate: number, payment: numbe
   if (payment <= interestOnly) return 999 // платёж не покрывает даже проценты — кредит не гасится
   return Math.ceil(Math.log(payment / (payment - interestOnly)) / Math.log(1 + monthlyRate))
 }
+// Остаточный срок ДО пересчёта: приоритет — сохранённая end_date, не формула.
+// Формула требует чтобы principal/payment были математически согласованы
+// (платёж покрывал бы проценты); если старые данные в БД чуть разошлись
+// (бывает после ручных правок), annuityMonthsFor может улететь в 999
+// месяцев или дать абсурдный результат. end_date — прямое число из
+// прошлого шага, не пересчитывается заново, поэтому надёжнее по построению.
+function monthsUntil(endDate: string | null): number | null {
+  if (!endDate) return null
+  const now = new Date()
+  const end = new Date(endDate)
+  const months = (end.getFullYear() - now.getFullYear()) * 12 + (end.getMonth() - now.getMonth())
+  return months > 0 && months < 600 ? months : null // 600 = защита от мусорных дат
+}
 function addMonths(dateStr: string | null, months: number): string {
   const base = dateStr ? new Date(dateStr) : new Date()
   const d = new Date(base.getFullYear(), base.getMonth() + months, 1)
@@ -1380,9 +1393,7 @@ export async function executeAction(action: BotAction): Promise<void> {
       const monthlyRate = Number(loan.rate) / 12
       const oldPayment = Number(loan.min_payment)
       const newPrincipal = Math.max(0, Number(loan.principal) - action.amount)
-      // Остаточный срок считаем от ТЕКУЩИХ цифр кредита, а не от end_date —
-      // end_date мог устареть, а principal/rate/payment живые.
-      const monthsBefore = annuityMonthsFor(Number(loan.principal), monthlyRate, oldPayment)
+      const monthsBefore = monthsUntil(loan.end_date as string | null) ?? annuityMonthsFor(Number(loan.principal), monthlyRate, oldPayment)
 
       let newPayment: number, newMonths: number
       if (mode === 'reduce_term') {
@@ -1392,12 +1403,17 @@ export async function executeAction(action: BotAction): Promise<void> {
         newMonths = monthsBefore
         newPayment = Math.round(annuityPaymentFor(newPrincipal, monthlyRate, newMonths) * 100) / 100
       }
-      const newEndDate = newPrincipal <= 0 ? new Date().toISOString().split('T')[0] : addMonths(null, newMonths)
+      // 999 — сигнальное значение "платёж не покрывает проценты", не реальный
+      // срок. Пропускать его в addMonths даёт дату через 80+ лет.
+      const monthsSane = newMonths >= 999 ? null : newMonths
+      const newEndDate = newPrincipal <= 0 ? new Date().toISOString().split('T')[0]
+        : monthsSane != null ? addMonths(null, monthsSane) : loan.end_date
 
       await s.from('loans').update({ principal: newPrincipal, min_payment: newPayment, end_date: newEndDate }).eq('id', loan.id)
       await appendLoanLog(s, loan.name, {
         type: 'early_repay', mode, amount: action.amount,
         principal_after: newPrincipal, payment_after: newPayment, end_date_after: newEndDate,
+        ...(monthsSane == null ? { warning: 'платёж не покрывает проценты — end_date не изменена, требует ручной проверки' } : {}),
       })
 
       const { data:u } = await s.from('users').select('debit_balance').eq('id',USER_ID).single()
@@ -1529,7 +1545,7 @@ export async function executeAction(action: BotAction): Promise<void> {
     }
 
   } else if (action.type === 'update_loan' && action.name) {
-    const { data:loan } = await s.from('loans').select('id,principal').eq('user_id',USER_ID).ilike('name',`%${action.name}%`).maybeSingle()
+    const { data:loan } = await s.from('loans').select('id,name,principal').eq('user_id',USER_ID).ilike('name',`%${action.name}%`).maybeSingle()
     if (loan) {
       const upd: Record<string,unknown> = {}
       // ЗАЩИТА: тело кредита 10к–5млн (отсекаем путаницу тело/переплата)
@@ -1543,6 +1559,9 @@ export async function executeAction(action: BotAction): Promise<void> {
       if (action.end_date) upd.end_date = action.end_date
       if (Object.keys(upd).length) {
         await s.from('loans').update(upd).eq('id', loan.id)
+        await appendLoanLog(s, loan.name, {
+          type: 'manual_update', fields: upd, principal_before: Number(loan.principal),
+        })
         await updateAnchors(s)
       }
     }
