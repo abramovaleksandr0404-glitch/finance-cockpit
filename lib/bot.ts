@@ -242,6 +242,46 @@ async function accrueLoansCore(s: SupabaseClient): Promise<void> {
   await Promise.all(updates.map(u => s.from('loans').update({ accrued_int: u.accrued_int, last_accrual: u.last_accrual }).eq('id', u.id).eq('user_id', USER_ID)))
 }
 
+// Аннуитет в обе стороны — раньше early_repay пропорционально масштабировал
+// платёж, что не совпадает НИ С ОДНИМ реальным сценарием банка (ни с
+// «уменьшить платёж», ни с «сократить срок»). Отсюда расхождения с выпиской.
+function annuityPaymentFor(principal: number, monthlyRate: number, months: number): number {
+  if (months <= 0) return principal
+  if (monthlyRate === 0) return principal / months
+  const k = Math.pow(1 + monthlyRate, months)
+  return (principal * monthlyRate * k) / (k - 1)
+}
+function annuityMonthsFor(principal: number, monthlyRate: number, payment: number): number {
+  if (principal <= 0) return 0
+  if (monthlyRate === 0) return Math.ceil(principal / payment)
+  const interestOnly = principal * monthlyRate
+  if (payment <= interestOnly) return 999 // платёж не покрывает даже проценты — кредит не гасится
+  return Math.ceil(Math.log(payment / (payment - interestOnly)) / Math.log(1 + monthlyRate))
+}
+function addMonths(dateStr: string | null, months: number): string {
+  const base = dateStr ? new Date(dateStr) : new Date()
+  const d = new Date(base.getFullYear(), base.getMonth() + months, 1)
+  return d.toISOString().split('T')[0]
+}
+// Журнал событий по кредиту — платежи и досрочные погашения в хронологии.
+// Хранится в bot_anchors (своей таблицы под это нет): ключ loan_log:<имя>,
+// значение — JSON-массив. Без него бот не может ответить «что произошло
+// с кредитом в этом месяце» иначе как гадая по текущим цифрам.
+async function appendLoanLog(s: SupabaseClient, loanName: string, event: Record<string, unknown>): Promise<void> {
+  const key = `loan_log:${loanName.toLowerCase()}`
+  const { data: cur } = await s.from('bot_anchors').select('value')
+    .eq('user_id', USER_ID).eq('month_key', 'global').eq('key', key).maybeSingle()
+  let log: Record<string, unknown>[] = []
+  try { log = cur?.value ? JSON.parse(String(cur.value)) : [] } catch { log = [] }
+  log.push({ date: new Date().toISOString().split('T')[0], ...event })
+  if (log.length > 20) log = log.slice(-20) // храним последние 20 событий, не бесконечно
+  await s.from('bot_anchors').upsert({
+    user_id: USER_ID, month_key: 'global', key, value: JSON.stringify(log),
+    updated_at: new Date().toISOString(),
+  }, { onConflict: 'user_id,month_key,key' })
+}
+
+
 export async function computeFinancialState(): Promise<FinancialState> {
   return cached('core_state', _computeFinancialStateRaw)
 }
@@ -1319,6 +1359,10 @@ export async function executeAction(action: BotAction): Promise<void> {
       const newBal = Math.round((prevBal-pay)*100)/100
       await s.from('users').update({debit_balance:newBal,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
       await recordDebitChange(s, prevBal, newBal, `Кредит: ${loan.name}`, 'loan')
+      await appendLoanLog(s, loan.name, {
+        type: 'scheduled_payment', amount: pay, to_principal: toPrincipal, to_interest: toInt,
+        principal_after: Math.max(0, Number(loan.principal) - toPrincipal),
+      })
     }
 
   } else if (action.type === 'early_repay' && action.name && action.amount) {
@@ -1329,15 +1373,38 @@ export async function executeAction(action: BotAction): Promise<void> {
     }
     const { data:loan } = await s.from('loans').select('*').eq('user_id',USER_ID).ilike('name',`%${action.name}%`).maybeSingle()
     if (loan) {
+      // mode определяет какой параметр банк держит постоянным — это РАЗНЫЕ
+      // сценарии, не приближение друг друга. Раньше платёж просто масштабировался
+      // пропорционально телу — не совпадало ни с одним реальным случаем.
+      const mode = (action as { mode?: string }).mode === 'reduce_payment' ? 'reduce_payment' : 'reduce_term'
+      const monthlyRate = Number(loan.rate) / 12
+      const oldPayment = Number(loan.min_payment)
       const newPrincipal = Math.max(0, Number(loan.principal) - action.amount)
-      const ratio = Number(loan.principal)>0 ? newPrincipal/Number(loan.principal) : 0
-      const newPayment = Math.round(Number(loan.min_payment)*ratio*100)/100
-      await s.from('loans').update({principal:newPrincipal,min_payment:newPayment}).eq('id',loan.id)
+      // Остаточный срок считаем от ТЕКУЩИХ цифр кредита, а не от end_date —
+      // end_date мог устареть, а principal/rate/payment живые.
+      const monthsBefore = annuityMonthsFor(Number(loan.principal), monthlyRate, oldPayment)
+
+      let newPayment: number, newMonths: number
+      if (mode === 'reduce_term') {
+        newPayment = oldPayment
+        newMonths = annuityMonthsFor(newPrincipal, monthlyRate, newPayment)
+      } else {
+        newMonths = monthsBefore
+        newPayment = Math.round(annuityPaymentFor(newPrincipal, monthlyRate, newMonths) * 100) / 100
+      }
+      const newEndDate = newPrincipal <= 0 ? new Date().toISOString().split('T')[0] : addMonths(null, newMonths)
+
+      await s.from('loans').update({ principal: newPrincipal, min_payment: newPayment, end_date: newEndDate }).eq('id', loan.id)
+      await appendLoanLog(s, loan.name, {
+        type: 'early_repay', mode, amount: action.amount,
+        principal_after: newPrincipal, payment_after: newPayment, end_date_after: newEndDate,
+      })
+
       const { data:u } = await s.from('users').select('debit_balance').eq('id',USER_ID).single()
       const prevBal = Number(u?.debit_balance??0)
       const newBal = Math.round((prevBal-action.amount)*100)/100
       await s.from('users').update({debit_balance:newBal,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
-      await recordDebitChange(s, prevBal, newBal, `Досрочное: ${loan.name}`, 'loan')
+      await recordDebitChange(s, prevBal, newBal, `Досрочное (${mode==='reduce_term'?'срок':'платёж'}): ${loan.name}`, 'loan')
     }
 
   } else if (action.type === 'pay_card_debt' && action.amount != null) {
@@ -1921,17 +1988,26 @@ async function _getLoansRaw(): Promise<string> {
   const s = db()
   const { data: loans } = await s.from('loans').select('name,principal,rate,min_payment,end_date,paid_month').eq('user_id', USER_ID).order('rate', { ascending: false })
   const mk2 = mk()
+  // Журнал последних событий по каждому кредиту — без него бот отвечает
+  // «что происходило» по памяти диалога и путает даты/суммы задним числом.
+  const { data: anchorRows } = await s.from('bot_anchors').select('key,value')
+    .eq('user_id', USER_ID).eq('month_key', 'global').like('key', 'loan_log:%')
+  const logByLoan: Record<string, unknown[]> = {}
+  for (const r of anchorRows ?? []) {
+    const nm = r.key.replace('loan_log:', '')
+    try { logByLoan[nm] = (JSON.parse(String(r.value)) as unknown[]).slice(-3) } catch { logByLoan[nm] = [] }
+  }
   const list = (loans ?? []).map((l: {name:string,principal:number,rate:number,min_payment:number,end_date:string,paid_month:string}) => {
     const principal = Math.round(Number(l.principal))
     const rate = Number(l.rate)
     const minPay = Math.round(Number(l.min_payment))
-    const monthlyRate = rate / 12
-    let monthsLeft = 0
-    if (minPay > principal * monthlyRate) {
-      monthsLeft = Math.ceil(-Math.log(1 - (principal * monthlyRate) / minPay) / Math.log(1 + monthlyRate))
-    }
+    const monthsLeft = annuityMonthsFor(principal, rate / 12, minPay)
     const overpay = Math.max(0, minPay * monthsLeft - principal)
-    return { name:l.name, principal, rate_percent:Math.round(rate*10000)/100, min_payment:minPay, end_date:l.end_date, paid_this_month:l.paid_month===mk2, months_left:monthsLeft, overpay_estimate:overpay }
+    return {
+      name:l.name, principal, rate_percent:Math.round(rate*10000)/100, min_payment:minPay,
+      end_date:l.end_date, paid_this_month:l.paid_month===mk2, months_left:monthsLeft, overpay_estimate:overpay,
+      recent_events: logByLoan[l.name.toLowerCase()] ?? [],
+    }
   })
   return JSON.stringify({
     source:'LIVE_DB',

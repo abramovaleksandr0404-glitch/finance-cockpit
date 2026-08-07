@@ -23,8 +23,12 @@ export const TOOLS = [
     input_schema:{type:'object',properties:{name:{type:'string'},actual_amount:{type:'number',description:'Фактически уплаченная сумма'}},required:['name','actual_amount']} },
   { name:'mark_loan_paid', description:'Отметить оплату ежемесячного платежа по кредиту (по названию).',
     input_schema:{type:'object',properties:{name:{type:'string'}},required:['name']} },
-  { name:'early_repay', description:'Досрочное погашение кредита: уменьшить тело на сумму, пересчитать платёж.',
-    input_schema:{type:'object',properties:{name:{type:'string'},amount:{type:'number'}},required:['name','amount']} },
+  { name:'early_repay', description:'Досрочное погашение кредита. Банк предлагает ДВА разных сценария — не путай их, это разные операции с разным результатом.',
+    input_schema:{type:'object',properties:{
+      name:{type:'string'},
+      amount:{type:'number'},
+      mode:{type:'string',enum:['reduce_term','reduce_payment'],description:'reduce_term (по умолчанию) — платёж НЕ меняется, срок сокращается. Используй на «сократить срок», «побыстрее закрыть», или если пользователь не уточнил. reduce_payment — срок НЕ меняется, платёж уменьшается. Используй ТОЛЬКО на явное «уменьшить платёж», «снизить ежемесячный».'},
+    },required:['name','amount','mode']} },
   { name:'manage_recurring_income', description:'Добавить или убрать регулярный доход (стипендия, фриланс, аренда и т.п.) из списка ожидаемых поступлений. Используй на «у меня теперь есть Х каждый месяц» или «Х больше не будет».',
     input_schema:{type:'object',properties:{
       action:{type:'string',enum:['add','remove'],description:'add — завести новый регулярный доход; remove — убрать полностью, его больше не будет никогда'},
