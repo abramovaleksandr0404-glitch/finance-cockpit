@@ -512,8 +512,15 @@ async function _getContextRaw(): Promise<string> {
       ])
       for (const r of rows) {
         if (DERIVED_KEYS.has(r.key)) continue
+        if (r.key.startsWith('owed_to_me:')) continue // отдельный блок ниже
         lines.push(`  ${r.key}: ${r.value}${r.formula ? ` (${r.formula})` : ''}`)
       }
+    }
+    // Долги ДРУГИХ людей передо мной — НЕ входят в ликвидность, деньги ещё не вернулись.
+    const owedRows = Object.values(anchorMap['global'] ?? {}).filter(r => r.key.startsWith('owed_to_me:'))
+    if (owedRows.length) {
+      lines.push('\n💸 МНЕ ДОЛЖНЫ (НЕ входит в ликвидность — деньги ещё не у меня):')
+      for (const r of owedRows) lines.push(`  ${r.key.replace('owed_to_me:', '')}: ${rub(Number(r.value))}`)
     }
     return lines.join('\n') + '\n'
   }
@@ -1007,7 +1014,7 @@ export async function executeAction(action: BotAction): Promise<void> {
   const snapLabel: Record<string,string> = {
     add_expense:'трата',delete_expense:'удаление',add_client:'клиент',add_goal:'цель',
     mark_goal_bought:'покупка',mark_salary:'зарплата',mark_single_fixed:'постоянная',
-    mark_fixed_paid:'все постоянные',mark_loan_paid:'кредит',early_repay:'досрочное',pay_card_debt:'погашение карты',update_cash:'наличные',
+    mark_fixed_paid:'все постоянные',mark_loan_paid:'кредит',early_repay:'досрочное',pay_card_debt:'погашение карты',update_cash:'наличные',manage_recurring_income:'регулярный доход',manage_debt_owed_to_me:'долг передо мной',
     add_income_event:'доход',set_balance:'баланс',close_month:'закрытие',
     mark_recurring_received:'регулярный доход',
     update_settings:'настройки',add_fixed_cost:'+постоянная',
@@ -1684,6 +1691,47 @@ export async function executeAction(action: BotAction): Promise<void> {
     await s.from('users').update({ debit_balance: newBal, debit_updated_at: new Date().toISOString() }).eq('id', USER_ID)
     await recordDebitChange(s, Number(u?.debit_balance ?? 0), newBal, `Мультидневная: ${action.description ?? action.category} (${action.covers_days}д)`, 'expense')
 
+  } else if (action.type === 'manage_recurring_income') {
+    const act = String((action as { action?: string }).action ?? '')
+    const nm = String(action.name ?? '').trim()
+    if (!nm) return
+    const { data: uRow } = await s.from('users').select('recurring_incomes').eq('id', USER_ID).single()
+    const list = (uRow?.recurring_incomes as { name: string; amount: number; day: number }[]) ?? []
+    let next = list
+    if (act === 'add') {
+      next = [...list.filter(r => r.name.toLowerCase() !== nm.toLowerCase()),
+        { name: nm, amount: Math.round(Number(action.amount ?? 0)), day: Math.round(Number((action as { day?: number }).day ?? 1)) }]
+    } else if (act === 'remove') {
+      next = list.filter(r => r.name.toLowerCase() !== nm.toLowerCase())
+    }
+    await s.from('users').update({ recurring_incomes: next }).eq('id', USER_ID)
+
+  } else if (action.type === 'manage_debt_owed_to_me') {
+    // Долг ДРУГОГО человека передо мной — зеркало loan_from_alyona, но с обратным знаком.
+    // Хранится в bot_anchors: одна запись на человека, ключ owed_to_me:<имя>.
+    const who = String((action as { who?: string }).who ?? '').trim()
+    const act = String((action as { action?: string }).action ?? '')
+    if (!who || action.amount == null) return
+    const key = `owed_to_me:${who.toLowerCase()}`
+    if (act === 'add') {
+      await s.from('bot_anchors').upsert({
+        user_id: USER_ID, month_key: 'global', key,
+        value: String(Math.round(action.amount)), updated_at: new Date().toISOString(),
+      }, { onConflict: 'user_id,month_key,key' })
+    } else if (act === 'repaid') {
+      const { data: cur } = await s.from('bot_anchors').select('value')
+        .eq('user_id', USER_ID).eq('month_key', 'global').eq('key', key).maybeSingle()
+      const left = Math.max(0, Math.round(Number(cur?.value ?? 0)) - Math.round(action.amount))
+      if (left === 0) {
+        await s.from('bot_anchors').delete().eq('user_id', USER_ID).eq('month_key', 'global').eq('key', key)
+      } else {
+        await s.from('bot_anchors').upsert({
+          user_id: USER_ID, month_key: 'global', key,
+          value: String(left), updated_at: new Date().toISOString(),
+        }, { onConflict: 'user_id,month_key,key' })
+      }
+    }
+
   } else if (action.type === 'update_cash' && action.amount != null) {
     // Наличные хранятся в bot_anchors: это факт без собственной таблицы.
     // Производной величиной не является, поэтому запрет на якоря их не касается.
@@ -2177,7 +2225,7 @@ async function handleTool(name: string, input: Record<string,unknown>): Promise<
   // модель обходила их, вызывая соседний инструмент (early_repay → update_loan).
   const MONEY_WRITES = new Set([
     'add_expense', 'add_multiday_expense', 'delete_expense', 'mark_card_payment',
-    'early_repay', 'mark_loan_paid', 'update_loan', 'mark_goal_bought', 'pay_card_debt', 'update_cash',
+    'early_repay', 'mark_loan_paid', 'update_loan', 'mark_goal_bought', 'pay_card_debt', 'update_cash', 'manage_recurring_income', 'manage_debt_owed_to_me',
     'mark_fixed_paid', 'mark_fixed_paid_with_amount', 'mark_single_fixed',
     'set_balance', 'update_salary', 'mark_salary', 'mark_recurring_received',
     'record_vacation_pay', 'close_month', 'update_cashflow', 'add_income_event',
