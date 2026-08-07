@@ -1,4 +1,4 @@
-import { processWithModelForTest, _reqUsage } from '@/lib/bot'
+import { processWithModelForTest } from '@/lib/bot'
 
 export const dynamic = 'force-dynamic'
 
@@ -30,8 +30,9 @@ export async function POST(req: Request) {
   }
   // TEST_CHAT_ID: фейковый id — тестовые сообщения НЕ попадают в историю пользователя
   const TEST_CHAT_ID = -999999
-  const response = await processWithModelForTest(message, TEST_CHAT_ID)
-  const usage = { ..._reqUsage }
+  // usage возвращается вместе с ответом: состояние теперь привязано к
+  // запросу и снаружи контекста уже недоступно.
+  const { text: response, usage } = await processWithModelForTest(message, TEST_CHAT_ID)
   return Response.json({
     response,
     ok: true,

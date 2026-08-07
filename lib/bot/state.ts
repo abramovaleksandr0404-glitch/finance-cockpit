@@ -1,84 +1,111 @@
-// ЕДИНСТВЕННЫЙ владелец изменяемого состояния бота.
+// Состояние, ПРИВЯЗАННОЕ К ЗАПРОСУ, а не к процессу.
 //
-// ПОЧЕМУ ЧЕРЕЗ ФУНКЦИИ, А НЕ ПРОСТО export let:
-// В ES-модулях импортированную переменную НЕЛЬЗЯ присвоить — только прочитать.
-// Если бы actions.ts объявил собственную копию флага, а bot.ts читал свою,
-// они бы молча разошлись: запись в одном файле не видна в другом, при этом
-// TypeScript не выдаёт ни единой ошибки. Ровно так упал прод в июне.
-// Поэтому переменные живут ТОЛЬКО здесь, а доступ — через set/take/get.
-//
-// НЕ добавлять сюда бизнес-логику. Только хранение и доступ.
+// ПОЧЕМУ НЕ ПРОСТО module-level let:
+// Serverless переиспользует разогретый контейнер. Два одновременных запроса
+// делят один модуль — второй перезаписывает userMessage первого, и защита
+// читает ЧУЖОЙ текст. Проверено экспериментально: гипотетический вопрос
+// «если погасить 20000» + параллельная запись → погашение исполнилось,
+// потому что в момент проверки в переменной лежал текст другого запроса.
+// AsyncLocalStorage даёт каждому запросу свою копию без переписывания
+// сигнатур всех функций по цепочке.
 
-// ── Текст последнего сообщения пользователя ──────────────────────────────
-// Пишется точками входа (processWithModel / processWithModelForTest),
-// читается защитами внутри executeAction.
-let _lastUserMessage = ''
-export function setLastUserMessage(text: string): void { _lastUserMessage = text }
-export function getLastUserMessage(): string { return _lastUserMessage }
+import { AsyncLocalStorage } from 'node:async_hooks'
 
-// Сослагательное наклонение: «что если», «если погасить», «предположим».
-// Такие вопросы требуют РАСЧЁТА, а не записи в БД. Без этой проверки бот
-// исполнял гипотетические сценарии как реальные операции.
-const HYPOTHETICAL = /\b(если|бы|предполож|допустим|сценари|представ|что будет|хватит ли|стоит ли|имеет смысл|выгодн)\b/i
-export function isHypothetical(): boolean {
-  // Пустое значение = входная точка не выставила текст. Считаем ситуацию
-  // подозрительной и блокируем запись: лучше переспросить, чем испортить данные.
-  if (!_lastUserMessage) return true
-  return HYPOTHETICAL.test(_lastUserMessage)
+type ReqState = {
+  userMessage: string
+  // Системный вызов (cron): проверок по тексту пользователя нет, т.к. текста
+  // и не было. Иначе fail-safe заблокировал бы легитимные автосписания.
+  trusted: boolean
+  writeBlocked: string
+  correctionRejected: boolean
+  memoryOutcome: string
+  actionUnrecognized: string
+  usage: Record<string, number>
+  lastUsage: Record<string, number>
 }
 
-// Есть ли в сообщении пользователя число, похожее на сумму. Без него
-// правка данных не может быть настоящей коррекцией — значит read-only
-// вопрос спровоцировал запись, и её надо заблокировать.
+function fresh(trusted: boolean): ReqState {
+  return { userMessage: '', trusted, writeBlocked: '', correctionRejected: false,
+    memoryOutcome: '', actionUnrecognized: '', usage: {}, lastUsage: {} }
+}
+
+const als = new AsyncLocalStorage<ReqState>()
+
+// Вне контекста запроса (cron) возвращаем СВЕЖИЙ объект каждый раз —
+// не общий, чтобы параллельные кроны тоже не пересекались.
+function cur(): ReqState {
+  return als.getStore() ?? fresh(true)
+}
+
+// Оборачивает обработку одного пользовательского сообщения.
+// Всё внутри получает изолированное состояние.
+export function runInRequest<T>(userMessage: string, fn: () => Promise<T>): Promise<T> {
+  const st = fresh(false)
+  st.userMessage = userMessage
+  return als.run(st, fn)
+}
+
+// ── Текст сообщения пользователя ─────────────────────────────────────────
+export function getLastUserMessage(): string { return cur().userMessage }
+
+// Сослагательное наклонение: «что если», «если погасить», «предположим».
+// Такие вопросы требуют РАСЧЁТА, а не записи в БД.
+const HYPOTHETICAL = /\b(если|бы|предполож|допустим|сценари|представ|что будет|хватит ли|стоит ли|имеет смысл|выгодн)\b/i
+export function isHypothetical(): boolean {
+  const st = cur()
+  if (st.trusted) return false // системный вызов — блокировать нечего
+  // Пустой текст внутри пользовательского запроса = что-то пошло не так.
+  // Блокируем: лучше переспросить, чем испортить данные.
+  if (!st.userMessage) return true
+  return HYPOTHETICAL.test(st.userMessage)
+}
+
+// Есть ли в сообщении число, похожее на сумму. Без него правка данных не
+// может быть настоящей коррекцией — значит read-only вопрос спровоцировал запись.
 export function userMessageHasAmount(): boolean {
-  return /\d{3,}/.test(_lastUserMessage.replace(/\s/g, ''))
+  const st = cur()
+  if (st.trusted) return true // системный вызов не проверяем по тексту
+  return /\d{3,}/.test(st.userMessage.replace(/\s/g, ''))
 }
 
 // ── Флаги результата последнего действия ─────────────────────────────────
-// Пишутся в executeAction, читаются в handleTool. Семантика везде
-// «прочитать и сбросить», поэтому take* вместо get*.
+export function setWriteBlocked(reason: string): void { cur().writeBlocked = reason }
+export function takeWriteBlocked(): string { const s = cur(); const v = s.writeBlocked; s.writeBlocked = ''; return v }
 
-let _lastWriteBlocked = ''
-export function setWriteBlocked(reason: string): void { _lastWriteBlocked = reason }
-export function takeWriteBlocked(): string { const v = _lastWriteBlocked; _lastWriteBlocked = ''; return v }
+export function setCorrectionRejected(): void { cur().correctionRejected = true }
+export function getCorrectionRejected(): boolean { return cur().correctionRejected }
 
-let _lastCorrectionRejected = false
-export function setCorrectionRejected(): void { _lastCorrectionRejected = true }
-export function getCorrectionRejected(): boolean { return _lastCorrectionRejected }
+export function setMemoryOutcome(outcome: string): void { cur().memoryOutcome = outcome }
+export function takeMemoryOutcome(): string { const s = cur(); const v = s.memoryOutcome; s.memoryOutcome = ''; return v }
 
-let _lastMemoryOutcome = ''
-export function setMemoryOutcome(outcome: string): void { _lastMemoryOutcome = outcome }
-export function takeMemoryOutcome(): string { const v = _lastMemoryOutcome; _lastMemoryOutcome = ''; return v }
+export function setActionUnrecognized(actionType: string): void { cur().actionUnrecognized = actionType }
+export function takeActionUnrecognized(): string { const s = cur(); const v = s.actionUnrecognized; s.actionUnrecognized = ''; return v }
 
-let _lastActionUnrecognized = ''
-export function setActionUnrecognized(actionType: string): void { _lastActionUnrecognized = actionType }
-export function takeActionUnrecognized(): string { const v = _lastActionUnrecognized; _lastActionUnrecognized = ''; return v }
-
-// Сброс перед каждым вызовом executeAction — иначе прошлый результат
-// протечёт в следующий инструмент.
 export function resetActionFlags(): void {
-  _lastCorrectionRejected = false
-  _lastMemoryOutcome = ''
-  _lastWriteBlocked = ''
-  _lastActionUnrecognized = ''
+  const s = cur()
+  s.correctionRejected = false
+  s.memoryOutcome = ''
+  s.writeBlocked = ''
+  s.actionUnrecognized = ''
 }
 
 // ── Учёт токенов ─────────────────────────────────────────────────────────
-// _reqUsage копится за ВЕСЬ запрос (все раунды tool-loop), _lastUsage —
-// только последний раунд. Без накопления стоимость занижалась в 3-5 раз.
-export let _lastUsage: Record<string, number> = {}
-export let _reqUsage: Record<string, number> = {}
-export function resetReqUsage(): void { _reqUsage = {} }
+// Копится за ВЕСЬ запрос (все раунды tool-loop). Читается через getReqUsage()
+// ВНУТРИ контекста — снаружи состояние уже недоступно, это осознанно.
+export function resetReqUsage(): void { cur().usage = {} }
+export function getReqUsage(): Record<string, number> { return { ...cur().usage } }
 export function recordUsage(usage: Record<string, unknown>): void {
-  _lastUsage = usage as Record<string, number>
+  const s = cur()
+  s.lastUsage = usage as Record<string, number>
   for (const [k, v] of Object.entries(usage)) {
-    if (typeof v === 'number') _reqUsage[k] = (_reqUsage[k] ?? 0) + v
+    if (typeof v === 'number') s.usage[k] = (s.usage[k] ?? 0) + v
   }
-  _reqUsage.rounds = (_reqUsage.rounds ?? 0) + 1
+  s.usage.rounds = (s.usage.rounds ?? 0) + 1
 }
 
 // ── Кеш уровня запроса (TTL 60s) ─────────────────────────────────────────
-// Один раз за запрос, а не 8 раз. Инвалидируется после любой записи в БД.
+// Остаётся общим на контейнер СОЗНАТЕЛЬНО: пользователь один, данные те же,
+// а TTL 60s ограничивает устаревание. Инвалидируется после любой записи.
 const _cache = new Map<string, { value: string; ts: number }>()
 const CACHE_TTL = 60_000
 

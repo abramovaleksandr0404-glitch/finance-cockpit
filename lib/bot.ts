@@ -9,13 +9,10 @@ import { getHistory, saveHistory, logMessage, checkDeployNotification, storeChat
   transcribeVoice, sendTelegramWithButtons, sendTelegram } from './bot/telegram'
 export { getHistory, saveHistory, logMessage, checkDeployNotification, storeChatId,
   transcribeVoice, sendTelegramWithButtons, sendTelegram }
-import { setLastUserMessage, getLastUserMessage, isHypothetical, userMessageHasAmount,
+import { runInRequest, getLastUserMessage, isHypothetical, userMessageHasAmount,
   setWriteBlocked, takeWriteBlocked, setCorrectionRejected, getCorrectionRejected,
   setMemoryOutcome, takeMemoryOutcome, setActionUnrecognized, takeActionUnrecognized,
-  resetActionFlags, recordUsage, resetReqUsage, cached, invalidateCache,
-  _lastUsage, _reqUsage } from './bot/state'
-// Реэкспорт живых привязок — тестовый маршрут читает _reqUsage напрямую
-export { resetReqUsage, _lastUsage, _reqUsage }
+  resetActionFlags, recordUsage, getReqUsage, cached, invalidateCache } from './bot/state'
 import { createClient, SupabaseClient } from '@supabase/supabase-js'
 import { analyzeDecision, suggestEarlyRepayment, computeWorkingDays, computeVacationAdjustment, computeCreditBurden, computeOptimalRepayment } from './calc'
 import { handlePlannerTool, PLANNER_TOOL_NAMES } from './planner'
@@ -2488,9 +2485,12 @@ async function runToolLoop(modelId: string, systemBlocks: unknown[], initialMess
   return { text: actionsRun.length ? '✅ Готово' : '⚠️ Не смог сформулировать ответ. Попробуй переформулировать вопрос.', actionsRun }
 }
 
-async function processWithModel(text: string, chatId: number, model: 'haiku'|'sonnet'): Promise<string> {
-  resetReqUsage()
-  setLastUserMessage(text)
+function processWithModel(text: string, chatId: number, model: 'haiku'|'sonnet'): Promise<string> {
+  // Изолируем состояние запроса: без этого параллельный запрос перезаписывал
+  // userMessage и защиты читали чужой текст.
+  return runInRequest(text, () => _processWithModel(text, chatId, model))
+}
+async function _processWithModel(text: string, chatId: number, model: 'haiku'|'sonnet'): Promise<string> {
   const needAnalysis = /проанализир|анализ трат|паттерн|на что трачу|куда уход|структур.*трат/i.test(text)
   // Принудительный финансовый контекст: данные из БД ВСЕГДА при финансовых вопросах
   const isFinancial = /дебет|бюджет|бонус|баланс|трат|потрач|осталось|доход|аванс|зп|зарплат|кредит|карт|финанс|остат|переменн|лимит|деньг|прогноз|сколько|ликвидност|сальдо|позиц/i.test(text)
@@ -2554,11 +2554,13 @@ function routeModel(text: string): 'haiku' | 'sonnet' {
 
 
 // Версия processWithModel для тестов: НЕ сохраняет историю, НЕ загрязняет bot_messages
-export async function processWithModelForTest(text: string, _chatId: number): Promise<string> {
-  resetReqUsage()
-  // Без этой строки isHypothetical() читал пустое значение и защита от
-  // сослагательных вопросов в тестовом пути была молча отключена.
-  setLastUserMessage(text)
+export function processWithModelForTest(text: string, _chatId: number): Promise<{ text: string; usage: Record<string, number> }> {
+  return runInRequest(text, async () => {
+    const reply = await _processWithModelForTest(text, _chatId)
+    return { text: reply, usage: getReqUsage() }
+  })
+}
+async function _processWithModelForTest(text: string, _chatId: number): Promise<string> {
   if (!process.env.ANTHROPIC_API_KEY) return '⚠️ Добавь ANTHROPIC_API_KEY в Vercel.'
   const model = routeModel(text)
   const needAnalysis = /проанализир|анализ трат|паттерн/i.test(text)
