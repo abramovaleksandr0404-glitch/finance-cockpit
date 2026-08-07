@@ -264,6 +264,19 @@ function annuityMonthsFor(principal: number, monthlyRate: number, payment: numbe
 // (бывает после ручных правок), annuityMonthsFor может улететь в 999
 // месяцев или дать абсурдный результат. end_date — прямое число из
 // прошлого шага, не пересчитывается заново, поэтому надёжнее по построению.
+// ЕДИНЫЙ критерий «цель этого месяца» — раньше core, список в контексте и
+// группировка по горизонтам считали это тремя разными фильтрами (только
+// month_key в двух местах, month_key ИЛИ target_date в третьем). Одна и та
+// же цель могла попасть в прогноз, но пропасть из списка на экране, или
+// наоборот. Теперь все три места вызывают эту функцию.
+function isGoalThisMonth(g: { month_key: string | null; target_date: string | null }, monthKey: string, now: Date): boolean {
+  if (g.month_key === monthKey) return true
+  if (g.target_date) {
+    const t = new Date(g.target_date)
+    return t.getFullYear() === now.getFullYear() && t.getMonth() === now.getMonth()
+  }
+  return false
+}
 function monthsUntil(endDate: string | null): number | null {
   if (!endDate) return null
   const now = new Date()
@@ -396,7 +409,7 @@ async function _computeFinancialStateRaw(): Promise<FinancialState> {
   // ── СЛОЙ 3 ──
   const forecastEom = netPosition + pendingIncome - pendingLoans - fixedUnpaid - Math.max(0, varLeft)
   // planned_total = только цели ТЕКУЩЕГО месяца (не все накопительные цели всех месяцев)
-  const plannedTotal = (goals ?? []).filter((g:{month_key:string|null;purchased:boolean}) => g.month_key === monthKey && !g.purchased).reduce((a,g:{amount:number}) => a + Math.round(Number(g.amount)), 0)
+  const plannedTotal = (goals ?? []).filter((g:{month_key:string|null;target_date:string|null;purchased:boolean}) => isGoalThisMonth(g, monthKey, now) && !g.purchased).reduce((a,g:{amount:number}) => a + Math.round(Number(g.amount)), 0)
   const forecastAfterPlanned = forecastEom - plannedTotal
 
   // ── ОТПУСКА / КОРРЕКТИРОВКИ ЗП ──
@@ -658,9 +671,9 @@ async function _getContextRaw(): Promise<string> {
   const advDay = advanceDay(now.getFullYear(), curMonth)
   const eomDay = lastWorkingDayOfMonth(now.getFullYear(), curMonth)
 
-  // Плановые покупки этого месяца (goals с month_key = текущий, не куплено)
-  const plannedPurchases = (goals ?? []).filter(g => g.month_key === monthKey && !g.purchased)
-  const plannedTotal = plannedPurchases.reduce((s,g) => s+Number(g.amount), 0)
+  // Список для отображения — та же функция-классификатор, что и в ядре.
+  // Сумму НЕ считаем здесь заново: берём готовую из __core.planned_total ниже.
+  const plannedPurchases = (goals ?? []).filter(g => isGoalThisMonth(g, monthKey, now) && !g.purchased)
 
   const pendingLoanPayments = (loans ?? []).filter(l => l.paid_month !== monthKey).reduce((s,l) => s+Number(l.min_payment), 0)
   const totalDebt = (loans ?? []).reduce((s,l) => s+Number(l.principal)+Number(l.accrued_int), 0)
@@ -688,8 +701,8 @@ async function _getContextRaw(): Promise<string> {
   const _incomingTotal = __core.pending_income
   const _dailyBudget = __core.daily_var_budget
   const _stipendNeedsConfirm = __core.stipend_needs_confirm
-  // После плановых покупок
-  const projEndAfterPlanned = projEnd - plannedTotal
+  // После плановых покупок — сумма из ядра, не пересчитываем
+  const projEndAfterPlanned = projEnd - __core.planned_total
 
   // Бонус
   const nominals = (user.nominals as Record<string,number>) ?? {}
@@ -747,11 +760,10 @@ async function _getContextRaw(): Promise<string> {
   // Горизонт цели — вычисляется из target_date, не хранится отдельным полем
   // (иначе разъедется с датой, как раньше расходились якоря с таблицами).
   const classifyHorizon = (g: {month_key: string|null; target_date: string|null}): string => {
-    if (g.month_key === monthKey) return 'ЭТОТ МЕСЯЦ'
+    if (isGoalThisMonth(g, monthKey, now)) return 'ЭТОТ МЕСЯЦ'
     if (!g.target_date) return 'БЕЗ СРОКА (накопление)'
     const t = new Date(g.target_date)
     const monthsAway = (t.getFullYear()-now.getFullYear())*12 + (t.getMonth()-now.getMonth())
-    if (monthsAway <= 0) return 'ЭТОТ МЕСЯЦ'
     if (monthsAway <= 3) return 'ЭТОТ КВАРТАЛ'
     if (t.getFullYear() === now.getFullYear()) return 'ДО КОНЦА ГОДА'
     if (t.getFullYear() === now.getFullYear()+1) return 'ЧЕРЕЗ ГОД'
@@ -903,11 +915,11 @@ ${salaryAdjustments.length > 0 ? `\nКОРРЕКТИРОВКИ ЗП:\n${salaryAd
   ИТОГО к списанию: ${rub(pendingLoanPayments + fixedUnpaid + varLeft)}
 
 ПЛАНОВЫЕ ПОКУПКИ ИЮНЯ (цели на месяц, ещё не куплены):
-${plannedPurchases.length ? plannedPurchases.map(g=>`  • ${g.name}: ${rub(Number(g.amount))}${g.target_date ? ` (срок: ${g.target_date})` : ''}`).join('\n')+`\n  ИТОГО плановых: ${rub(plannedTotal)}` : '  (нет запланированных покупок)'}
+${plannedPurchases.length ? plannedPurchases.map(g=>`  • ${g.name}: ${rub(Number(g.amount))}${g.target_date ? ` (срок: ${g.target_date})` : ''}`).join('\n')+`\n  ИТОГО плановых: ${rub(__core.planned_total)}` : '  (нет запланированных покупок)'}
 
 ПРОГНОЗ ОСТАТКА К 30-го ИЮНЯ: ${rub(projEnd)}
   [формула: чистая позиция ${rub(netPosition)} (деб.${rub(liquid)}−карты${rub(totalCardDebt)}) + входы ${rub(incomingTotal)} − кредиты ${rub(pendingLoanPayments)} − постоянные ${rub(fixedUnpaid)} − переменные до лимита ${rub(varLeft)}]
-ПОСЛЕ ПЛАНОВЫХ ПОКУПОК (−${rub(plannedTotal)}): ${rub(projEndAfterPlanned)}
+ПОСЛЕ ПЛАНОВЫХ ПОКУПОК (−${rub(__core.planned_total)}): ${rub(projEndAfterPlanned)}
 
 === ПРОГНОЗ СЛЕДУЮЩЕГО МЕСЯЦА (${__core.next_month_key}) — пересчитан по рабочим дням ${__core.next_month_key}, БЕЗ отпусков ===
   Старт: ${rub(__core.forecast_eom)} (= прогноз конца ${monthKey})
