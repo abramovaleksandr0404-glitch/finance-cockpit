@@ -1775,7 +1775,7 @@ export async function executeAction(action: BotAction): Promise<void> {
 
   } else if (action.type === 'save_memory' && action.content) {
     const clean = sanitizeStr(action.content, 1000) ?? ''
-    if (!clean) return
+    if (!clean) { _lastMemoryOutcome = 'empty'; return }
     // Дедуп по смыслу, а не по префиксу: сравниваем набор значимых слов.
     // Префиксный ilike(40) пропускал «Александр работает в АТОН...» ×4 —
     // варианты расходились после 40-го символа.
@@ -1793,6 +1793,10 @@ export async function executeAction(action: BotAction): Promise<void> {
       const smaller = Math.min(newWords.size, oldWords.size)
       return smaller > 0 && common / smaller >= 0.7
     })
+    // Флаг для handleTool: содержит ли заметка сумму. Деньги без своего поля
+    // (внешний вклад, чужие акции) должны сопровождаться явным «не считается
+    // в балансе» в каждом ответе — а не когда модель случайно вспомнит правило.
+    _lastMemoryOutcome = isDup ? 'duplicate' : (/\d{3,}/.test(clean.replace(/\s/g, '')) ? 'saved_money' : 'saved')
     if (!isDup) {
       await s.from('bot_memories').insert({
         user_id: USER_ID, content: clean,
@@ -1817,6 +1821,9 @@ export let _lastUsage: Record<string, number> = {}
 // Ставится в true, если save_correction отклонён из-за цифр в тексте.
 // handleTool читает флаг и объясняет модели, что делать вместо этого.
 let _lastCorrectionRejected = false
+// Итог последнего save_memory: 'saved' | 'saved_money' | 'duplicate' | 'empty'.
+// handleTool строит по нему точный ответ вместо общего финансового блока.
+let _lastMemoryOutcome = ''
 
 // Накопитель за ВЕСЬ запрос (все раунды tool-loop), а не за последний раунд.
 // Без этого стоимость запроса недооценивается в 3-5 раз.
@@ -2219,6 +2226,7 @@ async function handleTool(name: string, input: Record<string,unknown>): Promise<
   }
   // DB-writing tools
   _lastCorrectionRejected = false
+  _lastMemoryOutcome = ''
   _lastWriteBlocked = ''
   // Централизованная защита: на сослагательный вопрос НИ ОДИН инструмент,
   // меняющий деньги, не должен сработать. Точечных проверок недостаточно —
@@ -2255,6 +2263,20 @@ async function handleTool(name: string, input: Record<string,unknown>): Promise<
       reason: 'Коррекция содержит конкретные суммы и НЕ сохранена. Числа хранятся только в БД.',
       what_to_do: 'Если цифра в БД неверна — исправь её инструментом (update_card_debt / update_loan / add_expense и т.п.). Если это правило поведения — переформулируй БЕЗ цифр и вызови save_correction ещё раз.',
     })
+  }
+  if (name === 'save_memory') {
+    const outcome = _lastMemoryOutcome
+    _lastMemoryOutcome = ''
+    if (outcome === 'saved_money') {
+      return JSON.stringify({
+        saved: true,
+        warning: 'Сохранено ТОЛЬКО как заметка в долгосрочной памяти. НЕ входит в баланс, ликвидность или прогноз — это не отслеживаемые данные. Явно скажи пользователю про это ограничение в ответе, а не просто "запомнил".',
+      })
+    }
+    if (outcome === 'duplicate') {
+      return JSON.stringify({ saved: false, reason: 'Очень похожая запись уже есть в памяти — новую не создал.' })
+    }
+    return JSON.stringify({ saved: outcome === 'saved' })
   }
   // Инвалидируем кеш после любой записи в БД — следующий getContext прочитает свежие данные
   invalidateCache('core_state', 'context', 'fin_summary', 'loans_summary')
