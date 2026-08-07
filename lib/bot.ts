@@ -1359,6 +1359,11 @@ export async function executeAction(action: BotAction): Promise<void> {
     }
 
   } else if (action.type === 'pay_card_debt' && action.amount != null) {
+    if (!userMessageHasAmount()) {
+      console.log('[pay_card_debt] ЗАБЛОКИРОВАНО: нет суммы в сообщении')
+      setWriteBlocked('pay_card_debt:no_amount_in_message')
+      return
+    }
     // Имя карты приходит в поле card (по схеме инструмента), name — запасной вариант
     const cardName = String((action as { card?: string }).card ?? action.name ?? '')
     if (!cardName) return
@@ -1757,6 +1762,14 @@ export async function executeAction(action: BotAction): Promise<void> {
     const act = String((action as { action?: string }).action ?? '')
     const nm = String(action.name ?? '').trim()
     if (!nm) return
+    // add меняет сумму дохода — нужна цифра от пользователя. remove просто
+    // убирает по имени, суммы не требует, читай-вопрос его не спровоцирует
+    // (уже защищён тем, что имя должно совпасть с существующей записью).
+    if (act === 'add' && !userMessageHasAmount()) {
+      console.log('[manage_recurring_income] ЗАБЛОКИРОВАНО: нет суммы в сообщении')
+      setWriteBlocked('manage_recurring_income:no_amount_in_message')
+      return
+    }
     const { data: uRow } = await s.from('users').select('recurring_incomes').eq('id', USER_ID).single()
     const list = (uRow?.recurring_incomes as { name: string; amount: number; day: number }[]) ?? []
     let next = list
@@ -1773,7 +1786,14 @@ export async function executeAction(action: BotAction): Promise<void> {
     // Хранится в bot_anchors: одна запись на человека, ключ owed_to_me:<имя>.
     const who = String((action as { who?: string }).who ?? '').trim()
     const act = String((action as { action?: string }).action ?? '')
-    if (!who || action.amount == null) return
+    // amount == null пропускал amount=0 (0 == null это false в JS) — так
+    // записались тестовые owed_to_me:тест и owed_to_me:placeholder с суммой 0.
+    if (!who || !action.amount || action.amount <= 0) return
+    if (!userMessageHasAmount()) {
+      console.log('[manage_debt_owed_to_me] ЗАБЛОКИРОВАНО: нет суммы в сообщении')
+      setWriteBlocked('manage_debt_owed_to_me:no_amount_in_message')
+      return
+    }
     const key = `owed_to_me:${who.toLowerCase()}`
     if (act === 'add') {
       await s.from('bot_anchors').upsert({
@@ -1795,6 +1815,11 @@ export async function executeAction(action: BotAction): Promise<void> {
     }
 
   } else if (action.type === 'update_cash' && action.amount != null) {
+    if (!userMessageHasAmount()) {
+      console.log('[update_cash] ЗАБЛОКИРОВАНО: нет суммы в сообщении')
+      setWriteBlocked('update_cash:no_amount_in_message')
+      return
+    }
     // Наличные хранятся в bot_anchors: это факт без собственной таблицы.
     // Производной величиной не является, поэтому запрет на якоря их не касается.
     const delta = Boolean((action as { delta?: boolean }).delta)
