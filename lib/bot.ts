@@ -2,6 +2,9 @@
  * Finance Cockpit Bot — v8
  * Детерминированный расчёт через get_financial_summary. LLM не считает цифры.
  */
+import { db, mk, rub, pct, quarterOf, advanceDay, lastWorkingDayOfMonth,
+  annuityPaymentFor, annuityMonthsFor, isGoalThisMonth, monthsUntil, addMonths,
+  stripLoneSurrogates, deepCleanSurrogates, withPrefixCache } from './bot/shared'
 let _lastUserMessage = '' // защита зачисления — реальный текст пользователя
 
 // Сослагательное наклонение: «что если», «если погасить», «предположим».
@@ -41,26 +44,9 @@ function invalidateCache(...keys: string[]) {
 const USER_ID = '5ebdb411-6021-4dfc-9d0d-caa8e0107502'
 const TG = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}`
 
-function db(): SupabaseClient {
-  return createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!)
-}
-function mk(): string { const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}` }
-function rub(n: number): string { return Math.round(n).toLocaleString('ru-RU')+' ₽' }
-function pct(a: number, b: number): number { return b>0 ? Math.round(a/b*100) : 0 }
-function quarterOf(m: number): number { return Math.ceil(m/3) }
 
 // День аванса: 15-е если рабочий, иначе последний рабочий день перед 15-м
-function advanceDay(y: number, m: number): number {
-  const d = new Date(y, m-1, 15)
-  while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate()-1)
-  return d.getDate()
-}
 // Последний рабочий день месяца (для зп+бонуса)
-function lastWorkingDayOfMonth(y: number, m: number): number {
-  const d = new Date(y, m, 0)
-  while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate()-1)
-  return d.getDate()
-}
 
 export async function getHistory(chatId: number) {
   // Окно 40 минут: без него в контекст попадали сообщения многочасовой давности,
@@ -245,19 +231,6 @@ async function accrueLoansCore(s: SupabaseClient): Promise<void> {
 // Аннуитет в обе стороны — раньше early_repay пропорционально масштабировал
 // платёж, что не совпадает НИ С ОДНИМ реальным сценарием банка (ни с
 // «уменьшить платёж», ни с «сократить срок»). Отсюда расхождения с выпиской.
-function annuityPaymentFor(principal: number, monthlyRate: number, months: number): number {
-  if (months <= 0) return principal
-  if (monthlyRate === 0) return principal / months
-  const k = Math.pow(1 + monthlyRate, months)
-  return (principal * monthlyRate * k) / (k - 1)
-}
-function annuityMonthsFor(principal: number, monthlyRate: number, payment: number): number {
-  if (principal <= 0) return 0
-  if (monthlyRate === 0) return Math.ceil(principal / payment)
-  const interestOnly = principal * monthlyRate
-  if (payment <= interestOnly) return 999 // платёж не покрывает даже проценты — кредит не гасится
-  return Math.ceil(Math.log(payment / (payment - interestOnly)) / Math.log(1 + monthlyRate))
-}
 // Остаточный срок ДО пересчёта: приоритет — сохранённая end_date, не формула.
 // Формула требует чтобы principal/payment были математически согласованы
 // (платёж покрывал бы проценты); если старые данные в БД чуть разошлись
@@ -269,26 +242,6 @@ function annuityMonthsFor(principal: number, monthlyRate: number, payment: numbe
 // month_key в двух местах, month_key ИЛИ target_date в третьем). Одна и та
 // же цель могла попасть в прогноз, но пропасть из списка на экране, или
 // наоборот. Теперь все три места вызывают эту функцию.
-function isGoalThisMonth(g: { month_key: string | null; target_date: string | null }, monthKey: string, now: Date): boolean {
-  if (g.month_key === monthKey) return true
-  if (g.target_date) {
-    const t = new Date(g.target_date)
-    return t.getFullYear() === now.getFullYear() && t.getMonth() === now.getMonth()
-  }
-  return false
-}
-function monthsUntil(endDate: string | null): number | null {
-  if (!endDate) return null
-  const now = new Date()
-  const end = new Date(endDate)
-  const months = (end.getFullYear() - now.getFullYear()) * 12 + (end.getMonth() - now.getMonth())
-  return months > 0 && months < 600 ? months : null // 600 = защита от мусорных дат
-}
-function addMonths(dateStr: string | null, months: number): string {
-  const base = dateStr ? new Date(dateStr) : new Date()
-  const d = new Date(base.getFullYear(), base.getMonth() + months, 1)
-  return d.toISOString().split('T')[0]
-}
 // Журнал событий по кредиту — платежи и досрочные погашения в хронологии.
 // Хранится в bot_anchors (своей таблицы под это нет): ключ loan_log:<имя>,
 // значение — JSON-массив. Без него бот не может ответить «что произошло
@@ -2022,12 +1975,6 @@ export function resetReqUsage() { _reqUsage = {} }
 // Ставит cache_control на последний system-блок.
 // Эффект: внутри одного tool-loop раунды 2..6 читают ВЕСЬ префикс
 // (промпт + контекст + forced-данные) из кэша по ~10% цены вместо 100%.
-function withPrefixCache(blocks: unknown[]): unknown[] {
-  if (blocks.length === 0) return blocks
-  const last = blocks[blocks.length - 1] as Record<string, unknown>
-  blocks[blocks.length - 1] = { ...last, cache_control: { type: 'ephemeral' } }
-  return blocks
-}
 
 async function callClaude(modelId: string, systemBlocks: unknown[], messages: unknown[], noTools = false) {
   // Prompt Caching: кешируем TOOLS (самый большой статичный блок)
@@ -2061,40 +2008,10 @@ async function callClaude(modelId: string, systemBlocks: unknown[], messages: un
 
 // Удаляет непарные суррогаты (битые эмодзи) из готового JSON — иначе Anthropic
 // отклоняет весь запрос с "invalid high surrogate". Страховка на любой источник.
-function stripLoneSurrogates(s: string): string {
-  // Посимвольно убираем непарные суррогаты (битые эмодзи). Работает на ЛЮБОМ Node
-  // (toWellFormed есть только в Node 20+; regex с суррогатами хрупок к экранированию).
-  let out = ''
-  for (let i = 0; i < s.length; i++) {
-    const c = s.charCodeAt(i)
-    if (c >= 0xD800 && c <= 0xDBFF) {
-      const n = s.charCodeAt(i + 1)
-      if (n >= 0xDC00 && n <= 0xDFFF) { out += s[i] + s[i + 1]; i++ }
-      // иначе: непарный high surrogate — выбрасываем
-    } else if (c >= 0xDC00 && c <= 0xDFFF) {
-      // непарный low surrogate — выбрасываем
-    } else {
-      out += s[i]
-    }
-  }
-  return out
-}
 
 // Рекурсивно чистит непарные суррогаты во ВСЕХ строках ДО JSON.stringify.
 // Важно: stringify экранирует суррогаты в \udXXX-текст, поэтому чистить ПОСЛЕ бесполезно —
 // Anthropic парсит \udXXX обратно в суррогат и отвергает запрос.
-function deepCleanSurrogates(obj: unknown): unknown {
-  if (typeof obj === 'string') return stripLoneSurrogates(obj)
-  if (Array.isArray(obj)) return obj.map(deepCleanSurrogates)
-  if (obj && typeof obj === 'object') {
-    const out: Record<string, unknown> = {}
-    for (const k of Object.keys(obj as Record<string, unknown>)) {
-      out[k] = deepCleanSurrogates((obj as Record<string, unknown>)[k])
-    }
-    return out
-  }
-  return obj
-}
 
 // Обработка одного инструмента — возвращает строку-результат для tool_result
 
