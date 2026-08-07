@@ -3,6 +3,12 @@
 // защиты) — именно смешение состояния между файлами уронило прод в июне.
 import { createClient, SupabaseClient } from '@supabase/supabase-js'
 
+// Константы (не изменяемое состояние — присваиваются один раз, безопасно
+// делить между файлами в отличие от let-флагов защиты, которые остаются
+// в bot.ts намеренно).
+export const USER_ID = '5ebdb411-6021-4dfc-9d0d-caa8e0107502'
+export const TG = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}`
+
 export function db(): SupabaseClient {
   return createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!)
 }
