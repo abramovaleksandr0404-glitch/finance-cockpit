@@ -33,8 +33,10 @@ const als = new AsyncLocalStorage<ReqState>()
 
 // Вне контекста запроса (cron) возвращаем СВЕЖИЙ объект каждый раз —
 // не общий, чтобы параллельные кроны тоже не пересекались.
+// Потеря контекста НЕ должна открывать защиты. trusted:false = проверки
+// работают. Системные вызовы (cron) получают trusted ЯВНО через runAsSystem.
 function cur(): ReqState {
-  return als.getStore() ?? fresh(true)
+  return als.getStore() ?? fresh(false)
 }
 
 // Оборачивает обработку одного пользовательского сообщения.
@@ -45,6 +47,13 @@ export function runInRequest<T>(userMessage: string, fn: () => Promise<T>): Prom
   return als.run(st, fn)
 }
 
+// Системный вызов (cron, автосписания): текста пользователя нет, проверки
+// по нему неприменимы. Режим включается ЯВНО — не по умолчанию, чтобы
+// случайная потеря контекста не открыла защиты.
+export function runAsSystem<T>(fn: () => Promise<T>): Promise<T> {
+  return als.run(fresh(true), fn)
+}
+
 // ── Текст сообщения пользователя ─────────────────────────────────────────
 export function getLastUserMessage(): string { return cur().userMessage }
 
@@ -53,6 +62,8 @@ export function getLastUserMessage(): string { return cur().userMessage }
 const HYPOTHETICAL = /\b(если|бы|предполож|допустим|сценари|представ|что будет|хватит ли|стоит ли|имеет смысл|выгодн)\b/i
 export function isHypothetical(): boolean {
   const st = cur()
+  // Диагностика: виден ли контекст запроса в момент проверки
+  if (!als.getStore()) console.log('[state] ⚠️ КОНТЕКСТ ПОТЕРЯН при isHypothetical')
   if (st.trusted) return false // системный вызов — блокировать нечего
   // Пустой текст внутри пользовательского запроса = что-то пошло не так.
   // Блокируем: лучше переспросить, чем испортить данные.
@@ -62,6 +73,16 @@ export function isHypothetical(): boolean {
 
 // Есть ли в сообщении число, похожее на сумму. Без него правка данных не
 // может быть настоящей коррекцией — значит read-only вопрос спровоцировал запись.
+// Чистые версии — принимают текст явно, не зависят от контекста.
+// Используются там, где текст доступен напрямую.
+export function textIsHypothetical(text: string): boolean {
+  if (!text) return true
+  return HYPOTHETICAL.test(text)
+}
+export function textHasAmount(text: string): boolean {
+  return /\d{3,}/.test((text ?? '').replace(/\s/g, ''))
+}
+
 export function userMessageHasAmount(): boolean {
   const st = cur()
   if (st.trusted) return true // системный вызов не проверяем по тексту

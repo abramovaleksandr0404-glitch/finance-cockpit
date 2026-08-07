@@ -9,10 +9,11 @@ import { getHistory, saveHistory, logMessage, checkDeployNotification, storeChat
   transcribeVoice, sendTelegramWithButtons, sendTelegram } from './bot/telegram'
 export { getHistory, saveHistory, logMessage, checkDeployNotification, storeChatId,
   transcribeVoice, sendTelegramWithButtons, sendTelegram }
-import { runInRequest, getLastUserMessage, isHypothetical, userMessageHasAmount,
+import { runInRequest, runAsSystem, getLastUserMessage, isHypothetical, userMessageHasAmount,
   setWriteBlocked, takeWriteBlocked, setCorrectionRejected, getCorrectionRejected,
   setMemoryOutcome, takeMemoryOutcome, setActionUnrecognized, takeActionUnrecognized,
   resetActionFlags, recordUsage, getReqUsage, cached, invalidateCache } from './bot/state'
+export { runAsSystem }
 import { createClient, SupabaseClient } from '@supabase/supabase-js'
 import { analyzeDecision, suggestEarlyRepayment, computeWorkingDays, computeVacationAdjustment, computeCreditBurden, computeOptimalRepayment } from './calc'
 import { handlePlannerTool, PLANNER_TOOL_NAMES } from './planner'

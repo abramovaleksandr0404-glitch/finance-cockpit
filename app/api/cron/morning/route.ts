@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
-import { generateMorningBriefing, sendTelegram, sendTelegramWithButtons, executeAction, type BotAction } from '@/lib/bot'
+import { generateMorningBriefing, sendTelegram, sendTelegramWithButtons, executeAction, runAsSystem, type BotAction } from '@/lib/bot'
 import { computeWorkingDays, computeFirstHalfWorkingDays } from '@/lib/calc'
 
 export const dynamic = 'force-dynamic'
@@ -94,7 +94,8 @@ export async function GET(req: Request) {
       const dormIdx = fc.findIndex(f => f.name.toLowerCase().includes('общежити'))
       if (dormIdx >= 0 && !fp[String(dormIdx)]) {
         const dormAction: BotAction = { type: 'mark_single_fixed', name: fc[dormIdx].name }
-        await executeAction(dormAction)
+        // Системный вызов: текста пользователя нет, проверки по нему неприменимы
+        await runAsSystem(() => executeAction(dormAction))
         if (userData?.telegram_chat_id) {
           await sendTelegram(userData.telegram_chat_id, `🏠 *Общежитие ${fc[dormIdx].amount.toLocaleString('ru-RU')}₽ списано автоматически* (12-е число)`)
         }
