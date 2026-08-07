@@ -9,7 +9,7 @@ import { getHistory, saveHistory, logMessage, checkDeployNotification, storeChat
   transcribeVoice, sendTelegramWithButtons, sendTelegram } from './bot/telegram'
 export { getHistory, saveHistory, logMessage, checkDeployNotification, storeChatId,
   transcribeVoice, sendTelegramWithButtons, sendTelegram }
-import { runInRequest, runAsSystem, getLastUserMessage, isHypothetical, userMessageHasAmount,
+import { runInRequest, runAsSystem, textIsHypothetical, textHasAmount, getLastUserMessage, isHypothetical, userMessageHasAmount,
   setWriteBlocked, takeWriteBlocked, setCorrectionRejected, getCorrectionRejected,
   setMemoryOutcome, takeMemoryOutcome, setActionUnrecognized, takeActionUnrecognized,
   resetActionFlags, recordUsage, getReqUsage, cached, invalidateCache } from './bot/state'
@@ -983,7 +983,13 @@ async function recordDebitChange(
 }
 
 // ── Выполнение действий ───────────────────────────────────────────────────
-export async function executeAction(action: BotAction): Promise<void> {
+// userText — текст сообщения пользователя. undefined = СИСТЕМНЫЙ вызов (cron),
+// защиты по тексту неприменимы. Передаётся явно, а не через неявный контекст:
+// потеря контекста молча отключала все защиты.
+export async function executeAction(action: BotAction, userText?: string): Promise<void> {
+  const _sys = userText === undefined
+  const _hypo = !_sys && textIsHypothetical(userText)
+  const _hasAmt = _sys || textHasAmount(userText)
   const s = db()
   const monthKey = mk()
 
@@ -1196,7 +1202,7 @@ export async function executeAction(action: BotAction): Promise<void> {
     })
 
   } else if (action.type === 'mark_goal_bought' && action.name) {
-    if (isHypothetical()) { console.log('[mark_goal_bought] ЗАБЛОКИРОВАНО: гипотетический вопрос'); setWriteBlocked('mark_goal_bought'); return }
+    if (_hypo) { console.log('[mark_goal_bought] ЗАБЛОКИРОВАНО: гипотетический вопрос'); setWriteBlocked('mark_goal_bought'); return }
     const { data:goal } = await s.from('goals').select('id,amount').eq('user_id',USER_ID).ilike('name',`%${action.name}%`).maybeSingle()
     if (goal) {
       await s.from('goals').update({purchased:true,purchased_at:new Date().toISOString().split('T')[0]}).eq('id',goal.id)
@@ -1327,7 +1333,7 @@ export async function executeAction(action: BotAction): Promise<void> {
 
   // ════════════ КРЕДИТЫ И ДОСРОЧНЫЕ ПЛАТЕЖИ ════════════════════════
   } else if (action.type === 'mark_loan_paid' && action.name) {
-    if (isHypothetical()) { console.log('[mark_loan_paid] ЗАБЛОКИРОВАНО: гипотетический вопрос'); setWriteBlocked('mark_loan_paid'); return }
+    if (_hypo) { console.log('[mark_loan_paid] ЗАБЛОКИРОВАНО: гипотетический вопрос'); setWriteBlocked('mark_loan_paid'); return }
     const { data:loan } = await s.from('loans').select('*').eq('user_id',USER_ID).ilike('name',`%${action.name}%`).maybeSingle()
     if (loan && loan.paid_month !== monthKey) {
       const pay = Number(loan.min_payment)
@@ -1346,7 +1352,7 @@ export async function executeAction(action: BotAction): Promise<void> {
     }
 
   } else if (action.type === 'early_repay' && action.name && action.amount) {
-    if (isHypothetical()) {
+    if (_hypo) {
       console.log('[early_repay] ЗАБЛОКИРОВАНО: вопрос сослагательный, нужен расчёт а не запись')
       setWriteBlocked('early_repay')
       return
@@ -1391,7 +1397,7 @@ export async function executeAction(action: BotAction): Promise<void> {
     }
 
   } else if (action.type === 'pay_card_debt' && action.amount != null) {
-    if (!userMessageHasAmount()) {
+    if (!_hasAmt) {
       console.log('[pay_card_debt] ЗАБЛОКИРОВАНО: нет суммы в сообщении')
       setWriteBlocked('pay_card_debt:no_amount_in_message')
       return
@@ -1482,7 +1488,7 @@ export async function executeAction(action: BotAction): Promise<void> {
     }
 
   } else if (action.type === 'set_balance' && action.account && action.amount != null) {
-    if (!userMessageHasAmount()) {
+    if (!_hasAmt) {
       console.log('[set_balance] ЗАБЛОКИРОВАНО: нет суммы в сообщении пользователя')
       setWriteBlocked('set_balance:no_amount_in_message')
       return
@@ -1497,7 +1503,7 @@ export async function executeAction(action: BotAction): Promise<void> {
     await s.from('months').update({closed:true}).eq('user_id',USER_ID).eq('month_key',monthKey)
 
   } else if (action.type === 'add_fixed_cost' && action.name && action.amount) {
-    if (!userMessageHasAmount()) {
+    if (!_hasAmt) {
       console.log('[add_fixed_cost] ЗАБЛОКИРОВАНО: нет суммы в сообщении пользователя')
       setWriteBlocked('add_fixed_cost:no_amount_in_message')
       return
@@ -1518,7 +1524,7 @@ export async function executeAction(action: BotAction): Promise<void> {
   } else if (action.type === 'edit_fixed_cost' && action.name) {
     // Защита нужна только если меняется СУММА — переименование без суммы
     // не может испортить деньги, блокировать его было бы лишним.
-    if (action.amount && !userMessageHasAmount()) {
+    if (action.amount && !_hasAmt) {
       console.log('[edit_fixed_cost] ЗАБЛОКИРОВАНО: меняется сумма, но её нет в сообщении пользователя')
       setWriteBlocked('edit_fixed_cost:no_amount_in_message')
       return
@@ -1538,7 +1544,7 @@ export async function executeAction(action: BotAction): Promise<void> {
     // модель "синхронизировала" кредит в ответ на read-only вопрос про график.
     // Механическая защита: если в сообщении пользователя нет числа похожего
     // на сумму — это не может быть коррекцией банковских данных, блокируем.
-    if (!userMessageHasAmount()) {
+    if (!_hasAmt) {
       console.log('[update_loan] ЗАБЛОКИРОВАНО: в сообщении пользователя нет суммы —', getLastUserMessage().slice(0, 60))
       setWriteBlocked('update_loan:no_amount_in_message')
       return
@@ -1577,7 +1583,7 @@ export async function executeAction(action: BotAction): Promise<void> {
     }
 
   } else if (action.type === 'update_salary' && action.salary_net != null) {
-    if (!userMessageHasAmount()) {
+    if (!_hasAmt) {
       console.log('[update_salary] ЗАБЛОКИРОВАНО: нет суммы в сообщении пользователя')
       setWriteBlocked('update_salary:no_amount_in_message')
       return
@@ -1714,7 +1720,7 @@ export async function executeAction(action: BotAction): Promise<void> {
     }
 
   } else if (action.type === 'update_cashflow') {
-    if (!userMessageHasAmount()) {
+    if (!_hasAmt) {
       console.log('[update_cashflow] ЗАБЛОКИРОВАНО: нет суммы в сообщении пользователя')
       setWriteBlocked('update_cashflow:no_amount_in_message')
       return
@@ -1731,7 +1737,7 @@ export async function executeAction(action: BotAction): Promise<void> {
     }
 
   } else if (action.type === 'update_revenue') {
-    if (!userMessageHasAmount()) {
+    if (!_hasAmt) {
       console.log('[update_revenue] ЗАБЛОКИРОВАНО: нет суммы в сообщении пользователя')
       setWriteBlocked('update_revenue:no_amount_in_message')
       return
@@ -1797,7 +1803,7 @@ export async function executeAction(action: BotAction): Promise<void> {
     // add меняет сумму дохода — нужна цифра от пользователя. remove просто
     // убирает по имени, суммы не требует, читай-вопрос его не спровоцирует
     // (уже защищён тем, что имя должно совпасть с существующей записью).
-    if (act === 'add' && !userMessageHasAmount()) {
+    if (act === 'add' && !_hasAmt) {
       console.log('[manage_recurring_income] ЗАБЛОКИРОВАНО: нет суммы в сообщении')
       setWriteBlocked('manage_recurring_income:no_amount_in_message')
       return
@@ -1821,7 +1827,7 @@ export async function executeAction(action: BotAction): Promise<void> {
     // amount == null пропускал amount=0 (0 == null это false в JS) — так
     // записались тестовые owed_to_me:тест и owed_to_me:placeholder с суммой 0.
     if (!who || !action.amount || action.amount <= 0) return
-    if (!userMessageHasAmount()) {
+    if (!_hasAmt) {
       console.log('[manage_debt_owed_to_me] ЗАБЛОКИРОВАНО: нет суммы в сообщении')
       setWriteBlocked('manage_debt_owed_to_me:no_amount_in_message')
       return
@@ -1847,7 +1853,7 @@ export async function executeAction(action: BotAction): Promise<void> {
     }
 
   } else if (action.type === 'update_cash' && action.amount != null) {
-    if (!userMessageHasAmount()) {
+    if (!_hasAmt) {
       console.log('[update_cash] ЗАБЛОКИРОВАНО: нет суммы в сообщении')
       setWriteBlocked('update_cash:no_amount_in_message')
       return
@@ -2066,7 +2072,7 @@ async function _getFinancialSummaryRaw(): Promise<string> {
   }, null, 2)
 }
 
-async function handleTool(name: string, input: Record<string,unknown>): Promise<string> {
+async function handleTool(name: string, input: Record<string,unknown>, userText?: string): Promise<string> {
   // ── ПЛАНИРОВЩИК: перехватываем до финансового fallthrough ──
   if (PLANNER_TOOL_NAMES.has(name)) return await handlePlannerTool(name, input)
   if (name === 'get_financial_summary') return await getFinancialSummaryJson()
@@ -2346,7 +2352,7 @@ async function handleTool(name: string, input: Record<string,unknown>): Promise<
     'record_vacation_pay', 'close_month', 'update_cashflow', 'add_income_event',
     'add_fixed_cost', 'remove_fixed_cost', 'edit_fixed_cost', 'update_revenue',
   ])
-  if (MONEY_WRITES.has(name) && isHypothetical()) {
+  if (MONEY_WRITES.has(name) && userText !== undefined && textIsHypothetical(userText)) {
     console.log(`[guard] ${name} заблокирован: сослагательный вопрос`)
     return JSON.stringify({
       saved: false,
@@ -2354,7 +2360,7 @@ async function handleTool(name: string, input: Record<string,unknown>): Promise<
       what_to_do: 'Это запрос на РАСЧЁТ. Посчитай сценарий и покажи результат, прямо указав что данные НЕ изменены. Для применения пользователь скажет утвердительно («погаси», «запиши», «отметь»).',
     })
   }
-  await executeAction({ type: name, ...input } as BotAction)
+  await executeAction({ type: name, ...input } as BotAction, userText)
   const unknownType = takeActionUnrecognized()
   if (unknownType) {
     return JSON.stringify({
@@ -2423,7 +2429,7 @@ async function handleTool(name: string, input: Record<string,unknown>): Promise<
 }
 
 // Цикл tool calling: модель вызывает инструменты → выполняем → возвращаем результат → финальный текст
-async function runToolLoop(modelId: string, systemBlocks: unknown[], initialMessages: unknown[]): Promise<{ text:string; actionsRun:string[] }> {
+async function runToolLoop(modelId: string, systemBlocks: unknown[], initialMessages: unknown[], userText?: string): Promise<{ text:string; actionsRun:string[] }> {
   const messages = [...initialMessages]
   const actionsRun: string[] = []
   let anyToolCalled = false
@@ -2448,7 +2454,7 @@ async function runToolLoop(modelId: string, systemBlocks: unknown[], initialMess
       for (const block of content) {
         if (block.type === 'tool_use' && block.name) {
           try {
-            const result = await handleTool(block.name, (block.input ?? {}) as Record<string,unknown>)
+            const result = await handleTool(block.name, (block.input ?? {}) as Record<string,unknown>, userText)
             const readOnlyTools = ['scenario_analysis','suggest_early_repayment','show_balance_history','analyze_credit_burden','calculate_optimal_repayment','compare_months','list_backlog']
             if (!readOnlyTools.includes(block.name)) {
               actionsRun.push(block.name)
@@ -2532,7 +2538,7 @@ async function _processWithModel(text: string, chatId: number, model: 'haiku'|'s
     ...history.map(h => ({ role:h.role as 'user'|'assistant', content:h.content })),
     { role:'user', content:text }
   ]
-  const { text: reply } = await runToolLoop(modelId, withPrefixCache(systemBlocks), messages)
+  const { text: reply } = await runToolLoop(modelId, withPrefixCache(systemBlocks), messages, text)
   Promise.all([
     saveHistory(chatId,'user',text,'text'),
     saveHistory(chatId,'assistant',reply,'text')
@@ -2582,7 +2588,7 @@ async function _processWithModelForTest(text: string, _chatId: number): Promise<
   if (forcedLoans) systemBlocks.push({ type:'text', text:'\n\n╔══ КРЕДИТЫ ИЗ БД ══╗\n'+forcedLoans })
   if (forcedFinData) systemBlocks.push({ type:'text', text:'\n\n╔══ ДАННЫЕ ИЗ БД ══╗\n'+forcedFinData })
   const messages = [{ role:'user' as const, content:text }]  // БЕЗ истории
-  const { text: reply } = await runToolLoop(modelId, withPrefixCache(systemBlocks), messages)
+  const { text: reply } = await runToolLoop(modelId, withPrefixCache(systemBlocks), messages, text)
   // НЕ сохраняем историю — тест изолирован
   return reply
 }
@@ -2612,7 +2618,7 @@ export async function processImage(fileId: string, chatId: number, caption?: str
       ...history.map(h=>({role:h.role as 'user'|'assistant',content:h.content})),
       {role:'user',content:[{type:'image',source:{type:'base64',media_type:mime,data:base64}},{type:'text',text:userText}]}
     ]
-    const { text: reply } = await runToolLoop('claude-sonnet-5', withPrefixCache(systemBlocks), messages)
+    const { text: reply } = await runToolLoop('claude-sonnet-5', withPrefixCache(systemBlocks), messages, userText)
     Promise.all([saveHistory(chatId,'user',`[фото: ${userText}]`), saveHistory(chatId,'assistant',reply)]).catch(()=>{})
     return reply
   } catch(err) { console.error('[vision]',err); return '❌ Ошибка чтения.' }
