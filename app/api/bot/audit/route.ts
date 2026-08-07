@@ -144,6 +144,7 @@ export async function GET(req: Request) {
     memories_dupes: memDupes.length,
     memories_dupes_list: memDupes,
     memories_survivors: survivors.map(s => ({ id: s.id, text: s.content.slice(0, 130) })),
+    loan_logs: loanLogs,
     state: {
       month_key: monthKey,
       salary_net: user?.salary_net,
