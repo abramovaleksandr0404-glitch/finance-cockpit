@@ -9,41 +9,19 @@ import { getHistory, saveHistory, logMessage, checkDeployNotification, storeChat
   transcribeVoice, sendTelegramWithButtons, sendTelegram } from './bot/telegram'
 export { getHistory, saveHistory, logMessage, checkDeployNotification, storeChatId,
   transcribeVoice, sendTelegramWithButtons, sendTelegram }
-let _lastUserMessage = '' // защита зачисления — реальный текст пользователя
-
-// Сослагательное наклонение: «что если», «если погасить», «предположим».
-// Такие вопросы требуют РАСЧЁТА, а не записи в БД. Без этой проверки бот
-// исполнял гипотетические сценарии как реальные операции.
-const HYPOTHETICAL = /\b(если|бы|предполож|допустим|сценари|представ|что будет|хватит ли|стоит ли|имеет смысл|выгодн)\b/i
-function isHypothetical(): boolean {
-  // Пустое значение = входная точка не выставила текст. Считаем ситуацию
-  // подозрительной и блокируем запись: лучше переспросить, чем испортить данные.
-  if (!_lastUserMessage) return true
-  return HYPOTHETICAL.test(_lastUserMessage)
-}
-// Какая запись была заблокирована как гипотетическая — сообщаем модели
-let _lastWriteBlocked = ''
+import { setLastUserMessage, getLastUserMessage, isHypothetical, userMessageHasAmount,
+  setWriteBlocked, takeWriteBlocked, setCorrectionRejected, getCorrectionRejected,
+  setMemoryOutcome, takeMemoryOutcome, setActionUnrecognized, takeActionUnrecognized,
+  resetActionFlags, recordUsage, resetReqUsage, cached, invalidateCache,
+  _lastUsage, _reqUsage } from './bot/state'
+// Реэкспорт живых привязок — тестовый маршрут читает _reqUsage напрямую
+export { resetReqUsage, _lastUsage, _reqUsage }
 import { createClient, SupabaseClient } from '@supabase/supabase-js'
 import { analyzeDecision, suggestEarlyRepayment, computeWorkingDays, computeVacationAdjustment, computeCreditBurden, computeOptimalRepayment } from './calc'
 import { handlePlannerTool, PLANNER_TOOL_NAMES } from './planner'
 
 
 // ── Request-level cache (TTL 60s) — один раз за запрос, не 8 ──────────────
-const _cache = new Map<string, { value: string; ts: number }>()
-const CACHE_TTL = 60_000 // 60 секунд
-
-async function cached<T>(key: string, fn: () => Promise<T>): Promise<T> {
-  const now = Date.now()
-  const hit = _cache.get(key)
-  if (hit && now - hit.ts < CACHE_TTL) return JSON.parse(hit.value) as T
-  const value = await fn()
-  _cache.set(key, { value: JSON.stringify(value), ts: now })
-  return value
-}
-
-function invalidateCache(...keys: string[]) {
-  keys.forEach(k => _cache.delete(k))
-}
 
 // USER_ID и TG теперь в shared.ts — импортируются ниже, не дублируются
 
@@ -1186,7 +1164,7 @@ export async function executeAction(action: BotAction): Promise<void> {
     })
 
   } else if (action.type === 'mark_goal_bought' && action.name) {
-    if (isHypothetical()) { console.log('[mark_goal_bought] ЗАБЛОКИРОВАНО: гипотетический вопрос'); _lastWriteBlocked = 'mark_goal_bought'; return }
+    if (isHypothetical()) { console.log('[mark_goal_bought] ЗАБЛОКИРОВАНО: гипотетический вопрос'); setWriteBlocked('mark_goal_bought'); return }
     const { data:goal } = await s.from('goals').select('id,amount').eq('user_id',USER_ID).ilike('name',`%${action.name}%`).maybeSingle()
     if (goal) {
       await s.from('goals').update({purchased:true,purchased_at:new Date().toISOString().split('T')[0]}).eq('id',goal.id)
@@ -1202,7 +1180,7 @@ export async function executeAction(action: BotAction): Promise<void> {
   // ════════════ ДОХОДЫ И ЗАРПЛАТА ════════════════════════════════════
   } else if (action.type === 'mark_salary') {
     const payW = /получил|пришло|зачисли|поступило|начислили|пришла|зачислилась|перечислили/i
-    if (!payW.test(_lastUserMessage)) return
+    if (!payW.test(getLastUserMessage())) return
     const { data:u } = await s.from('users').select('debit_balance,salary_net').eq('id',USER_ID).single()
     const { data:month } = await s.from('months').select('*').eq('user_id',USER_ID).eq('month_key',monthKey).maybeSingle()
     const net = Number(u?.salary_net??121600)
@@ -1317,7 +1295,7 @@ export async function executeAction(action: BotAction): Promise<void> {
 
   // ════════════ КРЕДИТЫ И ДОСРОЧНЫЕ ПЛАТЕЖИ ════════════════════════
   } else if (action.type === 'mark_loan_paid' && action.name) {
-    if (isHypothetical()) { console.log('[mark_loan_paid] ЗАБЛОКИРОВАНО: гипотетический вопрос'); _lastWriteBlocked = 'mark_loan_paid'; return }
+    if (isHypothetical()) { console.log('[mark_loan_paid] ЗАБЛОКИРОВАНО: гипотетический вопрос'); setWriteBlocked('mark_loan_paid'); return }
     const { data:loan } = await s.from('loans').select('*').eq('user_id',USER_ID).ilike('name',`%${action.name}%`).maybeSingle()
     if (loan && loan.paid_month !== monthKey) {
       const pay = Number(loan.min_payment)
@@ -1338,7 +1316,7 @@ export async function executeAction(action: BotAction): Promise<void> {
   } else if (action.type === 'early_repay' && action.name && action.amount) {
     if (isHypothetical()) {
       console.log('[early_repay] ЗАБЛОКИРОВАНО: вопрос сослагательный, нужен расчёт а не запись')
-      _lastWriteBlocked = 'early_repay'
+      setWriteBlocked('early_repay')
       return
     }
     const { data:loan } = await s.from('loans').select('*').eq('user_id',USER_ID).ilike('name',`%${action.name}%`).maybeSingle()
@@ -1442,7 +1420,7 @@ export async function executeAction(action: BotAction): Promise<void> {
   // Получена регулярная выплата (стипендия и т.п.): зачислить + пометить чтобы не дублировать в прогнозе
   } else if (action.type === 'mark_recurring_received' && action.name) {
     const payW2 = /получил|пришло|зачисли|поступило|начислили|пришла|зачислилась|перечислили/i
-    if (!payW2.test(_lastUserMessage)) return
+    if (!payW2.test(getLastUserMessage())) return
     const { data:u } = await s.from('users').select('debit_balance,recurring_incomes').eq('id',USER_ID).single()
     const recurring = (u?.recurring_incomes as {name:string;amount:number;day:number}[]) ?? []
     const item = recurring.find(r => r.name.toLowerCase().includes((action.name??'').toLowerCase()))
@@ -1467,9 +1445,9 @@ export async function executeAction(action: BotAction): Promise<void> {
     }
 
   } else if (action.type === 'set_balance' && action.account && action.amount != null) {
-    if (!/\d{3,}/.test(_lastUserMessage.replace(/\s/g, ''))) {
+    if (!userMessageHasAmount()) {
       console.log('[set_balance] ЗАБЛОКИРОВАНО: нет суммы в сообщении пользователя')
-      _lastWriteBlocked = 'set_balance:no_amount_in_message'
+      setWriteBlocked('set_balance:no_amount_in_message')
       return
     }
     const field = action.account === 'sber' ? 'debit_balance' : 'tbank_debit'
@@ -1482,9 +1460,9 @@ export async function executeAction(action: BotAction): Promise<void> {
     await s.from('months').update({closed:true}).eq('user_id',USER_ID).eq('month_key',monthKey)
 
   } else if (action.type === 'add_fixed_cost' && action.name && action.amount) {
-    if (!/\d{3,}/.test(_lastUserMessage.replace(/\s/g, ''))) {
+    if (!userMessageHasAmount()) {
       console.log('[add_fixed_cost] ЗАБЛОКИРОВАНО: нет суммы в сообщении пользователя')
-      _lastWriteBlocked = 'add_fixed_cost:no_amount_in_message'
+      setWriteBlocked('add_fixed_cost:no_amount_in_message')
       return
     }
     const { data:u } = await s.from('users').select('fixed_costs').eq('id',USER_ID).single()
@@ -1503,9 +1481,9 @@ export async function executeAction(action: BotAction): Promise<void> {
   } else if (action.type === 'edit_fixed_cost' && action.name) {
     // Защита нужна только если меняется СУММА — переименование без суммы
     // не может испортить деньги, блокировать его было бы лишним.
-    if (action.amount && !/\d{3,}/.test(_lastUserMessage.replace(/\s/g, ''))) {
+    if (action.amount && !userMessageHasAmount()) {
       console.log('[edit_fixed_cost] ЗАБЛОКИРОВАНО: меняется сумма, но её нет в сообщении пользователя')
-      _lastWriteBlocked = 'edit_fixed_cost:no_amount_in_message'
+      setWriteBlocked('edit_fixed_cost:no_amount_in_message')
       return
     }
     const { data:u } = await s.from('users').select('fixed_costs').eq('id',USER_ID).single()
@@ -1523,9 +1501,9 @@ export async function executeAction(action: BotAction): Promise<void> {
     // модель "синхронизировала" кредит в ответ на read-only вопрос про график.
     // Механическая защита: если в сообщении пользователя нет числа похожего
     // на сумму — это не может быть коррекцией банковских данных, блокируем.
-    if (!/\d{3,}/.test(_lastUserMessage.replace(/\s/g, ''))) {
-      console.log('[update_loan] ЗАБЛОКИРОВАНО: в сообщении пользователя нет суммы —', _lastUserMessage.slice(0, 60))
-      _lastWriteBlocked = 'update_loan:no_amount_in_message'
+    if (!userMessageHasAmount()) {
+      console.log('[update_loan] ЗАБЛОКИРОВАНО: в сообщении пользователя нет суммы —', getLastUserMessage().slice(0, 60))
+      setWriteBlocked('update_loan:no_amount_in_message')
       return
     }
     const { data:loan } = await s.from('loans').select('id,name,principal').eq('user_id',USER_ID).ilike('name',`%${action.name}%`).maybeSingle()
@@ -1562,9 +1540,9 @@ export async function executeAction(action: BotAction): Promise<void> {
     }
 
   } else if (action.type === 'update_salary' && action.salary_net != null) {
-    if (!/\d{3,}/.test(_lastUserMessage.replace(/\s/g, ''))) {
+    if (!userMessageHasAmount()) {
       console.log('[update_salary] ЗАБЛОКИРОВАНО: нет суммы в сообщении пользователя')
-      _lastWriteBlocked = 'update_salary:no_amount_in_message'
+      setWriteBlocked('update_salary:no_amount_in_message')
       return
     }
     const upd: Record<string, number> = { salary_net: Math.round(action.salary_net) }
@@ -1664,7 +1642,7 @@ export async function executeAction(action: BotAction): Promise<void> {
     // именно так накопились 58 мёртвых коррекций с июньскими суммами.
     if (/\d{3,}/.test(text.replace(/\s/g, ''))) {
       console.log('[save_correction] ОТКЛОНЕНО: содержит суммы')
-      _lastCorrectionRejected = true
+      setCorrectionRejected()
       return
     }
     const { data: recentMsgs } = await s.from('bot_messages').select('role,content,created_at').eq('user_id', USER_ID).order('created_at', {ascending: false}).limit(4)
@@ -1699,9 +1677,9 @@ export async function executeAction(action: BotAction): Promise<void> {
     }
 
   } else if (action.type === 'update_cashflow') {
-    if (!/\d{3,}/.test(_lastUserMessage.replace(/\s/g, ''))) {
+    if (!userMessageHasAmount()) {
       console.log('[update_cashflow] ЗАБЛОКИРОВАНО: нет суммы в сообщении пользователя')
-      _lastWriteBlocked = 'update_cashflow:no_amount_in_message'
+      setWriteBlocked('update_cashflow:no_amount_in_message')
       return
     }
     const monthKey3 = mk()
@@ -1716,9 +1694,9 @@ export async function executeAction(action: BotAction): Promise<void> {
     }
 
   } else if (action.type === 'update_revenue') {
-    if (!/\d{3,}/.test(_lastUserMessage.replace(/\s/g, ''))) {
+    if (!userMessageHasAmount()) {
       console.log('[update_revenue] ЗАБЛОКИРОВАНО: нет суммы в сообщении пользователя')
-      _lastWriteBlocked = 'update_revenue:no_amount_in_message'
+      setWriteBlocked('update_revenue:no_amount_in_message')
       return
     }
     const targetMk = action.month_key ?? (() => {
@@ -1845,7 +1823,7 @@ export async function executeAction(action: BotAction): Promise<void> {
     ])
     if (DERIVED_KEYS.has(String(action.key))) {
       console.log(`[update_anchor] отклонён производный ключ: ${action.key}`)
-      _lastWriteBlocked = 'update_anchor:derived'
+      setWriteBlocked('update_anchor:derived')
       return
     }
     await s.from('bot_anchors').upsert({
@@ -1859,7 +1837,7 @@ export async function executeAction(action: BotAction): Promise<void> {
 
   } else if (action.type === 'save_memory' && action.content) {
     const clean = sanitizeStr(action.content, 1000) ?? ''
-    if (!clean) { _lastMemoryOutcome = 'empty'; return }
+    if (!clean) { setMemoryOutcome('empty'); return }
     // Дедуп по смыслу, а не по префиксу: сравниваем набор значимых слов.
     // Префиксный ilike(40) пропускал «Александр работает в АТОН...» ×4 —
     // варианты расходились после 40-го символа.
@@ -1880,7 +1858,7 @@ export async function executeAction(action: BotAction): Promise<void> {
     // Флаг для handleTool: содержит ли заметка сумму. Деньги без своего поля
     // (внешний вклад, чужие акции) должны сопровождаться явным «не считается
     // в балансе» в каждом ответе — а не когда модель случайно вспомнит правило.
-    _lastMemoryOutcome = isDup ? 'duplicate' : (/\d{3,}/.test(clean.replace(/\s/g, '')) ? 'saved_money' : 'saved')
+    setMemoryOutcome(isDup ? 'duplicate' : (/\d{3,}/.test(clean.replace(/\s/g, '')) ? 'saved_money' : 'saved'))
     if (!isDup) {
       await s.from('bot_memories').insert({
         user_id: USER_ID, content: clean,
@@ -1897,7 +1875,7 @@ export async function executeAction(action: BotAction): Promise<void> {
     // отсутствующем delete_goal — бот сказал "удалена", хотя действие
     // не существовало вообще).
     console.log('[executeAction] НЕРАСПОЗНАННЫЙ action.type:', action.type)
-    _lastActionUnrecognized = action.type
+    setActionUnrecognized(action.type)
   }
 }
 
@@ -1908,22 +1886,6 @@ export { TOOLS }
 interface ContentBlock { type:string; text?:string; id?:string; name?:string; input?:Record<string,unknown> }
 
 // Один раунд вызова Claude с инструментами
-export let _lastUsage: Record<string, number> = {}
-
-// Ставится в true, если save_correction отклонён из-за цифр в тексте.
-// handleTool читает флаг и объясняет модели, что делать вместо этого.
-let _lastCorrectionRejected = false
-// Итог последнего save_memory: 'saved' | 'saved_money' | 'duplicate' | 'empty'.
-// handleTool строит по нему точный ответ вместо общего финансового блока.
-let _lastMemoryOutcome = ''
-// Если ни одна ветка executeAction не совпала — здесь имя нераспознанного
-// action.type. Пусто = всё нормально, действие было обработано.
-let _lastActionUnrecognized = ''
-
-// Накопитель за ВЕСЬ запрос (все раунды tool-loop), а не за последний раунд.
-// Без этого стоимость запроса недооценивается в 3-5 раз.
-export let _reqUsage: Record<string, number> = {}
-export function resetReqUsage() { _reqUsage = {} }
 
 // Ставит cache_control на последний system-блок.
 // Эффект: внутри одного tool-loop раунды 2..6 читают ВЕСЬ префикс
@@ -1950,11 +1912,7 @@ async function callClaude(modelId: string, systemBlocks: unknown[], messages: un
   })
   const j = await res.json()
   if (j.usage) {
-    _lastUsage = j.usage
-    for (const [k, v] of Object.entries(j.usage)) {
-      if (typeof v === 'number') _reqUsage[k] = (_reqUsage[k] ?? 0) + v
-    }
-    _reqUsage.rounds = (_reqUsage.rounds ?? 0) + 1
+    recordUsage(j.usage)
   }
   return j
 }
@@ -2319,10 +2277,7 @@ async function handleTool(name: string, input: Record<string,unknown>): Promise<
     })
   }
   // DB-writing tools
-  _lastCorrectionRejected = false
-  _lastMemoryOutcome = ''
-  _lastWriteBlocked = ''
-  _lastActionUnrecognized = ''
+  resetActionFlags()
   // Централизованная защита: на сослагательный вопрос НИ ОДИН инструмент,
   // меняющий деньги, не должен сработать. Точечных проверок недостаточно —
   // модель обходила их, вызывая соседний инструмент (early_repay → update_loan).
@@ -2343,18 +2298,16 @@ async function handleTool(name: string, input: Record<string,unknown>): Promise<
     })
   }
   await executeAction({ type: name, ...input } as BotAction)
-  if (_lastActionUnrecognized) {
-    const unknownType = _lastActionUnrecognized
-    _lastActionUnrecognized = ''
+  const unknownType = takeActionUnrecognized()
+  if (unknownType) {
     return JSON.stringify({
       saved: false,
       reason: `«${unknownType}» НЕ реализован — такого действия не существует в системе. Ничего не произошло.`,
       what_to_do: 'НЕ говори пользователю что что-то удалено/изменено/выполнено. Скажи прямо: "у меня нет инструмента для этого", как учит правило честности.',
     })
   }
-  if (_lastWriteBlocked) {
-    const blocked = _lastWriteBlocked
-    _lastWriteBlocked = ''
+  const blocked = takeWriteBlocked()
+  if (blocked) {
     if (blocked.endsWith(':no_amount_in_message')) {
       const toolName = blocked.split(':')[0]
       return JSON.stringify({
@@ -2369,7 +2322,7 @@ async function handleTool(name: string, input: Record<string,unknown>): Promise<
       what_to_do: 'Это запрос на РАСЧЁТ, а не на изменение данных. Посчитай сценарий и покажи результат, явно указав что это прогноз и данные не изменены. Если пользователь захочет применить — он скажет утвердительно.',
     })
   }
-  if (name === 'save_correction' && _lastCorrectionRejected) {
+  if (name === 'save_correction' && getCorrectionRejected()) {
     return JSON.stringify({
       saved: false,
       reason: 'Коррекция содержит конкретные суммы и НЕ сохранена. Числа хранятся только в БД.',
@@ -2377,8 +2330,7 @@ async function handleTool(name: string, input: Record<string,unknown>): Promise<
     })
   }
   if (name === 'save_memory') {
-    const outcome = _lastMemoryOutcome
-    _lastMemoryOutcome = ''
+    const outcome = takeMemoryOutcome()
     if (outcome === 'saved_money') {
       return JSON.stringify({
         saved: true,
@@ -2479,7 +2431,7 @@ async function runToolLoop(modelId: string, systemBlocks: unknown[], initialMess
 
 async function processWithModel(text: string, chatId: number, model: 'haiku'|'sonnet'): Promise<string> {
   resetReqUsage()
-  _lastUserMessage = text
+  setLastUserMessage(text)
   const needAnalysis = /проанализир|анализ трат|паттерн|на что трачу|куда уход|структур.*трат/i.test(text)
   // Принудительный финансовый контекст: данные из БД ВСЕГДА при финансовых вопросах
   const isFinancial = /дебет|бюджет|бонус|баланс|трат|потрач|осталось|доход|аванс|зп|зарплат|кредит|карт|финанс|остат|переменн|лимит|деньг|прогноз|сколько|ликвидност|сальдо|позиц/i.test(text)
@@ -2547,7 +2499,7 @@ export async function processWithModelForTest(text: string, _chatId: number): Pr
   resetReqUsage()
   // Без этой строки isHypothetical() читал пустое значение и защита от
   // сослагательных вопросов в тестовом пути была молча отключена.
-  _lastUserMessage = text
+  setLastUserMessage(text)
   if (!process.env.ANTHROPIC_API_KEY) return '⚠️ Добавь ANTHROPIC_API_KEY в Vercel.'
   const model = routeModel(text)
   const needAnalysis = /проанализир|анализ трат|паттерн/i.test(text)
