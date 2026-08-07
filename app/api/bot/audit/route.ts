@@ -69,6 +69,19 @@ export async function GET(req: Request) {
   const deleted = { corrections: 0, memories: 0, anchors: 0 }
   const fixes: string[] = []
 
+  // ?donebacklog=title-fragment1,title-fragment2 — пометить готовым (уже сделано, статус устарел)
+  const doneSpec = new URL(req.url).searchParams.get('donebacklog') ?? ''
+  if (doneSpec) {
+    for (const frag of doneSpec.split('|')) {
+      const { data: hit } = await db.from('bot_backlog').select('id,title')
+        .eq('user_id', USER_ID).ilike('title', `%${frag}%`).eq('status', 'pending').maybeSingle()
+      if (hit) {
+        await db.from('bot_backlog').update({ status: 'done' }).eq('id', hit.id)
+        fixes.push(`backlog done: ${hit.title}`)
+      }
+    }
+  }
+
   // ?fixloanlog=1 — заменить журнал Рефинанса/Кредита В на реальную историю.
   // Предыдущие авто-записи содержали цифры от промежуточного расчёта (до
   // ручной коррекции точными банковскими значениями) — вводили в заблуждение.
