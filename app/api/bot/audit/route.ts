@@ -47,6 +47,7 @@ export async function GET(req: Request) {
     db.from('loans').select('name,principal,rate,min_payment').eq('user_id', USER_ID),
     db.from('bot_anchors').select('key,value,month_key').eq('user_id', USER_ID).in('month_key', [monthKey, 'global']),
   ])
+  const loanLogs = (anchors ?? []).filter(a => a.key.startsWith('loan_log:'))
 
   // Коррекция мусорная, если содержит число из 3+ цифр: это данные, а не правило.
   const hasNumbers = (c: { correction: string }) => /\d{3,}/.test(String(c.correction).replace(/\s/g, ''))
