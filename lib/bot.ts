@@ -1580,6 +1580,15 @@ export async function executeAction(action: BotAction): Promise<void> {
     }
 
   } else if (action.type === 'update_loan' && action.name) {
+    // Дважды за сессию update_loan срабатывал БЕЗ запроса пользователя —
+    // модель "синхронизировала" кредит в ответ на read-only вопрос про график.
+    // Механическая защита: если в сообщении пользователя нет числа похожего
+    // на сумму — это не может быть коррекцией банковских данных, блокируем.
+    if (!/\d{3,}/.test(_lastUserMessage.replace(/\s/g, ''))) {
+      console.log('[update_loan] ЗАБЛОКИРОВАНО: в сообщении пользователя нет суммы —', _lastUserMessage.slice(0, 60))
+      _lastWriteBlocked = 'update_loan:no_amount_in_message'
+      return
+    }
     const { data:loan } = await s.from('loans').select('id,name,principal').eq('user_id',USER_ID).ilike('name',`%${action.name}%`).maybeSingle()
     if (loan) {
       const upd: Record<string,unknown> = {}
@@ -2407,6 +2416,13 @@ async function handleTool(name: string, input: Record<string,unknown>): Promise<
   if (_lastWriteBlocked) {
     const blocked = _lastWriteBlocked
     _lastWriteBlocked = ''
+    if (blocked === 'update_loan:no_amount_in_message') {
+      return JSON.stringify({
+        saved: false,
+        reason: 'update_loan НЕ выполнен: в сообщении пользователя нет суммы. Read-only вопросы (график, прогноз, "покажи") не повод менять данные кредита.',
+        what_to_do: 'Если это была just read-only команда (loan_forecast и т.п.) — просто ответь на неё, ничего не нужно "чинить" или "синхронизировать" в БД. Данные кредита уже верны, пока пользователь явно не прислал новую цифру от банка.',
+      })
+    }
     return JSON.stringify({
       saved: false,
       reason: `Операция «${blocked}» НЕ выполнена: вопрос задан в сослагательном наклонении («если», «предположим», «стоит ли»).`,

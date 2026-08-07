@@ -29,7 +29,7 @@ export const TOOLS = [
     input_schema:{type:'object',properties:{name:{type:'string'},actual_amount:{type:'number',description:'Фактически уплаченная сумма'}},required:['name','actual_amount']} },
   { name:'mark_loan_paid', description:'Отметить оплату ежемесячного платежа по кредиту (по названию).',
     input_schema:{type:'object',properties:{name:{type:'string'}},required:['name']} },
-  { name:'loan_forecast', description:'Прогноз графика платежей вперёд по кредиту(ам): проценты/тело/остаток на каждый месяц. Используй на «покажи график платежей», «когда закрою кредит», «сколько процентов заплачу за N месяцев». Read-only, ничего не меняет.',
+  { name:'loan_forecast', description:'Прогноз графика платежей вперёд по кредиту(ам): проценты/тело/остаток на каждый месяц. Используй на «покажи график платежей», «когда закрою кредит», «сколько процентов заплачу за N месяцев». ТОЛЬКО ЧТЕНИЕ — результат самодостаточен для ответа. НЕ вызывай update_loan/early_repay после этого инструмента: он не находит ошибок в БД, он строит прогноз ОТ текущих цифр, они не нуждаются в «синхронизации».',
     input_schema:{type:'object',properties:{
       name:{type:'string',description:'Название кредита, пусто = все кредиты'},
       months:{type:'number',description:'На сколько месяцев вперёд, по умолчанию 6, максимум 24'},
