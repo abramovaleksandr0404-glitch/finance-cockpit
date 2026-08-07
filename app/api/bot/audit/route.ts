@@ -66,6 +66,30 @@ export async function GET(req: Request) {
   const deleted = { corrections: 0, memories: 0, anchors: 0 }
   const fixes: string[] = []
 
+  // ?fixloanlog=1 — заменить журнал Рефинанса/Кредита В на реальную историю.
+  // Предыдущие авто-записи содержали цифры от промежуточного расчёта (до
+  // ручной коррекции точными банковскими значениями) — вводили в заблуждение.
+  if (new URL(req.url).searchParams.get('fixloanlog') === '1') {
+    await db.from('bot_anchors').upsert([
+      {
+        user_id: USER_ID, month_key: 'global', key: 'loan_log:рефинанс',
+        value: JSON.stringify([
+          { date: '2026-08-03', type: 'early_repay', mode: 'reduce_payment', amount: 80000, note: 'банк: остаток 274063.92' },
+          { date: '2026-08-07', type: 'early_repay', mode: 'reduce_term', amount: 10000, principal_after: 265084.49, payment_after: 9881.30, end_date_after: '2030-12-01', note: 'сверено с банком' },
+        ]),
+        updated_at: new Date().toISOString(),
+      },
+      {
+        user_id: USER_ID, month_key: 'global', key: 'loan_log:кредит в',
+        value: JSON.stringify([
+          { date: '2026-08-07', type: 'early_repay', mode: 'reduce_term', amount: 10000, principal_after: 107313.31, payment_after: 4489.49, end_date_after: '2029-12-01', note: 'сверено с банком' },
+        ]),
+        updated_at: new Date().toISOString(),
+      },
+    ], { onConflict: 'user_id,month_key,key' })
+    fixes.push('журнал Рефинанс/Кредит В переписан на банковские данные')
+  }
+
   // ?restoreloans=name:principal:payment,name:principal:payment
   // Точечное восстановление кредита без LLM — модель ранее меняла А/Б
   // без единого следа в журнале, откатывать нужно напрямую.
