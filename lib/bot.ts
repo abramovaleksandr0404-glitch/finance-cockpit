@@ -1276,6 +1276,10 @@ export async function executeAction(action: BotAction): Promise<void> {
       await s.from('users').update({debit_balance:Math.round((Number(u?.debit_balance??0)-Number(goal.amount))*100)/100,debit_updated_at:new Date().toISOString()}).eq('id',USER_ID)
     }
 
+  } else if (action.type === 'delete_goal' && action.name) {
+    // Не покупка — дебет не трогаем, просто убираем запись
+    await s.from('goals').delete().eq('user_id', USER_ID).ilike('name', `%${action.name}%`)
+
 
   // ════════════ ДОХОДЫ И ЗАРПЛАТА ════════════════════════════════════
   } else if (action.type === 'mark_salary') {
@@ -1968,6 +1972,14 @@ export async function executeAction(action: BotAction): Promise<void> {
     } else {
       console.log('[save_memory] дубликат по смыслу, пропуск')
     }
+  } else {
+    // Ни одна ветка не совпала — action.type не реализован. Без этого флага
+    // функция молча ничего не делает, а модель получает generic "успешный"
+    // ответ и вольна придумать что угодно (случай: "удали цель" при
+    // отсутствующем delete_goal — бот сказал "удалена", хотя действие
+    // не существовало вообще).
+    console.log('[executeAction] НЕРАСПОЗНАННЫЙ action.type:', action.type)
+    _lastActionUnrecognized = action.type
   }
 }
 
@@ -1986,6 +1998,9 @@ let _lastCorrectionRejected = false
 // Итог последнего save_memory: 'saved' | 'saved_money' | 'duplicate' | 'empty'.
 // handleTool строит по нему точный ответ вместо общего финансового блока.
 let _lastMemoryOutcome = ''
+// Если ни одна ветка executeAction не совпала — здесь имя нераспознанного
+// action.type. Пусто = всё нормально, действие было обработано.
+let _lastActionUnrecognized = ''
 
 // Накопитель за ВЕСЬ запрос (все раунды tool-loop), а не за последний раунд.
 // Без этого стоимость запроса недооценивается в 3-5 раз.
@@ -2425,6 +2440,7 @@ async function handleTool(name: string, input: Record<string,unknown>): Promise<
   _lastCorrectionRejected = false
   _lastMemoryOutcome = ''
   _lastWriteBlocked = ''
+  _lastActionUnrecognized = ''
   // Централизованная защита: на сослагательный вопрос НИ ОДИН инструмент,
   // меняющий деньги, не должен сработать. Точечных проверок недостаточно —
   // модель обходила их, вызывая соседний инструмент (early_repay → update_loan).
@@ -2445,6 +2461,15 @@ async function handleTool(name: string, input: Record<string,unknown>): Promise<
     })
   }
   await executeAction({ type: name, ...input } as BotAction)
+  if (_lastActionUnrecognized) {
+    const unknownType = _lastActionUnrecognized
+    _lastActionUnrecognized = ''
+    return JSON.stringify({
+      saved: false,
+      reason: `«${unknownType}» НЕ реализован — такого действия не существует в системе. Ничего не произошло.`,
+      what_to_do: 'НЕ говори пользователю что что-то удалено/изменено/выполнено. Скажи прямо: "у меня нет инструмента для этого", как учит правило честности.',
+    })
+  }
   if (_lastWriteBlocked) {
     const blocked = _lastWriteBlocked
     _lastWriteBlocked = ''

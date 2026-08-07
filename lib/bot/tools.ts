@@ -19,6 +19,8 @@ export const TOOLS = [
     },required:['name','amount']} },
   { name:'mark_goal_bought', description:'Отметить цель купленной (спишет с дебета).',
     input_schema:{type:'object',properties:{name:{type:'string'}},required:['name']} },
+  { name:'delete_goal', description:'Удалить цель без покупки — использовалась по ошибке, передумал, дубликат. НЕ списывает деньги (это не покупка). Для реальной покупки используй mark_goal_bought.',
+    input_schema:{type:'object',properties:{name:{type:'string'}},required:['name']} },
   { name:'mark_salary', description:'Отметить получение зарплаты. part="advance" (аванс) или "eom" (зп+бонус в конце месяца).',
     input_schema:{type:'object',properties:{part:{type:'string',enum:['advance','eom']}},required:['part']} },
   { name:'mark_single_fixed', description:'Отметить оплату одной постоянной траты по названию (спишет с дебета).',
