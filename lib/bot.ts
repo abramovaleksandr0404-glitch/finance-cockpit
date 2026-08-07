@@ -503,7 +503,7 @@ async function _getContextRaw(): Promise<string> {
     supabase.from('loans').select('id,name,principal,accrued_int,min_payment,end_date,rate,paid_month,due_day').eq('user_id',USER_ID).order('sort_order'),
     supabase.from('expenses').select('id,amount,category,description,expense_date,custom_category_id,covers_days').eq('user_id',USER_ID).eq('month_key',monthKey),
     supabase.from('months').select('*').eq('user_id',USER_ID).eq('month_key',monthKey).maybeSingle(),
-    supabase.from('goals').select('id,name,amount,month_key,purchased,target_date').eq('user_id',USER_ID).eq('purchased',false).order('sort_order'),
+    supabase.from('goals').select('id,name,amount,month_key,purchased,target_date,sort_order').eq('user_id',USER_ID).eq('purchased',false).order('sort_order'),
     supabase.from('expenses').select('id,category,amount,description,expense_date').eq('user_id',USER_ID).eq('month_key',monthKey).order('created_at',{ascending:false}).limit(5),
     supabase.from('months').select('month_key,clients,revenue').eq('user_id',USER_ID).gte('month_key',qStartKey).lte('month_key',qEndKey),
     supabase.from('cards').select('name,card_limit,current_debt').eq('user_id',USER_ID).order('sort_order'),
@@ -744,7 +744,36 @@ async function _getContextRaw(): Promise<string> {
       : ' ❓'
     return `  ${paid?'✅':'⏳'} ${f.name}${dayStr}${srcStr}: ${rub(f.amount)}`
   }).join('\n')
-  const goalLines = (goals ?? []).map(g => `  • ${g.name}: ${rub(Number(g.amount))} ${g.month_key ? '('+g.month_key+')' : '(накопление)'}`).join('\n') || '  (нет)'
+  // Горизонт цели — вычисляется из target_date, не хранится отдельным полем
+  // (иначе разъедется с датой, как раньше расходились якоря с таблицами).
+  const classifyHorizon = (g: {month_key: string|null; target_date: string|null}): string => {
+    if (g.month_key === monthKey) return 'ЭТОТ МЕСЯЦ'
+    if (!g.target_date) return 'БЕЗ СРОКА (накопление)'
+    const t = new Date(g.target_date)
+    const monthsAway = (t.getFullYear()-now.getFullYear())*12 + (t.getMonth()-now.getMonth())
+    if (monthsAway <= 0) return 'ЭТОТ МЕСЯЦ'
+    if (monthsAway <= 3) return 'ЭТОТ КВАРТАЛ'
+    if (t.getFullYear() === now.getFullYear()) return 'ДО КОНЦА ГОДА'
+    if (t.getFullYear() === now.getFullYear()+1) return 'ЧЕРЕЗ ГОД'
+    return 'ЧЕРЕЗ 2+ ГОДА'
+  }
+  const HORIZON_ORDER = ['ЭТОТ МЕСЯЦ','ЭТОТ КВАРТАЛ','ДО КОНЦА ГОДА','ЧЕРЕЗ ГОД','ЧЕРЕЗ 2+ ГОДА','БЕЗ СРОКА (накопление)']
+  const goalsByHorizon: Record<string, {name:string;amount:number;target_date:string|null;sort_order:number}[]> = {}
+  for (const g of (goals ?? []) as {name:string;amount:number;month_key:string|null;target_date:string|null;sort_order:number}[]) {
+    const h = classifyHorizon(g)
+    ;(goalsByHorizon[h] ??= []).push({ name: g.name, amount: Number(g.amount), target_date: g.target_date, sort_order: g.sort_order ?? 2 })
+  }
+  const goalLines = HORIZON_ORDER.filter(h => goalsByHorizon[h]?.length).map(h => {
+    const items = goalsByHorizon[h].sort((a,b)=>a.sort_order-b.sort_order)
+    const sum = items.reduce((s,i)=>s+i.amount,0)
+    const lines = items.map(i => `    • ${i.name}: ${rub(i.amount)}${i.target_date?` (к ${i.target_date})`:''}`).join('\n')
+    // Для горизонта "этот квартал" сразу видно, покрывает ли бонус план —
+    // без этого пользователю приходится сверять цифры руками в двух местах.
+    const bonusNote = h === 'ЭТОТ КВАРТАЛ'
+      ? `\n    (ожидаемый квартальный бонус на руки: ${rub(qBonusNet)}, ${qBonusNet >= sum ? 'покрывает' : `не хватает ${rub(sum-qBonusNet)}`})`
+      : ''
+    return `  ${h} — итого ${rub(sum)}:\n${lines}${bonusNote}`
+  }).join('\n') || '  (нет целей)'
   const loanLines = (loans ?? []).map(l => {
     const principal = Math.round(Number(l.principal))
     const accrued = Math.round(Number(l.accrued_int ?? 0))
@@ -1230,7 +1259,13 @@ export async function executeAction(action: BotAction): Promise<void> {
          : await s.from('months').insert({user_id:USER_ID,month_key:monthKey,clients,revenue:newRev})
 
   } else if (action.type === 'add_goal' && action.name && action.amount) {
-    await s.from('goals').insert({user_id:USER_ID,name:action.name,amount:Math.round(action.amount),month_key:action.month_key??null,sort_order:99})
+    const priority = Math.min(3, Math.max(1, Math.round(Number((action as { priority?: number }).priority ?? 2))))
+    await s.from('goals').insert({
+      user_id: USER_ID, name: action.name, amount: Math.round(action.amount),
+      month_key: action.month_key ?? null,
+      target_date: (action as { target_date?: string }).target_date ?? null,
+      sort_order: priority,
+    })
 
   } else if (action.type === 'mark_goal_bought' && action.name) {
     if (isHypothetical()) { console.log('[mark_goal_bought] ЗАБЛОКИРОВАНО: гипотетический вопрос'); _lastWriteBlocked = 'mark_goal_bought'; return }
@@ -2289,6 +2324,32 @@ async function handleTool(name: string, input: Record<string,unknown>): Promise<
     const fragment = String(input.content_fragment ?? '').slice(0, 100)
     if (fragment) await db().from('bot_memories').delete().eq('user_id', USER_ID).ilike('content', `%${fragment}%`)
     return JSON.stringify({ deleted: true })
+  }
+  if (name === 'loan_forecast') {
+    // Прогноз графика вперёд — та же математика что в early_repay, но без
+    // записи в БД. Данные всегда живые (principal/rate/payment из таблицы),
+    // не переспрашивает пользователя банковскую выписку каждый раз.
+    const months = Math.min(24, Math.max(1, Math.round(Number(input.months ?? 6))))
+    const nameFilter = String(input.name ?? '')
+    const { data: loans } = await db().from('loans').select('name,principal,rate,min_payment')
+      .eq('user_id', USER_ID).gt('principal', 0)
+    const filtered = nameFilter
+      ? (loans ?? []).filter(l => l.name.toLowerCase().includes(nameFilter.toLowerCase()))
+      : (loans ?? [])
+    const result = filtered.map(l => {
+      let balance = Number(l.principal)
+      const monthlyRate = Number(l.rate) / 12
+      const payment = Number(l.min_payment)
+      const rows: { month: number; interest: number; principal_paid: number; balance_after: number }[] = []
+      for (let m = 1; m <= months && balance > 0; m++) {
+        const interest = Math.round(balance * monthlyRate * 100) / 100
+        const principalPaid = Math.min(balance, Math.round((payment - interest) * 100) / 100)
+        balance = Math.round((balance - principalPaid) * 100) / 100
+        rows.push({ month: m, interest, principal_paid: principalPaid, balance_after: balance })
+      }
+      return { name: l.name, starting_balance: Number(l.principal), monthly_payment: payment, schedule: rows }
+    })
+    return JSON.stringify({ source: 'LIVE_DB_COMPUTED', months_requested: months, loans: result })
   }
   if (name === 'semantic_search') {
     // Ranked поиск по основам слов. ilike по всей фразе не работал никогда:

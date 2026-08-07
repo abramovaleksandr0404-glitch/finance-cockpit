@@ -9,8 +9,14 @@ export const TOOLS = [
     input_schema:{type:'object',properties:{id:{type:'string'}}} },
   { name:'add_client', description:'Записать закрытого клиента/сделку. Грейд g3/g4/g56/g78/g9/g10.',
     input_schema:{type:'object',properties:{grade:{type:'string'},revenue:{type:'number'}},required:['grade']} },
-  { name:'add_goal', description:'Добавить цель/плановую покупку. month_key="2026-06" для конкретного месяца или null для накопления.',
-    input_schema:{type:'object',properties:{name:{type:'string'},amount:{type:'number'},month_key:{type:['string','null']}},required:['name','amount']} },
+  { name:'add_goal', description:'Добавить цель или плановую трату — это ОДНА сущность с разным сроком: разовая покупка в этом месяце, накопление без срока, или цель на квартал/год/несколько лет вперёд. month_key для конкретного месяца, target_date для более дальнего горизонта (квартал/год/2 года — определится автоматически по дате).',
+    input_schema:{type:'object',properties:{
+      name:{type:'string'},
+      amount:{type:'number'},
+      month_key:{type:['string','null'],description:'"2026-08" для конкретного месяца, null если не привязано к месяцу'},
+      target_date:{type:'string',description:'YYYY-MM-DD — желаемый срок для целей за пределами текущего месяца (квартал/год/2 года). Необязательно.'},
+      priority:{type:'number',description:'1=высокий, 2=средний, 3=низкий. По умолчанию 2.'},
+    },required:['name','amount']} },
   { name:'mark_goal_bought', description:'Отметить цель купленной (спишет с дебета).',
     input_schema:{type:'object',properties:{name:{type:'string'}},required:['name']} },
   { name:'mark_salary', description:'Отметить получение зарплаты. part="advance" (аванс) или "eom" (зп+бонус в конце месяца).',
@@ -23,6 +29,11 @@ export const TOOLS = [
     input_schema:{type:'object',properties:{name:{type:'string'},actual_amount:{type:'number',description:'Фактически уплаченная сумма'}},required:['name','actual_amount']} },
   { name:'mark_loan_paid', description:'Отметить оплату ежемесячного платежа по кредиту (по названию).',
     input_schema:{type:'object',properties:{name:{type:'string'}},required:['name']} },
+  { name:'loan_forecast', description:'Прогноз графика платежей вперёд по кредиту(ам): проценты/тело/остаток на каждый месяц. Используй на «покажи график платежей», «когда закрою кредит», «сколько процентов заплачу за N месяцев». Read-only, ничего не меняет.',
+    input_schema:{type:'object',properties:{
+      name:{type:'string',description:'Название кредита, пусто = все кредиты'},
+      months:{type:'number',description:'На сколько месяцев вперёд, по умолчанию 6, максимум 24'},
+    }} },
   { name:'early_repay', description:'Досрочное погашение кредита. Банк предлагает ДВА разных сценария — не путай их, это разные операции с разным результатом.',
     input_schema:{type:'object',properties:{
       name:{type:'string'},
