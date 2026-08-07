@@ -38,6 +38,7 @@ export async function GET(req: Request) {
   const [
     { data: corrections }, { data: memories }, { data: user },
     { data: month }, { data: cards }, { data: loans }, { data: anchors },
+    { data: backlog }, { data: ideas },
   ] = await Promise.all([
     db.from('bot_corrections').select('id,correction,category,created_at').eq('user_id', USER_ID).order('created_at', { ascending: false }),
     db.from('bot_memories').select('id,content,category,importance,created_at').eq('user_id', USER_ID).order('importance', { ascending: false }),
@@ -46,6 +47,8 @@ export async function GET(req: Request) {
     db.from('cards').select('name,card_limit,current_debt').eq('user_id', USER_ID),
     db.from('loans').select('name,principal,rate,min_payment').eq('user_id', USER_ID),
     db.from('bot_anchors').select('key,value,month_key').eq('user_id', USER_ID).in('month_key', [monthKey, 'global']),
+    db.from('bot_backlog').select('title,description,priority,status,created_at').eq('user_id', USER_ID).order('created_at', { ascending: false }),
+    db.from('bot_ideas').select('content,created_at').eq('user_id', USER_ID).order('created_at', { ascending: false }),
   ])
   const loanLogs = (anchors ?? []).filter(a => a.key.startsWith('loan_log:'))
 
@@ -177,6 +180,8 @@ export async function GET(req: Request) {
 
   return Response.json({
     mode: doCleanup ? 'CLEANUP EXECUTED' : 'audit only',
+    backlog: backlog ?? [],
+    ideas: ideas ?? [],
     fixes,
     deleted,
     corrections_total: corrections?.length ?? 0,
