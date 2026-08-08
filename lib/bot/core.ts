@@ -484,7 +484,12 @@ async function _getContextRaw(): Promise<string> {
 
   const pendingLoanPayments = (loans ?? []).filter(l => l.paid_month !== monthKey).reduce((s,l) => s+Number(l.min_payment), 0)
   const totalDebt = (loans ?? []).reduce((s,l) => s+Number(l.principal)+Number(l.accrued_int), 0)
-  const totalMonthlyPayment = (loans ?? []).reduce((s,l) => s+Number(l.min_payment), 0)
+  // Итог по платежам с учётом переходных: без этого шапка контекста давала
+  // регулярную сумму, а строки ниже — фактическую, и бот выбирал произвольно.
+  const totalMonthlyPayment = (loans ?? []).reduce((sum, l) => {
+    const ov = (payOverridesCtx ?? []).find((a: {key:string}) => a.key === `loan_payment_override:${l.name.toLowerCase()}:${monthKey}`)
+    return sum + (ov ? Number(ov.value) : Number(l.min_payment))
+  }, 0)
   // Прогноз остатка = баланс + входы − кредиты − постоянные − переменные до лимита
   // BUGFIX: прогноз от чистой позиции (дебет − долги по картам), НЕ от ликвидности
   const projEndComputed = netPosition + incomingTotal - pendingLoanPayments - fixedUnpaid - varLeft
@@ -747,7 +752,7 @@ ${plannedPurchases.length ? plannedPurchases.map(g=>`  • ${g.name}: ${rub(Numb
   [формула: ${rub(__core.forecast_eom)} + аванс ${rub(__core.next_adv)} + ЗП ${rub(__core.next_eom)} + стип ${rub(nextRecurringTotal)} − кредиты ${rub(totalMonthlyPayment)} − постоянные ${rub(fixedTotal)} − переменные ${rub(varBudget)}]
   ⚠️ Аванс/ЗП июля НЕ равны июньским (в июне был отпуск). Отпускные в июле пока НЕ загружены.${nextQBonus > 0 ? `\n  💰 Квартальный бонус Q (разово, сверх базового): +${rub(nextQBonus)} → с ним прогноз ${rub(__core.next_forecast + nextQBonus)}` : ''}
 
-=== КРЕДИТЫ (всего ${rub(totalDebt)}, платёж ${rub(totalMonthlyPayment)}/мес) ===
+=== КРЕДИТЫ (ВСЕГО ТЕЛО ${rub(totalDebt)} — БРАТЬ ДОСЛОВНО, НЕ СКЛАДЫВАТЬ САМОМУ; платёж в этом месяце ${rub(totalMonthlyPayment)}) ===
 ${loanLines}
 
 === ПОСТОЯННЫЕ (всего ${rub(fixedTotal)}, оплачено ${rub(fixedPaidSum)}) ===
