@@ -459,6 +459,16 @@ export async function executeAction(action: BotAction, userText?: string): Promi
       setWriteBlocked('early_repay')
       return
     }
+    // СТРУКТУРНАЯ защита, не зависящая от словаря: досрочное погашение —
+    // необратимая операция на крупную сумму. Требуем ЯВНЫЙ повелительный
+    // глагол. Список сослагательных маркеров всегда неполон («смоделируй»
+    // однажды прошёл мимо и списал 30 000), а список команд — закрытый.
+    const IMPERATIVE = /(^|[^а-яёa-z])(погаси|внеси|заплати|оплати|спиши|провед|сделай|подтвержда)/i
+    if (!_sys && !IMPERATIVE.test(userText ?? '')) {
+      console.log('[early_repay] ЗАБЛОКИРОВАНО: нет явной команды на погашение —', (userText ?? '').slice(0, 60))
+      setWriteBlocked('early_repay:no_explicit_command')
+      return
+    }
     const { data:loan } = await s.from('loans').select('*').eq('user_id',USER_ID).ilike('name',`%${action.name}%`).maybeSingle()
     if (loan) {
       // mode определяет какой параметр банк держит постоянным — это РАЗНЫЕ

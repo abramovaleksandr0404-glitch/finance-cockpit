@@ -507,6 +507,13 @@ async function handleTool(name: string, input: Record<string,unknown>, userText?
   }
   const blocked = takeWriteBlocked()
   if (blocked) {
+    if (blocked === 'early_repay:no_explicit_command') {
+      return JSON.stringify({
+        saved: false,
+        reason: 'Досрочное погашение НЕ выполнено: в сообщении нет явной команды («погаси», «внеси», «оплати»).',
+        what_to_do: 'Это был запрос на РАСЧЁТ. Покажи сценарий и явно скажи, что данные НЕ изменены. Если пользователь захочет применить — он напишет «погаси X».',
+      })
+    }
     if (blocked.endsWith(':no_amount_in_message')) {
       const toolName = blocked.split(':')[0]
       return JSON.stringify({
