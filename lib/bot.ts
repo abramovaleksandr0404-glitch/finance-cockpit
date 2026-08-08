@@ -396,10 +396,10 @@ async function _getContextRaw(): Promise<string> {
   const [{data:user},{data:loans},{data:expenses},{data:month},{data:goals},{data:recentExp},{data:quarterMonths},{data:cards},{data:incomeEvents},{data:customCats},{data:corrections},{data:holidays},{data:prevExpenses},{data:anchors}] = await Promise.all([
     supabase.from('users').select('*').eq('id',USER_ID).single(),
     supabase.from('loans').select('id,name,principal,accrued_int,min_payment,end_date,rate,paid_month,due_day').eq('user_id',USER_ID).order('sort_order'),
-    supabase.from('expenses').select('id,amount,category,description,expense_date,custom_category_id,covers_days').eq('user_id',USER_ID).eq('month_key',monthKey),
+    supabase.from('expenses').select('id,amount,category,description,expense_date,custom_category_id,covers_days,source_type').eq('user_id',USER_ID).eq('month_key',monthKey),
     supabase.from('months').select('*').eq('user_id',USER_ID).eq('month_key',monthKey).maybeSingle(),
     supabase.from('goals').select('id,name,amount,month_key,purchased,target_date,sort_order').eq('user_id',USER_ID).eq('purchased',false).order('sort_order'),
-    supabase.from('expenses').select('id,category,amount,description,expense_date').eq('user_id',USER_ID).eq('month_key',monthKey).order('created_at',{ascending:false}).limit(5),
+    supabase.from('expenses').select('id,category,amount,description,expense_date,source_type').eq('user_id',USER_ID).eq('month_key',monthKey).order('created_at',{ascending:false}).limit(5),
     supabase.from('months').select('month_key,clients,revenue').eq('user_id',USER_ID).gte('month_key',qStartKey).lte('month_key',qEndKey),
     supabase.from('cards').select('name,card_limit,current_debt').eq('user_id',USER_ID).order('sort_order'),
     supabase.from('income_events').select('event_date,description,amount').eq('user_id',USER_ID).eq('month_key',monthKey),
@@ -629,7 +629,10 @@ async function _getContextRaw(): Promise<string> {
   const nextIncoming = advAmount + eomAmount + bonusJulNet + nextRecurringTotal + nextQBonus
   const nextProjEnd = Math.round(projEnd + nextIncoming - totalMonthlyPayment - fixedTotal - varBudget)
 
-  const recentLines = (recentExp ?? []).map(e => `  • ${e.expense_date} ${e.category}: ${rub(Number(e.amount))}${e.description?' — '+e.description:''}`).join('\n') || '  (нет)'
+  // Источник траты виден явно: раньше source_type не выбирался запросом,
+  // и модель подписывала «Дебет» даже тратам наличными и с карт.
+  const srcTag = (st?: string) => st === 'cash' ? ' 💵нал' : st === 'card' ? ' 💳карта' : ' 🏦дебет'
+  const recentLines = (recentExp ?? []).map(e => `  • ${e.expense_date} ${e.category}: ${rub(Number(e.amount))}${srcTag((e as {source_type?:string}).source_type)}${e.description?' — '+e.description:''}`).join('\n') || '  (нет)'
   const fixedLines = (fixedCosts as {name:string;amount:number;day?:number;source?:string}[]).map((f,i) => {
     const paid = fixedPaid[String(i)] !== undefined
     const dayStr = f.day ? ` (${f.day}-го)` : ''
@@ -737,7 +740,7 @@ async function _getContextRaw(): Promise<string> {
     .filter(e => e.expense_date >= sevenDaysAgoISO)
     .sort((a, b) => b.expense_date.localeCompare(a.expense_date))
     .slice(0, 15)
-  const recentExp7Lines = recentExp7.map(e => `  • ${e.expense_date}: ${e.description ?? e.category} — ${rub(Number(e.amount))}`).join('\n')
+  const recentExp7Lines = recentExp7.map(e => `  • ${e.expense_date}: ${e.description ?? e.category} — ${rub(Number(e.amount))}${srcTag((e as {source_type?:string}).source_type)}`).join('\n')
   const allExpensesSection = `\n📊 ПЕРЕМЕННЫЕ ТРАТЫ ${monthKey} (все ${expenses?.length ?? 0} шт = ${rub(varSpent)}):\n${catLines || '  (нет трат)'}\n\n  Последние 7 дней:\n${recentExp7Lines || '  (нет трат)'}\n`
 
   // Sprint 19 — топ-5 важных воспоминаний из долгосрочной памяти

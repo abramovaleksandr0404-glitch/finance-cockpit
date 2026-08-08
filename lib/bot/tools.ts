@@ -5,8 +5,10 @@ import { plannerTools, plannerSummaryTool } from '../planner'
 export const TOOLS = [
   { name:'add_expense', description:'Записать трату С ЛЮБОГО источника (дебет, наличные ИЛИ кредитная карта). ЕДИНСТВЕННЫЙ инструмент для трат — не комбинируй с mark_card_payment или update_cash, иначе трата запишется дважды. Обязательно укажи source; если пользователь не сказал откуда — спроси.',
     input_schema:{type:'object',properties:{amount:{type:'number'},category:{type:'string',enum:['Еда и кафе','Транспорт','Здоровье','Развлечения','Одежда','Инвестиции','Прочее']},description:{type:'string'},source:{type:'string',enum:['debit','cash','credit_tbank','credit_sber','split'],description:'Откуда списано: debit — Сбер дебет (уменьшает баланс); cash — наличные на руках (уменьшает наличные); credit_tbank / credit_sber / split — кредитная карта (растёт долг, дебет не трогается)'}},required:['amount','source']} },
-  { name:'delete_expense', description:'Удалить трату. По умолчанию последнюю (id="last") или по фрагменту id.',
-    input_schema:{type:'object',properties:{id:{type:'string'}}} },
+  { name:'delete_expense', description:'Удалить трату. Возврат идёт на ТОТ ЖЕ источник, откуда была трата (наличные → наличные, карта → карта). Если пользователь назвал сумму или описание — ОБЯЗАТЕЛЬНО передай их в id как фрагмент описания, иначе удалится просто последняя трата и цифры разойдутся.',
+    input_schema:{type:'object',properties:{
+      id:{type:'string',description:'Фрагмент описания траты для поиска (например "вода" или "такси"). "last" — удалить последнюю по времени. Не угадывай: если пользователь указал конкретную трату, ищи по её описанию.'},
+    }} },
   { name:'add_client', description:'Записать закрытого клиента/сделку. Грейд g3/g4/g56/g78/g9/g10.',
     input_schema:{type:'object',properties:{grade:{type:'string'},revenue:{type:'number'}},required:['grade']} },
   { name:'add_goal', description:'Добавить цель или плановую трату — это ОДНА сущность с разным сроком: разовая покупка в этом месяце, накопление без срока, или цель на квартал/год/несколько лет вперёд. month_key для конкретного месяца, target_date для более дальнего горизонта (квартал/год/2 года — определится автоматически по дате).',
