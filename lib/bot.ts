@@ -2046,6 +2046,10 @@ async function _getLoansRaw(): Promise<string> {
   // «что происходило» по памяти диалога и путает даты/суммы задним числом.
   const { data: anchorRows } = await s.from('bot_anchors').select('key,value')
     .eq('user_id', USER_ID).eq('month_key', 'global').like('key', 'loan_log:%')
+  // Переходные платежи этого месяца — итог должен считаться по ним,
+  // иначе шапка показывает регулярную сумму и противоречит строкам ниже.
+  const { data: ovRows } = await s.from('bot_anchors').select('key,value')
+    .eq('user_id', USER_ID).eq('month_key', 'global').like('key', `loan_payment_override:%:${mk2}`)
   const logByLoan: Record<string, unknown[]> = {}
   for (const r of anchorRows ?? []) {
     const nm = r.key.replace('loan_log:', '')
@@ -2055,10 +2059,14 @@ async function _getLoansRaw(): Promise<string> {
     const principal = Math.round(Number(l.principal))
     const rate = Number(l.rate)
     const minPay = Math.round(Number(l.min_payment))
+    const ovr = (ovRows ?? []).find(r => r.key === `loan_payment_override:${l.name.toLowerCase()}:${mk2}`)
+    const payThisMonth = ovr ? Math.round(Number(ovr.value)) : minPay
     const monthsLeft = annuityMonthsFor(principal, rate / 12, minPay)
     const overpay = Math.max(0, minPay * monthsLeft - principal)
     return {
       name:l.name, principal, rate_percent:Math.round(rate*10000)/100, min_payment:minPay,
+      payment_this_month: payThisMonth,
+      payment_note: ovr ? `в ${mk2} разово ${payThisMonth}₽ вместо ${minPay}₽ (после досрочки)` : null,
       end_date:l.end_date, paid_this_month:l.paid_month===mk2, months_left:monthsLeft, overpay_estimate:overpay,
       recent_events: logByLoan[l.name.toLowerCase()] ?? [],
     }
@@ -2067,7 +2075,8 @@ async function _getLoansRaw(): Promise<string> {
     source:'LIVE_DB',
     loans:list,
     total_principal:list.reduce((s,l)=>s+l.principal,0),
-    total_min_payment_monthly:list.reduce((s,l)=>s+l.min_payment,0),
+    total_min_payment_regular:list.reduce((s,l)=>s+l.min_payment,0),
+    total_payment_THIS_MONTH:list.reduce((s,l)=>s+l.payment_this_month,0),
     total_overpay_estimate:list.reduce((s,l)=>s+l.overpay_estimate,0),
   }, null, 2)
 }
