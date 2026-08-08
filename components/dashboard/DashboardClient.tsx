@@ -46,8 +46,12 @@ function nextMonthKey(key: string): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
 }
 
-export default function DashboardClient({ data, monthKey, initialTab = 'main' }: {
-  data: DashboardData; monthKey: string; initialTab?: string
+// core — авторитетные цифры из computeFinancialState(). Если ядро отдало
+// значение, показываем ЕГО: сайт больше не считает эти величины сам.
+type CoreState = { liquid: number; pending_loans: number; cash: number } | null
+
+export default function DashboardClient({ data, monthKey, initialTab = 'main', core = null }: {
+  data: DashboardData; monthKey: string; initialTab?: string; core?: CoreState
 }) {
   const router = useRouter()
   const [tab, setTab] = useState<Tab>((initialTab as Tab) ?? 'main')

@@ -182,7 +182,12 @@ export interface LoansSummary {
 export function calcLoansSummary(data: DashboardData): LoansSummary {
   const { loans, user } = data
   const totalDebt = loans.reduce((s, l) => s + Number(l.principal) + Number(l.accrued_int), 0)
-  const totalMinPayment = loans.reduce((s, l) => s + Number(l.min_payment), 0)
+  // Переходный платёж после досрочки действует один месяц и отличается от
+  // регулярного. Раньше сайт всегда суммировал регулярные и показывал
+  // 41 296 ₽ там, где по факту 35 168 ₽.
+  const overrides = (data as { paymentOverrides?: Record<string, number> }).paymentOverrides ?? {}
+  const totalMinPayment = loans.reduce((s, l) =>
+    s + (overrides[l.name.toLowerCase()] ?? Number(l.min_payment)), 0)
   const dailyInterest = loans.reduce((s, l) => s + Number(l.principal) * Number(l.rate) / 365, 0)
   return {
     totalDebt,
@@ -262,7 +267,10 @@ export function monthGoalsTotal(data: DashboardData, key: string): number {
  */
 export function getMonthStartBalance(data: DashboardData, key: string, depth = 0): number {
   const cur = currentMonthKey()
-  const totalLiquid = data.user.debit_balance + (data.user.tbank_debit ?? 0)
+  // Наличные — часть ликвидности (добавлены в ядро). Без них сайт показывал
+  // на 5 000 ₽ меньше, чем бот, и цифры расходились.
+  const cashOnHand = Number((data as { cashOnHand?: number }).cashOnHand ?? 0)
+  const totalLiquid = data.user.debit_balance + (data.user.tbank_debit ?? 0) + cashOnHand
   if (key <= cur || depth > 24) return totalLiquid
   return projectedEndInternal(data, prevMonthKey(key), depth + 1)
 }
