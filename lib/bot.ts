@@ -198,7 +198,7 @@ async function _computeFinancialStateRaw(): Promise<FinancialState> {
   await accrueLoansCore(s)  // начисляем проценты ДО чтения данных кредитов
   const [
     { data: u }, { data: cashAnchor }, { data: month }, { data: expenses },
-    { data: cards }, { data: loans }, { data: goals }, { data: holidays }, { data: nextHolidays },
+    { data: cards }, { data: loans }, { data: goals }, { data: holidays }, { data: nextHolidays }, { data: payOverrides },
   ] = await Promise.all([
     s.from('users').select('debit_balance,tbank_debit,var_budget,fixed_costs,salary_net,recurring_incomes').eq('id', USER_ID).single(),
     s.from('bot_anchors').select('value').eq('user_id', USER_ID).eq('key', 'cash_on_hand').eq('month_key', 'global').maybeSingle(),
@@ -209,6 +209,7 @@ async function _computeFinancialStateRaw(): Promise<FinancialState> {
     s.from('goals').select('name,amount,purchased,month_key,target_date').eq('user_id', USER_ID).eq('purchased', false).order('sort_order'),
     s.from('ru_holidays').select('holiday_date').gte('holiday_date', `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-01`).lte('holiday_date', `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-31`),
     s.from('ru_holidays').select('holiday_date').gte('holiday_date', `${new Date(now.getFullYear(), now.getMonth()+1, 1).getFullYear()}-${String(new Date(now.getFullYear(), now.getMonth()+1, 1).getMonth()+1).padStart(2,'0')}-01`).lte('holiday_date', `${new Date(now.getFullYear(), now.getMonth()+1, 1).getFullYear()}-${String(new Date(now.getFullYear(), now.getMonth()+1, 1).getMonth()+1).padStart(2,'0')}-31`),
+    s.from('bot_anchors').select('key,value').eq('user_id', USER_ID).eq('month_key', 'global').like('key', 'loan_payment_override:%'),
   ])
 
   // ── СЛОЙ 0 ──
@@ -241,10 +242,21 @@ async function _computeFinancialStateRaw(): Promise<FinancialState> {
   const varLeft = varBudget - varSpent
   const dailyVarBudget = Math.round(Math.max(0, varLeft) / Math.max(1, daysLeft))
   const fixedUnpaid = fixedTotal - fixedPaid
+  // Переходный платёж после досрочного погашения: банк на один месяц выставляет
+  // сумму, отличную от регулярной. Раньше хранить это было негде — правка
+  // затиралась при следующем пересчёте, и бот «забывал» её.
+  // Ключ: loan_payment_override:<кредит>:<YYYY-MM>
+  const payOverride = (loanName: string): number | null => {
+    const row = (payOverrides ?? []).find((a: {key:string;value:string}) =>
+      a.key === `loan_payment_override:${loanName.toLowerCase()}:${monthKey}`)
+    return row ? Math.round(Number(row.value)) : null
+  }
+  const effPay = (l: {name:string;min_payment:number}) =>
+    payOverride(l.name) ?? Math.round(Number(l.min_payment))
   const loansPending = (loans ?? []).filter((l:{principal:number;paid_month:string}) => Number(l.principal) > 0 && l.paid_month !== monthKey)
-    .map((l:{name:string;min_payment:number;principal:number}) => ({ name: l.name, amount: Math.min(Math.round(Number(l.min_payment)), Math.round(Number(l.principal))) }))
+    .map((l:{name:string;min_payment:number;principal:number}) => ({ name: l.name, amount: Math.min(effPay(l), Math.round(Number(l.principal))) }))
   const loansPaid = (loans ?? []).filter((l:{paid_month:string}) => l.paid_month === monthKey)
-    .map((l:{name:string;min_payment:number}) => ({ name: l.name, amount: Math.round(Number(l.min_payment)) }))
+    .map((l:{name:string;min_payment:number}) => ({ name: l.name, amount: effPay(l) }))
   const pendingLoans = loansPending.reduce((a,l) => a + l.amount, 0)
 
   // доходы: аванс, зп+бонус, повторяющиеся (стипендия)
@@ -393,11 +405,12 @@ async function _getContextRaw(): Promise<string> {
   const nextMonthDate = new Date(now.getFullYear(), now.getMonth() + 1, 1)
   const nextMonthKey = `${nextMonthDate.getFullYear()}-${String(nextMonthDate.getMonth() + 1).padStart(2, '0')}`
 
-  const [{data:user},{data:loans},{data:expenses},{data:month},{data:goals},{data:recentExp},{data:quarterMonths},{data:cards},{data:incomeEvents},{data:customCats},{data:corrections},{data:holidays},{data:prevExpenses},{data:anchors}] = await Promise.all([
+  const [{data:user},{data:loans},{data:expenses},{data:month},{data:payOverridesCtx},{data:goals},{data:recentExp},{data:quarterMonths},{data:cards},{data:incomeEvents},{data:customCats},{data:corrections},{data:holidays},{data:prevExpenses},{data:anchors}] = await Promise.all([
     supabase.from('users').select('*').eq('id',USER_ID).single(),
     supabase.from('loans').select('id,name,principal,accrued_int,min_payment,end_date,rate,paid_month,due_day').eq('user_id',USER_ID).order('sort_order'),
     supabase.from('expenses').select('id,amount,category,description,expense_date,custom_category_id,covers_days,source_type').eq('user_id',USER_ID).eq('month_key',monthKey),
     supabase.from('months').select('*').eq('user_id',USER_ID).eq('month_key',monthKey).maybeSingle(),
+    supabase.from('bot_anchors').select('key,value').eq('user_id',USER_ID).eq('month_key','global').like('key','loan_payment_override:%'),
     supabase.from('goals').select('id,name,amount,month_key,purchased,target_date,sort_order').eq('user_id',USER_ID).eq('purchased',false).order('sort_order'),
     supabase.from('expenses').select('id,category,amount,description,expense_date,source_type').eq('user_id',USER_ID).eq('month_key',monthKey).order('created_at',{ascending:false}).limit(5),
     supabase.from('months').select('month_key,clients,revenue').eq('user_id',USER_ID).gte('month_key',qStartKey).lte('month_key',qEndKey),
@@ -682,7 +695,13 @@ async function _getContextRaw(): Promise<string> {
       suffix = ` / осталось ${mLeft} мес. до ${l.end_date}`
     }
     const accruedStr = accrued > 0 ? ` (+ накопл.проценты ${rub(accrued)})` : ''
-    return `  • ${l.name}: тело ${rub(principal)}${accruedStr} @ ${(Number(l.rate)*100).toFixed(2)}% — платёж ${rub(Number(l.min_payment))}/мес — ${paid}${suffix}`
+    // Переходный платёж этого месяца показываем явно, иначе бот назовёт
+    // регулярную сумму и разойдётся с банковской выпиской.
+    const ovRow = (payOverridesCtx ?? []).find((a: {key:string}) => a.key === `loan_payment_override:${l.name.toLowerCase()}:${monthKey}`)
+    const payStr = ovRow
+      ? `${rub(Number(ovRow.value))} В ЭТОМ МЕСЯЦЕ (регулярный ${rub(Number(l.min_payment))}, разово снижен после досрочки)`
+      : `${rub(Number(l.min_payment))}/мес`
+    return `  • ${l.name}: тело ${rub(principal)}${accruedStr} @ ${(Number(l.rate)*100).toFixed(2)}% — платёж ${payStr} — ${paid}${suffix}`
   }).join('\n')
   const cardLines = (cards ?? []).map(c => `  • ${c.name}: лимит ${rub(Number(c.card_limit))}, долг ${rub(Number(c.current_debt))}, доступно ${rub(Number(c.card_limit) - Number(c.current_debt))}`).join('\n') || '  (нет)'
   const recurringLines = recurringIncomes.map(r => `  • ${r.name}: ${rub(r.amount)} (${r.day} числа каждого месяца)`).join('\n') || '  (нет)'
@@ -1542,6 +1561,25 @@ export async function executeAction(action: BotAction, userText?: string): Promi
       await updateAnchors(s)
     }
 
+  } else if (action.type === 'set_month_payment' && action.name && action.amount != null) {
+    if (!_hasAmt) {
+      console.log('[set_month_payment] ЗАБЛОКИРОВАНО: нет суммы в сообщении')
+      setWriteBlocked('set_month_payment:no_amount_in_message')
+      return
+    }
+    const { data: ln } = await s.from('loans').select('name').eq('user_id', USER_ID).ilike('name', `%${action.name}%`).maybeSingle()
+    if (!ln) return
+    const mkTarget = action.month_key ?? monthKey
+    // Регулярный min_payment НЕ трогаем — переопределение живёт отдельно и
+    // действует только на указанный месяц. Раньше правка шла прямо в
+    // min_payment и затиралась при следующем пересчёте графика.
+    await s.from('bot_anchors').upsert({
+      user_id: USER_ID, month_key: 'global',
+      key: `loan_payment_override:${ln.name.toLowerCase()}:${mkTarget}`,
+      value: String(Math.round(action.amount)), updated_at: new Date().toISOString(),
+    }, { onConflict: 'user_id,month_key,key' })
+    await appendLoanLog(s, ln.name, { type: 'month_payment_override', month: mkTarget, amount: Math.round(action.amount) })
+
   } else if (action.type === 'update_loan' && action.name) {
     // Дважды за сессию update_loan срабатывал БЕЗ запроса пользователя —
     // модель "синхронизировала" кредит в ответ на read-only вопрос про график.
@@ -2349,7 +2387,7 @@ async function handleTool(name: string, input: Record<string,unknown>, userText?
   // модель обходила их, вызывая соседний инструмент (early_repay → update_loan).
   const MONEY_WRITES = new Set([
     'add_expense', 'add_multiday_expense', 'delete_expense', 'mark_card_payment',
-    'early_repay', 'mark_loan_paid', 'update_loan', 'mark_goal_bought', 'pay_card_debt', 'update_cash', 'manage_recurring_income', 'manage_debt_owed_to_me',
+    'early_repay', 'mark_loan_paid', 'update_loan', 'set_month_payment', 'mark_goal_bought', 'pay_card_debt', 'update_cash', 'manage_recurring_income', 'manage_debt_owed_to_me',
     'mark_fixed_paid', 'mark_fixed_paid_with_amount', 'mark_single_fixed',
     'set_balance', 'update_salary', 'mark_salary', 'mark_recurring_received',
     'record_vacation_pay', 'close_month', 'update_cashflow', 'add_income_event',

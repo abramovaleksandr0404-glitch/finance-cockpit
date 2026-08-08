@@ -33,6 +33,12 @@ export const TOOLS = [
     input_schema:{type:'object',properties:{name:{type:'string'},actual_amount:{type:'number',description:'Фактически уплаченная сумма'}},required:['name','actual_amount']} },
   { name:'mark_loan_paid', description:'Отметить оплату ежемесячного платежа по кредиту (по названию).',
     input_schema:{type:'object',properties:{name:{type:'string'}},required:['name']} },
+  { name:'set_month_payment', description:'Платёж по кредиту В КОНКРЕТНОМ МЕСЯЦЕ отличается от регулярного (переходный платёж после досрочного погашения). Регулярный min_payment НЕ меняется — меняется только этот месяц. Используй на «в августе платёж будет X», «в этом месяце спишется меньше».',
+    input_schema:{type:'object',properties:{
+      name:{type:'string',description:'Название кредита'},
+      amount:{type:'number',description:'Сумма платежа именно в этом месяце'},
+      month_key:{type:'string',description:'YYYY-MM. Если не указан — текущий месяц.'},
+    },required:['name','amount']} },
   { name:'loan_forecast', description:'Прогноз графика платежей вперёд по кредиту(ам): проценты/тело/остаток на каждый месяц. Используй на «покажи график платежей», «когда закрою кредит», «сколько процентов заплачу за N месяцев». ТОЛЬКО ЧТЕНИЕ — результат самодостаточен для ответа. НЕ вызывай update_loan/early_repay после этого инструмента: он не находит ошибок в БД, он строит прогноз ОТ текущих цифр, они не нуждаются в «синхронизации».',
     input_schema:{type:'object',properties:{
       name:{type:'string',description:'Название кредита, пусто = все кредиты'},
