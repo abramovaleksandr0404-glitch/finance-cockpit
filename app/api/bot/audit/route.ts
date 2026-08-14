@@ -69,6 +69,19 @@ export async function GET(req: Request) {
   const deleted = { corrections: 0, memories: 0, anchors: 0 }
   const fixes: string[] = []
 
+  // ?messages=N — последние N сообщений реальной переписки (chat_id пользователя)
+  const msgCount = new URL(req.url).searchParams.get('messages')
+  let recentMessages: unknown[] = []
+  if (msgCount) {
+    const CHAT_ID = Number(process.env.ALLOWED_TELEGRAM_CHAT_ID)
+    const { data } = await db.from('bot_messages')
+      .select('role,content,created_at,msg_type')
+      .eq('chat_id', CHAT_ID)
+      .order('created_at', { ascending: false })
+      .limit(Number(msgCount))
+    recentMessages = (data ?? []).reverse()
+  }
+
   // ?donebacklog=title-fragment1,title-fragment2 — пометить готовым (уже сделано, статус устарел)
   const doneSpec = new URL(req.url).searchParams.get('donebacklog') ?? ''
   if (doneSpec) {
@@ -196,6 +209,7 @@ export async function GET(req: Request) {
     backlog: backlog ?? [],
     ideas: ideas ?? [],
     fixes,
+    recentMessages,
     deleted,
     corrections_total: corrections?.length ?? 0,
     corrections_junk: junk.length,
