@@ -615,8 +615,12 @@ async function runToolLoop(modelId: string, systemBlocks: unknown[], initialMess
     } else {
       const text = content.filter(b => b.type === 'text').map(b => b.text).join('\n').trim()
       if (text) return { text, actionsRun }
-      // Модель завершила ход БЕЗ текста. Если инструменты не вызывались — это чистое действие.
-      if (!anyToolCalled) return { text: '✅ Готово', actionsRun }
+      // Модель завершила ход БЕЗ текста И без единого вызова инструмента —
+      // буквально ничего не произошло. Раньше здесь стояло жёсткое
+      // '✅ Готово' — системная ложь, не зависящая от честности конкретного
+      // действия: пользователь получал «готово» на пустое место. Это и есть
+      // источник многократных «✅ Готово» на «Почему?» и на реальные вопросы.
+      if (!anyToolCalled) return { text: '🤔 Не понял, что нужно сделать — ни одно действие не выполнено. Переформулируй, пожалуйста.', actionsRun }
       // Иначе данные собраны, но ответ не сформулирован → выходим в финализацию ниже.
       break
     }
@@ -632,15 +636,22 @@ async function runToolLoop(modelId: string, systemBlocks: unknown[], initialMess
   } catch (e) {
     console.error('[finalize]', e)
   }
-  return { text: actionsRun.length ? '✅ Готово' : '⚠️ Не смог сформулировать ответ. Попробуй переформулировать вопрос.', actionsRun }
+  // Даже здесь НЕ говорим голое «Готово»: actionsRun даёт список того, что
+  // реально было вызвано — это честнее самоуверенного молчаливого успеха.
+  return {
+    text: actionsRun.length
+      ? `✅ Выполнено: ${actionsRun.join(', ')}. Не смог сформулировать подробности — уточни, если что-то не так.`
+      : '⚠️ Не смог сформулировать ответ. Попробуй переформулировать вопрос.',
+    actionsRun,
+  }
 }
 
-function processWithModel(text: string, chatId: number, model: 'haiku'|'sonnet'): Promise<string> {
+function processWithModel(text: string, chatId: number, model: 'haiku'|'sonnet', historyText?: string): Promise<string> {
   // Изолируем состояние запроса: без этого параллельный запрос перезаписывал
   // userMessage и защиты читали чужой текст.
-  return runInRequest(text, () => _processWithModel(text, chatId, model))
+  return runInRequest(text, () => _processWithModel(text, chatId, model, historyText))
 }
-async function _processWithModel(text: string, chatId: number, model: 'haiku'|'sonnet'): Promise<string> {
+async function _processWithModel(text: string, chatId: number, model: 'haiku'|'sonnet', historyText?: string): Promise<string> {
   const needAnalysis = /проанализир|анализ трат|паттерн|на что трачу|куда уход|структур.*трат/i.test(text)
   // Принудительный финансовый контекст: данные из БД ВСЕГДА при финансовых вопросах
   const isFinancial = /дебет|бюджет|бонус|баланс|трат|потрач|осталось|доход|аванс|зп|зарплат|кредит|карт|финанс|остат|переменн|лимит|деньг|прогноз|сколько|ликвидност|сальдо|позиц/i.test(text)
@@ -682,8 +693,13 @@ async function _processWithModel(text: string, chatId: number, model: 'haiku'|'s
     { role:'user', content:text }
   ]
   const { text: reply } = await runToolLoop(modelId, withPrefixCache(systemBlocks), messages, text)
+  // historyText — «чистая» версия для истории. Без неё сюда попадал текст С
+  // инструкцией-инъекцией («[ДЛИННОЕ ГОЛОСОВОЕ...]»), которую мы сами
+  // подставляем модели: пользователь как будто произносил служебную команду.
+  // Плюс это дублировало отдельный logMessage('voice'), уже сохранивший
+  // тот же текст — одно голосовое оседало в истории дважды с разным видом.
   Promise.all([
-    saveHistory(chatId,'user',text,'text'),
+    saveHistory(chatId,'user',historyText ?? text,'text'),
     saveHistory(chatId,'assistant',reply,'text')
   ]).catch(()=>{})
   return reply
@@ -736,9 +752,9 @@ async function _processWithModelForTest(text: string, _chatId: number): Promise<
   return reply
 }
 
-export async function processMessage(text: string, chatId: number): Promise<string> {
+export async function processMessage(text: string, chatId: number, historyText?: string): Promise<string> {
   if (!process.env.ANTHROPIC_API_KEY) return '⚠️ Добавь ANTHROPIC_API_KEY в Vercel.'
-  return processWithModel(text, chatId, routeModel(text))
+  return processWithModel(text, chatId, routeModel(text), historyText)
 }
 
 export async function processImage(fileId: string, chatId: number, caption?: string): Promise<string> {

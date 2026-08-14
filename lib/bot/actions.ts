@@ -155,6 +155,13 @@ export async function executeAction(action: BotAction, userText?: string): Promi
 
   // ════════════ РАСХОДЫ ════════════════════════════════════════════
   if (action.type === 'add_expense' && action.amount) {
+    // Дата с чека/фото или названная пользователем — иначе теряется при
+    // задваивании фото/голоса за прошлые дни. Валидируем формат на всякий
+    // случай: модель могла прислать не то.
+    const expDate = /^\d{4}-\d{2}-\d{2}$/.test(String((action as { date?: string }).date ?? ''))
+      ? String((action as { date?: string }).date)
+      : new Date().toISOString().split('T')[0]
+
     // Антидубль: та же сумма за последние 5 минут. Описание сравниваем только
     // если оно есть — иначе ilike('') не совпадал ни с чем и дубли проходили.
     const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString()
@@ -184,7 +191,7 @@ export async function executeAction(action: BotAction, userText?: string): Promi
       }, { onConflict: 'user_id,month_key,key' })
       await s.from('expenses').insert({
         user_id: USER_ID, month_key: monthKey,
-        expense_date: new Date().toISOString().split('T')[0],
+        expense_date: expDate,
         category: action.category ?? 'Прочее',
         amount: Math.round(action.amount),
         description: action.description ?? null,
@@ -203,7 +210,7 @@ export async function executeAction(action: BotAction, userText?: string): Promi
       }
       await s.from('expenses').insert({
         user_id: USER_ID, month_key: monthKey,
-        expense_date: new Date().toISOString().split('T')[0],
+        expense_date: expDate,
         category: action.category ?? 'Прочее',
         amount: Math.round(action.amount),
         description: action.description ?? null,
@@ -214,7 +221,7 @@ export async function executeAction(action: BotAction, userText?: string): Promi
       return
     }
 
-    await s.from('expenses').insert({user_id:USER_ID,month_key:monthKey,expense_date:new Date().toISOString().split('T')[0],category:action.category??'Прочее',amount:Math.round(action.amount),description:action.description??null,source_type:'debit'})
+    await s.from('expenses').insert({user_id:USER_ID,month_key:monthKey,expense_date:expDate,category:action.category??'Прочее',amount:Math.round(action.amount),description:action.description??null,source_type:'debit'})
     const { data:u } = await s.from('users').select('debit_balance').eq('id',USER_ID).single()
     const prevBal = Number(u?.debit_balance ?? 0)
     const newBal = Math.round((prevBal - action.amount) * 100) / 100

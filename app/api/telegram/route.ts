@@ -69,14 +69,26 @@ export async function POST(req: Request) {
       const transcribed = await transcribeVoice(fileId)
       if (transcribed) {
         await sendTelegram(chatId, `🎙 _«${transcribed}»_`)
-        // Логируем голосовое с типом 'voice'
-        await import('@/lib/bot').then(b => b.logMessage && b.logMessage(chatId, 'user', `[голос] ${transcribed}`, 'voice'))
-        // ЗАДАЧА 3: длинное голосовое (>800 символов) = выгрузка мыслей → в идеи, не команда
+        // ЗАДАЧА 3 (пересмотрено): длинное голосовое ≠ автоматически "выгрузка
+        // мыслей". Реальный случай: пользователь голосом с цифрами исправлял
+        // баланс и траты (1358 симв, полноценная финансовая коррекция) —
+        // чистый порог по длине пометил бы это "не финансовой командой" и
+        // велел боту просто сложить в идеи, откуда и растёт "бот меня не слышит".
+        // Теперь смотрим на СОДЕРЖАНИЕ: если есть цифры и финансовые слова —
+        // это команда, даже если длинная. "Выгрузка мыслей" — это длинно И
+        // без единого числа.
         const LONG_VOICE = 800
-        const voiceText = transcribed.length > LONG_VOICE
+        const hasNumbers = /\d{2,}/.test(transcribed)
+        const hasFinanceWords = /дебет|баланс|трат|перевод|долг|кредит|наличн|карт|банк|₽|рубл|оплат|погас/i.test(transcribed)
+        const looksFinancial = hasNumbers && hasFinanceWords
+        const voiceText = (transcribed.length > LONG_VOICE && !looksFinancial)
           ? `[ДЛИННОЕ ГОЛОСОВОЕ ${transcribed.length} симв — это выгрузка мыслей/идей. Сохрани суть через add_idea (можно несколько идей отдельными вызовами), затем кратко перечисли что записал. НЕ выполняй как финансовую команду.]\n\n${transcribed}`
           : transcribed
-        const reply = await processMessage(voiceText, chatId)
+        // historyText — чистая транскрипция без инъекции инструкции. Раньше
+        // и logMessage, и внутренний saveHistory писали ОДНО и то же голосовое
+        // дважды разным текстом: инструкция утекала в историю как будто её
+        // произнёс пользователь.
+        const reply = await processMessage(voiceText, chatId, `[голос] ${transcribed}`)
         await sendTelegram(chatId, reply)
       } else {
         await sendTelegram(chatId, '🎙 Голос не подключён. Добавь GROQ_API_KEY в Vercel (бесплатно на console.groq.com).')
