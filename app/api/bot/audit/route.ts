@@ -74,12 +74,15 @@ export async function GET(req: Request) {
   let recentMessages: unknown[] = []
   if (msgCount) {
     const CHAT_ID = Number(process.env.ALLOWED_TELEGRAM_CHAT_ID)
+    const { count: totalMsgCount } = await db.from('bot_messages')
+      .select('id', { count: 'exact', head: true }).eq('chat_id', CHAT_ID)
     const { data } = await db.from('bot_messages')
       .select('role,content,created_at,msg_type')
       .eq('chat_id', CHAT_ID)
       .order('created_at', { ascending: false })
       .limit(Number(msgCount))
     recentMessages = (data ?? []).reverse()
+    ;(recentMessages as unknown[]).unshift({ __total_in_table__: totalMsgCount })
   }
 
   // ?donebacklog=title-fragment1,title-fragment2 — пометить готовым (уже сделано, статус устарел)
