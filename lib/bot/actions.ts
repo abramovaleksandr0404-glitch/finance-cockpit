@@ -246,6 +246,79 @@ export async function executeAction(action: BotAction, userText?: string): Promi
 
 
   // ── РАСХОДЫ: удаление / переклассификация / мультидневные ────────────
+  } else if (action.type === 'add_expenses_batch') {
+    // Массовый ввод: фото выписки, список за неделю голосом. Один вызов
+    // вместо N отдельных add_expense — раньше модель упиралась в лимит
+    // токенов на длинных пакетах и часть трат терялась молча без единой
+    // ошибки. Обрабатываем строго последовательно, не параллельно: каждая
+    // трата с дебета должна видеть баланс ПОСЛЕ предыдущей, иначе при
+    // параллельной записи чтения гонятся за одним и тем же старым числом.
+    const items = ((action as { items?: unknown[] }).items ?? []) as Array<{
+      amount?: number; category?: string; description?: string; date?: string; source?: string
+    }>
+    if (!items.length) return
+    // Фото без подписи легитимно не содержит цифр в ТЕКСТЕ сообщения — сами
+    // суммы в изображении, не в подписи. Поэтому здесь НЕ требуем число в
+    // тексте (это сломало бы ровно тот сценарий, который инструмент создан
+    // чинить). Проверяем только сослагательное наклонение сопровождающего
+    // текста — «что если бы у меня было столько трат» не должно записаться.
+    if (_hypo) {
+      console.log('[add_expenses_batch] ЗАБЛОКИРОВАНО: сопровождающий текст сослагательный')
+      setWriteBlocked('add_expenses_batch')
+      return
+    }
+    let cashDelta = 0
+    const cardDeltas: Record<string, number> = {}
+    let debitDelta = 0
+    let inserted = 0
+    for (const item of items) {
+      if (!item.amount || item.amount <= 0) continue
+      const src = item.source ?? 'debit'
+      const expDate = /^\d{4}-\d{2}-\d{2}$/.test(String(item.date ?? ''))
+        ? String(item.date)
+        : new Date().toISOString().split('T')[0]
+      await s.from('expenses').insert({
+        user_id: USER_ID, month_key: monthKey, expense_date: expDate,
+        category: (item.category && VALID_CATEGORIES.includes(item.category)) ? item.category : 'Прочее',
+        amount: Math.round(item.amount),
+        description: sanitizeStr(item.description) ?? null,
+        source_type: src === 'debit' ? 'debit' : (src === 'cash' ? 'cash' : 'card'),
+      })
+      inserted++
+      if (src === 'cash') cashDelta += Math.round(item.amount)
+      else if (src === 'debit') debitDelta += Math.round(item.amount)
+      else {
+        const cardName = src === 'credit_tbank' ? 'Т-Банк' : src === 'credit_sber' ? 'Сбер кредитка' : 'Яндекс Сплит'
+        cardDeltas[cardName] = (cardDeltas[cardName] ?? 0) + Math.round(item.amount)
+      }
+    }
+    if (cashDelta > 0) {
+      const { data: cur } = await s.from('bot_anchors').select('value')
+        .eq('user_id', USER_ID).eq('key', 'cash_on_hand').eq('month_key', 'global').maybeSingle()
+      await s.from('bot_anchors').upsert({
+        user_id: USER_ID, month_key: 'global', key: 'cash_on_hand',
+        value: String(Math.max(0, Math.round(Number(cur?.value ?? 0)) - cashDelta)),
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'user_id,month_key,key' })
+    }
+    if (debitDelta > 0) {
+      const { data: u } = await s.from('users').select('debit_balance').eq('id', USER_ID).single()
+      const prevBal = Number(u?.debit_balance ?? 0)
+      await s.from('users').update({
+        debit_balance: Math.round((prevBal - debitDelta) * 100) / 100,
+        debit_updated_at: new Date().toISOString(),
+      }).eq('id', USER_ID)
+      await recordDebitChange(s, prevBal, prevBal - debitDelta, `Пакет трат: ${inserted} операций`, 'batch')
+    }
+    for (const [cardName, delta] of Object.entries(cardDeltas)) {
+      const { data: card } = await s.from('cards').select('id,current_debt')
+        .eq('user_id', USER_ID).ilike('name', `%${cardName}%`).maybeSingle()
+      if (card) {
+        await s.from('cards').update({ current_debt: Number(card.current_debt ?? 0) + delta }).eq('id', card.id)
+      }
+    }
+    invalidateCache('core_state', 'context', 'fin_summary', 'loans_summary')
+
   } else if (action.type === 'delete_expense') {
     let exp
     const isUUID = /^[0-9a-f-]{36}$/i.test(String(action.id ?? ''))

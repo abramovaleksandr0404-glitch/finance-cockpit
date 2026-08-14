@@ -176,7 +176,7 @@ export const TOOLS = [
       required: ['title'],
     } },
   { name: 'add_multiday_expense',
-    description: 'Записать трату рассчитанную на несколько дней (продукты, товары длительного пользования). Вызывай когда пользователь говорит "купил продукты на 5 дней", "взял запас на неделю", "это на N дней".',
+    description: 'Записать трату рассчитанную на несколько дней (продукты, товары длительного пользования). Вызывай когда пользователь говорит "купил продукты на 5 дней", "взял запас на неделю", "это на N дней". НЕ путать с add_expenses_batch — это ОДНА покупка вперёд, а не список прошлых трат.',
     input_schema: {
       type: 'object',
       properties: {
@@ -186,6 +186,29 @@ export const TOOLS = [
         covers_days: { type: 'number', description: 'на сколько дней рассчитана трата' },
       },
       required: ['amount', 'covers_days'],
+    } },
+  { name: 'add_expenses_batch',
+    description: 'Записать НЕСКОЛЬКО разных трат ОДНИМ вызовом — фото банковской выписки/чека за несколько дней, список трат за неделю продиктованный голосом, скрин истории операций. ВСЕГДА используй этот инструмент вместо повторных add_expense, когда транзакций больше одной — иначе не хватит места в ответе и часть трат потеряется молча. Каждая трата — отдельный объект в массиве items.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        items: {
+          type: 'array',
+          description: 'Список трат, каждая со своими amount/date/source',
+          items: {
+            type: 'object',
+            properties: {
+              amount: { type: 'number' },
+              category: { type: 'string', enum: ['Еда и кафе','Транспорт','Здоровье','Развлечения','Одежда','Инвестиции','Прочее'] },
+              description: { type: 'string' },
+              date: { type: 'string', description: 'YYYY-MM-DD — дата именно ЭТОЙ транзакции с чека/выписки, не сегодня' },
+              source: { type: 'string', enum: ['debit','cash','credit_tbank','credit_sber','split'] },
+            },
+            required: ['amount','date','source'],
+          },
+        },
+      },
+      required: ['items'],
     } },
   { name:'show_balance_history',
     description:'История изменений дебетового баланса. Вызывай на: "история баланса", "как менялся дебет", "откуда деньги", "почему баланс изменился".',

@@ -172,7 +172,10 @@ async function callClaude(modelId: string, systemBlocks: unknown[], messages: un
     ...TOOLS.slice(0, -1),
     { ...TOOLS[TOOLS.length - 1], cache_control: { type: 'ephemeral' } }
   ]
-  const bodyObj: Record<string, unknown> = { model:modelId, max_tokens:1500, system:systemBlocks, messages }
+  // 2500, не 1500: потолок не тратит деньги за неиспользованный запас — платим
+  // только за реально сгенерированное. Пакетный ввод (много трат за раз)
+  // упирался в старый потолок посреди генерации JSON и терял часть трат.
+  const bodyObj: Record<string, unknown> = { model:modelId, max_tokens:2500, system:systemBlocks, messages }
   // noTools=true в финализирующем запросе — модель ОБЯЗАНА дать текст, не может звать инструменты
   if (!noTools) bodyObj.tools = toolsWithCache
   const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -481,7 +484,7 @@ async function handleTool(name: string, input: Record<string,unknown>, userText?
   // меняющий деньги, не должен сработать. Точечных проверок недостаточно —
   // модель обходила их, вызывая соседний инструмент (early_repay → update_loan).
   const MONEY_WRITES = new Set([
-    'add_expense', 'add_multiday_expense', 'delete_expense', 'mark_card_payment',
+    'add_expense', 'add_expenses_batch', 'add_multiday_expense', 'delete_expense', 'mark_card_payment',
     'early_repay', 'mark_loan_paid', 'update_loan', 'set_month_payment', 'mark_goal_bought', 'pay_card_debt', 'update_cash', 'manage_recurring_income', 'manage_debt_owed_to_me',
     'mark_fixed_paid', 'mark_fixed_paid_with_amount', 'mark_single_fixed',
     'set_balance', 'update_salary', 'mark_salary', 'mark_recurring_received',
