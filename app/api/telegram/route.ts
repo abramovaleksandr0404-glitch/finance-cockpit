@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { processMessage, processImage, sendTelegram, transcribeVoice, storeChatId, executeAction, checkDeployNotification } from '@/lib/bot'
+import { processMessage, processImage, processImages, sendTelegram, transcribeVoice, storeChatId, executeAction, checkDeployNotification, addToMediaGroup, listMediaGroup, clearMediaGroup } from '@/lib/bot'
 
 const WEBHOOK_SECRET = process.env.BOT_WEBHOOK_SECRET
 
@@ -99,9 +99,38 @@ export async function POST(req: Request) {
     // ── Фото / скрин ──────────────────────────────────────────
     const photos = message.photo as { file_id: string; file_size: number }[] | undefined
     const document = message.document as { file_id: string; mime_type?: string } | undefined
+    const mediaGroupId = message.media_group_id as string | undefined
     if (photos?.length || document?.mime_type?.startsWith('image/')) {
       const fileId = photos ? photos[photos.length - 1].file_id : document!.file_id
       const caption = (message.caption as string) || undefined
+
+      if (mediaGroupId) {
+        // Альбом: Telegram шлёт каждое фото ОТДЕЛЬНЫМ вебхуком — своя
+        // serverless-функция без общей памяти с соседними фото. Подпись
+        // достаётся только ПЕРВОМУ фото группы. Живой случай: пользователь
+        // прислал 3 фото Т-Банка + 1 Сбер с одной подписью — бот честно
+        // ответил "вижу только одно фото".
+        //
+        // Решение: буферизуем в БД, ждём debounce-окно. Кто из фото группы
+        // "последний" (за время ожидания больше фото не пришло) — тот
+        // забирает всю группу и отвечает одним сообщением на все сразу.
+        // Остальные молча завершаются без ответа пользователю.
+        await addToMediaGroup(mediaGroupId, fileId, caption)
+        const before = await listMediaGroup(mediaGroupId)
+        await new Promise(r => setTimeout(r, 2200))
+        const after = await listMediaGroup(mediaGroupId)
+        if (after.length !== before.length || after.length === 0) {
+          // Выросло за время ожидания — не последний, промолчать.
+          // Пусто — кто-то другой уже забрал группу первым.
+          return NextResponse.json({ ok: true })
+        }
+        await clearMediaGroup(mediaGroupId, after.map(a => a.fileId))
+        const groupCaption = after.find(a => a.caption)?.caption
+        const reply = await processImages(after.map(a => a.fileId), chatId, groupCaption)
+        await sendTelegram(chatId, reply)
+        return NextResponse.json({ ok: true })
+      }
+
       const reply = await processImage(fileId, chatId, caption)
       await sendTelegram(chatId, reply)
       return NextResponse.json({ ok: true })

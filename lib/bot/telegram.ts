@@ -128,3 +128,43 @@ function splitMsg(text: string, limit: number): string[] {
   while (i < text.length) { parts.push(text.slice(i, i+limit)); i += limit }
   return parts
 }
+
+// ── Буфер альбомов Telegram ──────────────────────────────────────────────
+// Каждое фото альбома приходит ОТДЕЛЬНЫМ вебхуком — своя serverless-функция,
+// без общей памяти с соседними фото. Бот раньше видел альбом из 4 фото как
+// 4 независимых сообщения: подпись Telegram кладёт только на ПЕРВОЕ фото
+// группы, остальные три приходят без контекста вообще. Живой случай: "3 фото
+// Т-Банка + 1 Сбер" — бот честно ответил "вижу только одно фото".
+//
+// Решение — durable-буфер в bot_anchors с debounce в route.ts: каждое фото
+// пишет СВОЙ ключ (не общий массив — иначе конкурентная запись гонится за
+// одним и тем же старым значением и теряет соседние фото), а последнее
+// подождавшее фото забирает всю группу разом.
+//
+// Отдельный ключ на файл, а не общий JSON-массив: два фото могут прийти
+// почти одновременно, и read-modify-write на одном ключе потерял бы одно из
+// них — это тот же класс гонки, что и B1 (расщеплённое состояние), только
+// в БД, а не в памяти процесса.
+export async function addToMediaGroup(groupId: string, fileId: string, caption?: string): Promise<void> {
+  const key = `media_group:${groupId}:${fileId}`
+  await db().from('bot_anchors').upsert({
+    user_id: USER_ID, month_key: 'global', key,
+    value: JSON.stringify({ fileId, caption: caption ?? null }),
+    updated_at: new Date().toISOString(),
+  }, { onConflict: 'user_id,month_key,key' })
+}
+
+export async function listMediaGroup(groupId: string): Promise<{ fileId: string; caption?: string }[]> {
+  const { data } = await db().from('bot_anchors').select('value')
+    .eq('user_id', USER_ID).eq('month_key', 'global').like('key', `media_group:${groupId}:%`)
+  const out: { fileId: string; caption?: string }[] = []
+  for (const row of data ?? []) {
+    try { out.push(JSON.parse(String(row.value))) } catch { /* пропускаем битую запись */ }
+  }
+  return out
+}
+
+export async function clearMediaGroup(groupId: string, fileIds: string[]): Promise<void> {
+  const keys = fileIds.map(f => `media_group:${groupId}:${f}`)
+  await db().from('bot_anchors').delete().eq('user_id', USER_ID).eq('month_key', 'global').in('key', keys)
+}

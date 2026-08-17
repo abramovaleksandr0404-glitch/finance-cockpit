@@ -6,9 +6,11 @@ import { db, mk, rub, pct, quarterOf, advanceDay, lastWorkingDayOfMonth,
   annuityPaymentFor, annuityMonthsFor, isGoalThisMonth, monthsUntil, addMonths,
   stripLoneSurrogates, deepCleanSurrogates, withPrefixCache, USER_ID, TG } from './bot/shared'
 import { getHistory, saveHistory, logMessage, checkDeployNotification, storeChatId,
-  transcribeVoice, sendTelegramWithButtons, sendTelegram } from './bot/telegram'
+  transcribeVoice, sendTelegramWithButtons, sendTelegram,
+  addToMediaGroup, listMediaGroup, clearMediaGroup } from './bot/telegram'
 export { getHistory, saveHistory, logMessage, checkDeployNotification, storeChatId,
-  transcribeVoice, sendTelegramWithButtons, sendTelegram }
+  transcribeVoice, sendTelegramWithButtons, sendTelegram,
+  addToMediaGroup, listMediaGroup, clearMediaGroup }
 import { runInRequest, runAsSystem, textIsHypothetical, textHasAmount, getLastUserMessage, isHypothetical, userMessageHasAmount,
   setWriteBlocked, takeWriteBlocked, setCorrectionRejected, getCorrectionRejected,
   setMemoryOutcome, takeMemoryOutcome, setActionUnrecognized, takeActionUnrecognized,
@@ -773,30 +775,53 @@ export async function processMessage(text: string, chatId: number, historyText?:
   return processWithModel(text, chatId, routeModel(text), historyText)
 }
 
-export async function processImage(fileId: string, chatId: number, caption?: string): Promise<string> {
+// Множественное число — основная реализация. Все фото уходят модели ОДНИМ
+// сообщением (несколько image-блоков в одном user-turn), чтобы она видела
+// целиком альбом ПЕРЕД ответом, а не по одному фото за раз без контекста
+// соседних. processImage (одно фото) — тонкая обёртка поверх этой функции.
+export async function processImages(fileIds: string[], chatId: number, caption?: string): Promise<string> {
   if (!process.env.ANTHROPIC_API_KEY) return '⚠️ Нужен ANTHROPIC_API_KEY.'
+  if (!fileIds.length) return '❌ Нет фото для обработки.'
   try {
-    const fileRes = await fetch(`${TG}/getFile?file_id=${fileId}`)
-    const { result } = await fileRes.json()
-    if (!result?.file_path) return '❌ Не удалось получить файл'
-    const imgRes = await fetch(`https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${result.file_path}`)
-    const buf = await imgRes.arrayBuffer()
-    const base64 = Buffer.from(buf).toString('base64')
-    const mime = result.file_path.endsWith('.png') ? 'image/png' : 'image/jpeg'
+    const downloaded = await Promise.all(fileIds.map(async (fileId) => {
+      const fileRes = await fetch(`${TG}/getFile?file_id=${fileId}`)
+      const { result } = await fileRes.json()
+      if (!result?.file_path) return null
+      const imgRes = await fetch(`https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${result.file_path}`)
+      const buf = await imgRes.arrayBuffer()
+      const base64 = Buffer.from(buf).toString('base64')
+      const mime = result.file_path.endsWith('.png') ? 'image/png' : 'image/jpeg'
+      return { base64, mime }
+    }))
+    const images = downloaded.filter((i): i is { base64: string; mime: string } => i !== null)
+    if (!images.length) return '❌ Не удалось получить ни одного файла из ' + fileIds.length
     const [context, history] = await Promise.all([getContext(), getHistory(chatId)])
-    const userText = caption ?? 'Что на этом скрине? Если чек/трата — помоги записать (помни: подписки на сервисы = постоянные, не переменные!).'
+    // ВАЖНО: этот текст проходит через ТЕ ЖЕ проверки, что и обычные
+    // сообщения (_hypo, _hasAmt). Раньше здесь стояло "Если чек/трата..." —
+    // слово "Если" САМО срабатывало на нашу же защиту от сослагательных вопросов,
+    // и любое фото без подписи автоматически блокировало запись трат.
+    // Бот годами боролся сам с собой на пустом месте.
+    const userText = caption ?? (images.length > 1
+      ? `Прислано ${images.length} фото одним альбомом — чек(и) или банковская выписка. Сначала посмотри на ВСЕ фото вместе, только потом отвечай. Запиши все траты одним вызовом add_expenses_batch (подписки на сервисы = постоянные, не переменные).`
+      : 'На фото чек или банковская выписка. Запиши все траты, которые видишь (подписки на сервисы = постоянные, не переменные).')
     const systemBlocks = [
       { type:'text', text:SYSTEM_PROMPT, cache_control:{type:'ephemeral'} },
       { type:'text', text:'\n\nКОНТЕКСТ:\n'+context }
     ]
+    const imageBlocks = images.map(img => ({ type:'image', source:{type:'base64', media_type:img.mime, data:img.base64} }))
     const messages = [
       ...history.map(h=>({role:h.role as 'user'|'assistant',content:h.content})),
-      {role:'user',content:[{type:'image',source:{type:'base64',media_type:mime,data:base64}},{type:'text',text:userText}]}
+      {role:'user',content:[...imageBlocks, {type:'text',text:userText}]}
     ]
     const { text: reply } = await runToolLoop('claude-sonnet-5', withPrefixCache(systemBlocks), messages, userText)
-    Promise.all([saveHistory(chatId,'user',`[фото: ${userText}]`), saveHistory(chatId,'assistant',reply)]).catch(()=>{})
+    const savedNote = images.length > 1 ? `[фото ×${images.length}: ${userText}]` : `[фото: ${userText}]`
+    Promise.all([saveHistory(chatId,'user',savedNote), saveHistory(chatId,'assistant',reply)]).catch(()=>{})
     return reply
   } catch(err) { console.error('[vision]',err); return '❌ Ошибка чтения.' }
+}
+
+export async function processImage(fileId: string, chatId: number, caption?: string): Promise<string> {
+  return processImages([fileId], chatId, caption)
 }
 
 // Возвращает null если дайджест собрать не удалось (нет ключа / нет кредитов / ошибка API).
