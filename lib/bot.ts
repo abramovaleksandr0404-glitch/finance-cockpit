@@ -12,6 +12,7 @@ export { getHistory, saveHistory, logMessage, checkDeployNotification, storeChat
 import { runInRequest, runAsSystem, textIsHypothetical, textHasAmount, getLastUserMessage, isHypothetical, userMessageHasAmount,
   setWriteBlocked, takeWriteBlocked, setCorrectionRejected, getCorrectionRejected,
   setMemoryOutcome, takeMemoryOutcome, setActionUnrecognized, takeActionUnrecognized,
+  takeActionNotFound,
   resetActionFlags, recordUsage, getReqUsage, cached, invalidateCache } from './bot/state'
 export { runAsSystem }
 import { computeFinancialState, getContext, getLoansSummaryJson, getFinancialSummaryJson,
@@ -506,6 +507,18 @@ async function handleTool(name: string, input: Record<string,unknown>, userText?
       saved: false,
       reason: `«${unknownType}» НЕ реализован — такого действия не существует в системе. Ничего не произошло.`,
       what_to_do: 'НЕ говори пользователю что что-то удалено/изменено/выполнено. Скажи прямо: "у меня нет инструмента для этого", как учит правило честности.',
+    })
+  }
+  const notFound = takeActionNotFound()
+  if (notFound) {
+    // Без этого модель падала в общий блок с балансом/картами и СОЧИНЯЛА
+    // детальный рассказ об успехе поверх операции, которая ничего не нашла.
+    // Живой случай: "удали такси 450 от 13 августа" → ноль совпадений →
+    // бот всё равно ответил "✅ Удалена трата... Дебет: 33 245₽".
+    return JSON.stringify({
+      saved: false,
+      reason: `Не нашёл ${notFound} в базе. Ничего не удалено и не изменено.`,
+      what_to_do: 'НЕ говори "удалено" или "готово". Скажи прямо что не нашёл такую запись, и спроси уточнение (точная сумма, дата, описание) или предложи показать список последних трат для выбора.',
     })
   }
   const blocked = takeWriteBlocked()

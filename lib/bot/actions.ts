@@ -11,7 +11,7 @@
 // неприменимы, потому что текста пользователя не было.
 import { SupabaseClient } from '@supabase/supabase-js'
 import { db, mk, USER_ID, annuityPaymentFor, annuityMonthsFor, monthsUntil, addMonths } from './shared'
-import { invalidateCache, setWriteBlocked, setActionUnrecognized,
+import { invalidateCache, setWriteBlocked, setActionUnrecognized, setActionNotFound,
   setCorrectionRejected, setMemoryOutcome, textIsHypothetical, textHasAmount } from './state'
 import { updateAnchors } from './core'
 import { computeWorkingDays, computeVacationAdjustment } from '../calc'
@@ -331,8 +331,27 @@ export async function executeAction(action: BotAction, userText?: string): Promi
     } else {
       const { data } = await s.from('expenses').select('id,amount,description,source_type').eq('user_id',USER_ID).eq('month_key',monthKey).ilike('description',`%${action.id}%`).order('created_at',{ascending:false}).limit(1).maybeSingle()
       exp = data
+      // Модель иногда передаёт "такси 450" целиком — в description только
+      // "такси", буквальное совпадение с суммой внутри строки не находится.
+      // Пробуем ещё раз без цифр, прежде чем сдаться.
+      if (!exp) {
+        const withoutDigits = String(action.id).replace(/\d+/g, '').trim()
+        if (withoutDigits && withoutDigits !== action.id) {
+          const { data: retry } = await s.from('expenses').select('id,amount,description,source_type').eq('user_id',USER_ID).eq('month_key',monthKey).ilike('description',`%${withoutDigits}%`).order('created_at',{ascending:false}).limit(1).maybeSingle()
+          exp = retry
+        }
+      }
     }
-    if (!exp) return // Запись не найдена — бот сообщит что не нашёл
+    if (!exp) {
+      // Раньше здесь стоял комментарий "бот сообщит что не нашёл" — неверно:
+      // без явного сигнала handleTool падал в общий блок с балансом, и
+      // модель СОЧИНЯЛА детальный рассказ об успехе поверх пустой операции.
+      // Живой случай: "удали такси 450 от 13 августа" → ничего не найдено →
+      // бот всё равно ответил "✅ Удалена трата... Дебет: 33 245₽", запись
+      // осталась в базе.
+      setActionNotFound(`трата "${action.id ?? 'последняя'}"`)
+      return
+    }
     if (exp) {
       await s.from('expenses').delete().eq('id',exp.id)
       // Трата с карты — возвращаем на карту, а не на дебет.

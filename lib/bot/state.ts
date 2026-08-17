@@ -20,13 +20,14 @@ type ReqState = {
   correctionRejected: boolean
   memoryOutcome: string
   actionUnrecognized: string
+  notFound: string
   usage: Record<string, number>
   lastUsage: Record<string, number>
 }
 
 function fresh(trusted: boolean): ReqState {
   return { userMessage: '', trusted, writeBlocked: '', correctionRejected: false,
-    memoryOutcome: '', actionUnrecognized: '', usage: {}, lastUsage: {} }
+    memoryOutcome: '', actionUnrecognized: '', notFound: '', usage: {}, lastUsage: {} }
 }
 
 const als = new AsyncLocalStorage<ReqState>()
@@ -111,12 +112,20 @@ export function takeMemoryOutcome(): string { const s = cur(); const v = s.memor
 export function setActionUnrecognized(actionType: string): void { cur().actionUnrecognized = actionType }
 export function takeActionUnrecognized(): string { const s = cur(); const v = s.actionUnrecognized; s.actionUnrecognized = ''; return v }
 
+// Действие «найти-и-изменить» (удалить трату, отметить цель купленной) не
+// нашло подходящую запись и тихо вышло. Без этого флага handleTool падал в
+// общий блок, отдающий баланс/карты — вида «факт из БД», и модель сочиняла
+// правдоподобный рассказ об успехе поверх операции, которая ничего не сделала.
+export function setActionNotFound(what: string): void { cur().notFound = what }
+export function takeActionNotFound(): string { const s = cur(); const v = s.notFound; s.notFound = ''; return v }
+
 export function resetActionFlags(): void {
   const s = cur()
   s.correctionRejected = false
   s.memoryOutcome = ''
   s.writeBlocked = ''
   s.actionUnrecognized = ''
+  s.notFound = ''
 }
 
 // ── Учёт токенов ─────────────────────────────────────────────────────────
