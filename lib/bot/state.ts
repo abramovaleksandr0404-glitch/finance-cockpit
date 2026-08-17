@@ -90,7 +90,12 @@ export function textIsHypothetical(text: string): boolean {
   return HYPOTHETICAL.test(text)
 }
 export function textHasAmount(text: string): boolean {
-  return /\d{3,}/.test((text ?? '').replace(/\s/g, ''))
+  // \d{3,} ловит обычные суммы. Отдельно \b0\b — иначе установка в НОЛЬ
+  // никогда не проходила защиту: "Т-Банк дебет 0" не содержит 3+ цифр
+  // подряд. Живой случай: пользователь трижды повторил "Т-Банк дебет 0",
+  // бот трижды отказал, ссылаясь на "поломанный set_balance" — на самом
+  // деле ломался не set_balance, а эта проверка перед ним.
+  return /\d{3,}|\b0\b/.test((text ?? '').replace(/\s/g, ''))
 }
 
 export function userMessageHasAmount(): boolean {
